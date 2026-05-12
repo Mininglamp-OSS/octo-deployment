@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: octo-matter
+  labels:
+    app: octo-matter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: octo-matter
+  template:
+    metadata:
+      labels:
+        app: octo-matter
+    spec:
+      containers:
+        - name: octo-matter
+          image: mininglamposs/octo-matter:latest
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          envFrom:
+            - configMapRef:
+                name: octo-matter-config
+            - secretRef:
+                name: octo-matter-secret
+          volumeMounts:
+            - name: logs
+              mountPath: /home/logs
+      volumes:
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: octo-matter
+  labels:
+    app: octo-matter
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    app: octo-matter

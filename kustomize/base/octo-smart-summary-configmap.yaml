@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: octo-smart-summary-config
+data:
+  DMWORK_API_URL: "http://octo-server:8090"
+  WORKER_TRIGGER_URL: "http://octo-smart-summary-worker:8082/internal/worker-trigger"
+  WORKER_API_CALLBACK_URL: "http://octo-smart-summary-api:8081/internal/task-event"
+  LLM_MODEL: "claude-sonnet-4-6"
+  LLM_MAX_TOKENS: "4096"
+  LLM_TIMEOUT: "120"
+  API_PORT: "8080"
+  API_INTERNAL_PORT: "8081"
+  WORKER_INTERNAL_PORT: "8082"
+  WORKER_LISTEN_ADDR: "0.0.0.0"
+  WORKER_MAX_CONCURRENT_TASKS: "20"
+  WORKER_MAP_CONCURRENCY: "5"
+  WORKER_POLL_INTERVAL_SECONDS: "2"
+  WORKER_TASK_LEASE_MINUTES: "10"
+  WORKER_MAX_RETRY: "3"

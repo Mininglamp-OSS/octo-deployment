@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: octo-server-env
+data:
+  # Non-sensitive runtime settings. Secret-class env vars (JWT/HMAC/OIDC client secret,
+  # master key, internal tokens, APNS key paths) belong in octo-server-secret.
+
+  # Rate limiting
+  DM_API_RATELIMIT_BURST: "1000"
+  DM_API_RATELIMIT_RPS: "500"
+
+  # File handling
+  DM_FILE_EXTRA_ALLOWED: ".tgz"
+
+  # Metrics
+  DM_METRICS_ENABLED: "true"
+
+  # OIDC (non-secret parts only; client_secret / RT_ENC_KEY in Secret)
+  DM_OIDC_ENABLED: "false"
+  DM_OIDC_PROVIDER_ID: "aegis"
+  DM_OIDC_PROVIDER_NAME: "Aegis"
+  DM_OIDC_PROVIDER_ISSUER: "https://accounts.example.com"
+  DM_OIDC_PROVIDER_REDIRECT_URI: "https://example.com/v1/auth/oidc/aegis/callback"
+  DM_OIDC_PROVIDER_SCOPES: "openid,profile,email,phone,offline_access,identity_verification"
+  DM_OIDC_RESET_PASSWORD_URL: "https://accounts.example.com/profile/mfa#password"
+  DM_OIDC_RETURN_TO_HOSTS: "example.com"
+
+  # APNS push (non-secret parts)
+  DM_PUSH_APNS_DEV: "false"
+  DM_PUSH_APNS_TOPIC: "com.example.octo"
+
+  # Space / thread features
+  DM_SPACE_DISABLE_USER_CREATE: "true"
+  DM_THREAD_ON: "true"
+
+  # WukongIM endpoints (public TCP/WS addresses — adjust to your deploy)
+  DM_WUKONGIM_TCPADDR: "tcp.example.com:5100"
+  DM_WUKONGIM_WSADDR: "ws://tcp.example.com:5200"
+  DM_WUKONGIM_WSSADDR: "wss://example.com/ws"
+
+  # OCTO JWT/verify
+  OCTO_JWT_ALG: "HS256"
+  OCTO_VERIFY_RETURN_TO_DEFAULT: "octo://verified"
+  OCTO_VERIFY_URL_BASE: "https://accounts.example.com/verify"
+
+  # ASR log buffer
+  ASR_LOG_BUFFER_SIZE: "256"
+  ASR_LOG_DIR: "/data/octo/asr-log-dir"
+  ASR_LOG_RETENTION_DAYS: "7"
+
+  # Voice / LLM (non-secret)
+  VOICE_ENGINE: "qwen"
+  VOICE_LITELLM_TIMEOUT: "60"
+  VOICE_LITELLM_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  VOICE_MODELS: "gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-2.5-pro"
+  VOICE_QWEN_MODELS: "qwen3.5-omni-plus"
+  VOICE_TOTAL_TIMEOUT: "90"

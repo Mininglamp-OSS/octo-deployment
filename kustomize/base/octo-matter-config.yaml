@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: octo-matter-config
+data:
+  APP_ENV: "prod"
+  SERVER_PORT: "8080"
+  DMWORKIM_URL: "http://octo-server"
+  WUKONGIM_URL: "http://wukongim:5001"

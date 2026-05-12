@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: octo-admin
+  labels:
+    app: octo-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: octo-admin
+  template:
+    metadata:
+      labels:
+        app: octo-admin
+    spec:
+      containers:
+        - name: octo-admin
+          image: mininglamposs/octo-admin:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: API_BACKEND
+              valueFrom:
+                configMapKeyRef:
+                  name: octo-admin-config
+                  key: API_BACKEND
+          livenessProbe:
+            httpGet:
+              path: /admin/
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /admin/
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: octo-admin
+spec:
+  selector:
+    app: octo-admin
+  ports:
+    - port: 80
+      targetPort: 80

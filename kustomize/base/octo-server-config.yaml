@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: octo-server-config
+data:
+  tsdd.yaml: |
+    # OCTO server main config. Sensitive fields (db password, COS keys, SMTP password,
+    # wukongIM managerToken, admin password) live in the octo-server-secret Secret —
+    # this ConfigMap only carries non-sensitive structure.
+    mode: "release"
+    grpcAddr: "0.0.0.0:6979"
+    appName: "OCTO"
+    welcomeMessage: "Welcome to OCTO"
+
+    wukongIM:
+      apiURL: "http://wukongim:5001"
+
+    db:
+      # mysqlAddr / redisAddr are provided via env (DM_MYSQL_DSN / DM_REDIS_ADDR)
+      # sourced from octo-server-secret. Leave these placeholders.
+      mysqlAddr: ""
+      redisAddr: ""
+
+    external:
+      ip: "example.com"
+      baseURL: "https://example.com/api"
+
+    fileService: "local"
+    # Switch to "tencentCOS" / "s3" and configure the corresponding block below
+    # if you want object storage. Credentials must live in octo-server-secret.
+    cos:
+      region: ""
+      bucket: ""
+      bucketURL: ""
+      prefix: ""
+
+    register:
+      usernameOn: true
+      emailOn: true
+
+    support:
+      email: "contact@example.com"
+      emailSmtp: "smtp.example.com:465"
+
+    group:
+      sameDayCreateMaxCount: 100

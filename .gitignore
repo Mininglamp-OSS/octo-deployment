@@ -1,0 +1,12 @@
+# Never commit real Secret files. Templates use the *-secret.example.yaml suffix
+# and are tracked; the populated copies must stay local.
+kustomize/**/*-secret.yaml
+!kustomize/**/*-secret.example.yaml
+
+# Only the canonical OSS-template overlays (dev/prod) are tracked.
+# Any environment-specific overlay (with real credentials) stays local.
+kustomize/overlays/**
+!kustomize/overlays/dev/
+!kustomize/overlays/dev/**
+!kustomize/overlays/prod/
+!kustomize/overlays/prod/**

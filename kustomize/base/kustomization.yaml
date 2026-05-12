@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # ConfigMaps
+  - octo-server-config.yaml
+  - octo-server-env-config.yaml
+  - octo-matter-config.yaml
+  - octo-smart-summary-configmap.yaml
+  - octo-web-nginx-config.yaml
+  # Workloads
+  - octo-server.yaml
+  - octo-web.yaml
+  - octo-admin.yaml
+  - octo-matter.yaml
+  - octo-smart-summary-api.yaml
+  - octo-smart-summary-worker.yaml
+  # Secrets (.example.yaml templates are NOT applied — copy them to
+  # *-secret.yaml locally, fill in real values, and apply with
+  # `kubectl apply -n <ns> -f <file>` outside of kustomize).
+
+images:
+  - name: mininglamposs/octo-server
+    newTag: latest
+  - name: mininglamposs/octo-web
+    newTag: latest
+  - name: mininglamposs/octo-admin
+    newTag: latest
+  - name: mininglamposs/octo-matter
+    newTag: latest
+  - name: mininglamposs/octo-smart-summary-api
+    newTag: latest
+  - name: mininglamposs/octo-smart-summary-worker
+    newTag: latest

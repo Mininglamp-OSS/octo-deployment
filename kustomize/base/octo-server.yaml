@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: octo-server
+  labels:
+    app: octo-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: octo-server
+  template:
+    metadata:
+      labels:
+        app: octo-server
+    spec:
+      containers:
+        - name: octo-server
+          image: mininglamposs/octo-server:latest
+          args: ["api"]
+          envFrom:
+            - configMapRef:
+                name: octo-server-env
+            - secretRef:
+                name: octo-server-secret
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+            - name: grpc
+              containerPort: 6979
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /home/configs/tsdd.yaml
+              subPath: tsdd.yaml
+            - name: logs
+              mountPath: /home/logs
+      volumes:
+        - name: config
+          configMap:
+            name: octo-server-config
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: octo-server
+  labels:
+    app: octo-server
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: grpc
+      port: 6979
+      targetPort: grpc
+  selector:
+    app: octo-server
