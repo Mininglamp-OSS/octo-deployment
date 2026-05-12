@@ -21,8 +21,24 @@
 
 - MySQL 8，三个库：`octo`（IM 核心）、`octo_matter`、`octo_summary`
 - Redis 7
-- WuKongIM ≥ v2（IM 长连接后端）
+- [WuKongIM](https://github.com/WuKongIM/WuKongIM) ≥ v2（IM 长连接后端）
 - 兼容 S3 的对象存储（MinIO / AWS S3 / 腾讯 COS 等）
+
+### WuKongIM
+
+OCTO 不内置 IM 引擎，通过 HTTP API + webhook gRPC 调用 [WuKongIM](https://github.com/WuKongIM/WuKongIM)。可以按 <https://docs.githubim.com/zh/installation/overview> 文档选用任一部署方式：
+
+- Docker / docker-compose（单机，最快试用）
+- Kubernetes / Helm（多节点，生产推荐）
+- 直接跑二进制
+
+无论哪种部署方式，WuKongIM 与 `octo-server` 必须在这三处对齐：
+
+| WuKongIM 配置 | OCTO 对应配置 |
+|---|---|
+| `managerToken` | `octo-server-config.tsdd.yaml` → `wukongIM.managerToken`（env 驱动场景则在 `octo-server-secret` 里设 `WUKONGIM_MANAGER_TOKEN`） |
+| `webhook.grpcAddr`（WuKongIM 回调地址） | `<octo-server-svc>:6979`，让 IM 消息事件能回到 OCTO |
+| `external.ip` / `external.wsAddr` / `external.wssAddr`（WuKongIM 对客户端暴露的公网地址） | 与终端客户端经 ingress / LB 访问 WuKongIM 的实际地址一致 |
 
 ## 目录结构
 

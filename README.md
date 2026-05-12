@@ -21,8 +21,24 @@ External infrastructure expected (provisioned separately, **not** in this repo):
 
 - MySQL 8 with three databases — `octo` (IM core), `octo_matter`, `octo_summary`
 - Redis 7
-- WuKongIM ≥ v2 (the IM long-connection backend)
+- [WuKongIM](https://github.com/WuKongIM/WuKongIM) ≥ v2 (the IM long-connection backend)
 - S3-compatible object storage (MinIO, AWS S3, Tencent COS, etc.)
+
+### WuKongIM
+
+OCTO does not embed an IM engine — it consumes [WuKongIM](https://github.com/WuKongIM/WuKongIM) over the latter's HTTP API and webhook gRPC. You can run any of the deployment modes documented at <https://docs.githubim.com/installation/overview>:
+
+- Docker / docker-compose (single node, fastest to try)
+- Kubernetes / Helm (multi-node, for production)
+- Standalone binary
+
+Whichever you pick, three things must line up between WuKongIM and `octo-server`:
+
+| WuKongIM config | OCTO setting |
+|---|---|
+| `managerToken` | `octo-server-config.tsdd.yaml` → `wukongIM.managerToken` (also set as `WUKONGIM_MANAGER_TOKEN` in `octo-server-secret` for env-driven setups) |
+| `webhook.grpcAddr` (the address WuKongIM dials back into) | `<octo-server-svc>:6979` so message events reach OCTO |
+| `external.ip` / `external.wsAddr` / `external.wssAddr` (the public endpoints WuKongIM advertises to clients) | should match how end-user clients reach WuKongIM via your ingress / LB |
 
 ## Layout
 
