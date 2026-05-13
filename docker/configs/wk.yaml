@@ -1,0 +1,27 @@
+# -----------------------------------------------------------------------------
+# WuKongIM configuration for the OCTO stack.
+# Mounted at /root/wukongim/wk.yaml inside the octo-wukongim container.
+# -----------------------------------------------------------------------------
+
+# debug | release | bench
+mode: "debug"
+
+tokenAuthOn: true
+
+# External addresses advertised to clients on GET /route.
+# Override via .env → OCTO_EXTERNAL_IP / OCTO_WK_WS_ADDR / OCTO_WK_WSS_ADDR.
+external:
+  ip: "127.0.0.1"
+  tcpAddr: ""
+  wsAddr: ""
+  wssAddr: ""
+
+monitor:
+  on: true
+  addr: "0.0.0.0:5300"
+
+webhook:
+  grpcAddr: "octo-server:6979"
+
+conversation:
+  on: true

@@ -1,0 +1,48 @@
+# -----------------------------------------------------------------------------
+# OCTO Server runtime config — minimal single-host deployment.
+# -----------------------------------------------------------------------------
+# Values shared with MySQL / Redis / MinIO / WuKongIM match the service
+# names (not ports) on the `octo-net` bridge network declared in
+# docker-compose.yaml. Do not change those strings unless you also rename
+# the corresponding compose services.
+#
+# Credentials with CHANGE_ME_* placeholders are overridden at runtime by
+# Viper's AutomaticEnv (prefix TS_) from the .env file. OSS users only
+# need to edit .env — not this file.
+# -----------------------------------------------------------------------------
+
+# Runtime mode: debug | release
+mode: "release"
+
+external:
+  ip: "127.0.0.1"
+  baseURL: "http://octo.local:28080"
+  # webLoginURL: "http://octo.local:28080/"
+
+# Test-only SMS verification code. Ignored in release mode.
+smsCode: ""
+
+db:
+  mysqlAddr: "root:CHANGE_ME_MYSQL_PASSWORD@tcp(mysql:3306)/octo?charset=utf8mb4&parseTime=true&loc=Local"
+  redisAddr: "redis:6379"
+  redisPass: ""
+
+wukongIM:
+  apiURL: "http://wukongim:5001"
+  managerToken: ""
+
+fileService: "minio"
+minio:
+  url: "http://minio:9000"
+  accessKeyID: "octoadmin"
+  secretAccessKey: "CHANGE_ME_MINIO_PASSWORD"
+
+logger:
+  level: 2
+  dir: "./logs"
+  lineNum: false
+
+register:
+  off: true
+  onlyChina: false
+  emailOn: false
