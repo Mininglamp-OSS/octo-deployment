@@ -1,0 +1,17 @@
+# Caller: delegates to the org-level reusable workflow.
+# Adds every newly opened Issue and PR to Octo Project Board #2.
+name: Auto-add to Octo Board
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  add:
+    uses: Mininglamp-OSS/.github/.github/workflows/auto-add-to-project.yml@main
+    secrets:
+      PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
