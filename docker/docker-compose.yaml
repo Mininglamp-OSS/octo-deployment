@@ -163,14 +163,14 @@ services:
         done
 
         echo "[minio-init] ensuring application user exists"
-        if mc admin user info local "$$OCTO_MINIO_APP_USER" >/dev/null 2>&1; then
-          # Re-set the secret so password rotations in .env take effect on
-          # `docker compose up -d`. This is the only `mc` call that is not
-          # idempotent on its own.
-          mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD" >/dev/null
-        else
-          mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD"
-        fi
+        # `mc admin user add` is upsert-semantics on current MinIO releases:
+        # it creates the user on first call, and overwrites the secret on
+        # subsequent calls. That makes rotation a matter of bumping
+        # OCTO_MINIO_APP_PASSWORD in .env and re-running `up -d`. We swallow
+        # stdout (just a status string, never the secret) to keep logs
+        # clean and avoid any chance of confusing operators with re-prints
+        # on every boot.
+        mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD" >/dev/null
 
         echo "[minio-init] (re)installing octo-app policy"
         mc admin policy create local octo-app /etc/minio/octo-app-policy.json 2>/dev/null \
