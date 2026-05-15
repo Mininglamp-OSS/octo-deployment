@@ -158,24 +158,72 @@ services:
     container_name: octo-server
     restart: unless-stopped
     command: ["api"]
+    # -------------------------------------------------------------------
+    # Why this env block carries TWO names for the same value
+    # -------------------------------------------------------------------
+    # The current octo-server binary configures Viper with
+    # `SetEnvPrefix("TS")` + `SetEnvKeyReplacer(".", "_")` + `AutomaticEnv()`,
+    # so it reads YAML keys like `db.mysqlAddr` from `TS_DB_MYSQLADDR`,
+    # `db.redisAddr` from `TS_DB_REDISADDR`, `wukongIM.managerToken`
+    # from `TS_WUKONGIM_MANAGERTOKEN`, and the `minio.*` block from
+    # the matching `TS_MINIO_*` names. The kustomize overlays use a
+    # different convention (`DM_MYSQL_DSN`, `DM_REDIS_ADDR`,
+    # `WUKONGIM_MANAGER_TOKEN`) that is NOT honoured by the current
+    # binary. We pass both name sets so that:
+    #   - the running binary actually picks the values up (TS_*),
+    #   - any sidecar / external tooling that follows the kustomize
+    #     names keeps working (DM_*).
+    # The aliases can be dropped once octo-server adds explicit BindEnv
+    # mappings for the kustomize names (or unifies on a single prefix).
+    # -------------------------------------------------------------------
     environment:
       TZ: ${TZ:-UTC}
       OCTO_MASTER_KEY: ${OCTO_MASTER_KEY}
       DMWORK_MASTER_KEY: ${OCTO_MASTER_KEY}
-      # Canonical env names align with kustomize/base/octo-server-secret.
-      DM_MYSQL_DSN: "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
-      DM_REDIS_ADDR: "redis:6379"
-      # WuKongIM admin token — must match wk.yaml's tokenAuthOn / WK_TOKEN.
-      WUKONGIM_MANAGER_TOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+      # --- DB / cache: TS_* are read by the binary, DM_* mirror the
+      # --- kustomize/base/octo-server-secret naming for tooling parity.
+      TS_DB_MYSQLADDR:  "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      TS_DB_REDISADDR:  "redis:6379"
+      DM_MYSQL_DSN:     "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      DM_REDIS_ADDR:    "redis:6379"
+      # --- WuKongIM admin token: TS_WUKONGIM_MANAGERTOKEN is what the
+      # --- binary reads (overrides wukongIM.managerToken in tsdd.yaml);
+      # --- WUKONGIM_MANAGER_TOKEN is the kustomize alias. Both come
+      # --- from the same .env value so they cannot drift, and must
+      # --- match wk.yaml's tokenAuthOn / WK_TOKEN.
+      TS_WUKONGIM_MANAGERTOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+      WUKONGIM_MANAGER_TOKEN:   ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
       # Optional inbound webhook HMAC. Compose-only addition (not in
       # kustomize) — explained in .env.example.
       TS_WEBHOOK_SECRET_KEY: ${OCTO_WEBHOOK_SECRET_KEY:-}
       # MinIO credentials surfaced as Viper-style env overrides for the
       # tsdd.yaml `minio:` block. Compose-only — kustomize installs use
       # tencentCOS / s3 instead and ship credentials via octo-server-secret.
-      TS_MINIO_ACCESSKEYID: "${MINIO_ROOT_USER:-octoadmin}"
+      TS_MINIO_ACCESSKEYID:     "${MINIO_ROOT_USER:-octoadmin}"
       TS_MINIO_SECRETACCESSKEY: "${MINIO_ROOT_PASSWORD}"
+      # --- MinIO client-facing download URL.
+      # --- An empty `minio.downloadURL` falls back to `minio.url`
+      # --- (= http://minio:9000), which only resolves inside the
+      # --- octo-net Docker bridge. Browser clients on the host or LAN
+      # --- cannot reach that hostname, so /api/v1/file/* responses
+      # --- become unusable. We override with a host-reachable URL.
+      # ---
+      # --- The host:port form below bypasses nginx — chosen because it
+      # --- works against ANY octo-server image, including ones that do
+      # --- not yet include the path-prefix preservation tracked in
+      # --- octo-server PR#50 (YUJ-728). When that ships, this can be
+      # --- flipped to the path-prefixed nginx form:
+      # ---     http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/minio
+      # --- For host:port to be reachable from non-loopback clients the
+      # --- operator must widen OCTO_MINIO_API_BIND from 127.0.0.1 to
+      # --- 0.0.0.0 in .env (single-host loopback users need no change).
+      TS_MINIO_DOWNLOADURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
       NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
+      # First-admin bootstrap. Uncomment to have octo-server seed a
+      # superAdmin row (username "superAdmin", password bcrypt(<value>))
+      # on first start when the user table is empty. See "First-admin
+      # bootstrap · Option A" in docker/README.md before enabling.
+      # TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
     depends_on:
       mysql:
         condition: service_healthy
@@ -320,7 +368,12 @@ services:
     environment:
       MYSQL_DSN:    "summary:${OCTO_SUMMARY_DB_PASSWORD:-summary}@tcp(mysql:3306)/octo_summary?charset=utf8mb4&parseTime=true"
       IM_MYSQL_DSN: "summary_reader:${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true"
-      # Canonical env names from kustomize/base/octo-smart-summary-config.
+      # The current octo-smart-summary binary requires OCTO_API_URL on
+      # startup (cmd/summary-api/main.go marks it required); without it
+      # the container exits with "required environment variables not
+      # set: OCTO_API_URL". DMWORK_API_URL is the kustomize alias and
+      # is kept so any tooling that still reads it keeps working.
+      OCTO_API_URL:   http://octo-server:8090
       DMWORK_API_URL: http://octo-server:8090
       LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
       LLM_API_KEY:  ${LLM_API_KEY:-}
@@ -353,6 +406,9 @@ services:
     environment:
       MYSQL_DSN:    "summary:${OCTO_SUMMARY_DB_PASSWORD:-summary}@tcp(mysql:3306)/octo_summary?charset=utf8mb4&parseTime=true"
       IM_MYSQL_DSN: "summary_reader:${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true"
+      # Worker shares the same OCTO_API_URL contract as summary-api;
+      # DMWORK_API_URL kept as a kustomize-naming alias.
+      OCTO_API_URL:   http://octo-server:8090
       DMWORK_API_URL: http://octo-server:8090
       LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
       LLM_API_KEY:  ${LLM_API_KEY:-}
