@@ -40,7 +40,12 @@ See [LICENSE](./LICENSE) for the full Apache 2.0 license terms.
 
 > 中文版：[README.zh.md](./README.zh.md)
 >
-> For a single-node Docker Compose trial use [`Mininglamp-OSS/octo-server`](https://github.com/Mininglamp-OSS/octo-server)'s `docker/octo/` stack — it is upstream-maintained and self-contained. This repository focuses on multi-node Kubernetes deployment.
+> For a **single-node Docker Compose** trial, use [`docker/`](./docker/) in
+> this repository — it brings up the full OCTO stack (server + admin + web +
+> matter + smart-summary + WuKongIM + MySQL + Redis + MinIO + nginx) with one
+> `docker compose up -d`. See [`docker/README.md`](./docker/README.md) for the
+> walkthrough. This `kustomize/` tree remains the canonical reference for
+> multi-node Kubernetes deployment.
 
 ## Components
 

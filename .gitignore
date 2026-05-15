@@ -1,3 +1,6 @@
+# Docker Compose local env (contains real passwords — never commit)
+docker/.env
+
 # Never commit real Secret files. Templates use the *-secret.example.yaml suffix
 # and are tracked; the populated copies must stay local.
 kustomize/**/*-secret.yaml
