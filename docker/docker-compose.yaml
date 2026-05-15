@@ -122,8 +122,86 @@ services:
     networks:
       - octo-net
 
+  # ---------------------------------------------------------------------------
+  # MinIO bootstrap (one-shot)
+  # ---------------------------------------------------------------------------
+  # Provisions a dedicated IAM user (`octo-app` by default) scoped to the
+  # bucket whitelist octo-server uses (see modules/file/helpers.go). The
+  # `octo-server` service then mounts THESE credentials as
+  # TS_MINIO_ACCESSKEYID / TS_MINIO_SECRETACCESSKEY instead of the MinIO
+  # root pair, so a leak of the app credentials does not hand over
+  # `mc admin` / console / IAM control.
+  #
+  # Idempotent: every `mc` call is wrapped in `|| true` (or guarded by
+  # `--insecure` semantics on update commands) so re-running the service
+  # after the first boot is a no-op rather than an error. The compose
+  # `service_completed_successfully` gate on octo-server therefore keeps
+  # working across restarts of the stack.
+  minio-init:
+    image: ${OCTO_MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    container_name: octo-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-octoadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      OCTO_MINIO_APP_USER: ${OCTO_MINIO_APP_USER:-octo-app}
+      OCTO_MINIO_APP_PASSWORD: ${OCTO_MINIO_APP_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        if [ -z "$${OCTO_MINIO_APP_PASSWORD:-}" ]; then
+          echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is empty — set it in .env" >&2
+          exit 1
+        fi
+        echo "[minio-init] waiting for MinIO root alias…"
+        until mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+          sleep 1
+        done
+
+        echo "[minio-init] ensuring application user exists"
+        if mc admin user info local "$$OCTO_MINIO_APP_USER" >/dev/null 2>&1; then
+          # Re-set the secret so password rotations in .env take effect on
+          # `docker compose up -d`. This is the only `mc` call that is not
+          # idempotent on its own.
+          mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD" >/dev/null
+        else
+          mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD"
+        fi
+
+        echo "[minio-init] (re)installing octo-app policy"
+        mc admin policy create local octo-app /etc/minio/octo-app-policy.json 2>/dev/null \
+          || mc admin policy update local octo-app /etc/minio/octo-app-policy.json
+
+        echo "[minio-init] attaching octo-app policy to $$OCTO_MINIO_APP_USER"
+        mc admin policy attach local octo-app --user "$$OCTO_MINIO_APP_USER" 2>/dev/null || true
+
+        # Pre-create the bucket whitelist octo-server uses so the first
+        # /api/v1/file/upload call does NOT depend on the app user having
+        # CreateBucket privileges (the policy below intentionally omits
+        # bucket admin actions). Each `mb` is `--ignore-existing` so the
+        # service stays idempotent.
+        for b in file chat moment sticker report chatbg common download group avatar; do
+          mc mb --ignore-existing "local/$$b" >/dev/null
+        done
+
+        echo "[minio-init] done"
+    volumes:
+      - ./configs/minio-octo-app-policy.json:/etc/minio/octo-app-policy.json:ro
+    networks:
+      - octo-net
+
   wukongim:
-    image: wukongim/wukongim:latest
+    # Pinned to a specific WuKongIM release. `:latest` is a moving target —
+    # different channels disagree on whether `tokenAuthOn: true` is honoured
+    # or rejected at startup, and the env-var contract for `managerToken`
+    # has not been stable across pre-2.x builds. Bump deliberately after
+    # validating the new tag against `wk.yaml` (tokenAuthOn) and the
+    # WK_MANAGERTOKEN binding below. Override via .env -> OCTO_WK_IMAGE.
+    image: ${OCTO_WK_IMAGE:-wukongim/wukongim:v2.2.4-20260313}
     container_name: octo-wukongim
     restart: unless-stopped
     environment:
@@ -136,10 +214,16 @@ services:
       # OCTO_WK_WS_ADDR to a literal in .env when they want to override.
       WK_EXTERNAL_WSADDR:  ${OCTO_WK_WS_ADDR:-ws://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/ws}
       WK_EXTERNAL_WSSADDR: ${OCTO_WK_WSS_ADDR:-}
-      # Shared admin token: must match what octo-server uses as
-      # WUKONGIM_MANAGER_TOKEN. Both come from the same .env value so they
-      # cannot drift.
-      WK_TOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+      # Shared admin token. WuKongIM binds env vars to YAML keys via Viper's
+      # default key replacer (`.` -> `_`, upper-cased, prefix `WK_`), so the
+      # YAML key `managerToken` is set from the env var `WK_MANAGERTOKEN`.
+      # There is NO top-level `token` / `WK_TOKEN` key — that name is
+      # silently ignored, which is exactly what the previous revision of
+      # this stack did, and which left `wk.yaml`'s `tokenAuthOn: true`
+      # paired with an empty `managerToken` (= admin endpoints reachable
+      # without auth). The single .env value below feeds both this binding
+      # and octo-server's TS_WUKONGIM_MANAGERTOKEN so they cannot drift.
+      WK_MANAGERTOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
     ports:
       - "${OCTO_WK_API_PORT:-25001}:5001"
       - "${OCTO_WK_TCP_PORT:-25100}:5100"
@@ -203,8 +287,21 @@ services:
       # MinIO credentials surfaced as Viper-style env overrides for the
       # tsdd.yaml `minio:` block. Compose-only — kustomize installs use
       # tencentCOS / s3 instead and ship credentials via octo-server-secret.
-      TS_MINIO_ACCESSKEYID:     "${MINIO_ROOT_USER:-octoadmin}"
-      TS_MINIO_SECRETACCESSKEY: "${MINIO_ROOT_PASSWORD}"
+      #
+      # These are deliberately NOT the MinIO root credentials. The root
+      # credentials are also what `mc admin` and the MinIO console use,
+      # so reusing them here would mean a single env-dump / log spillage
+      # / Docker-socket exposure hands an attacker full IAM control of
+      # the bucket store, not just app-level read/write. The `minio-init`
+      # service (below) provisions a dedicated `octo-app` user scoped to
+      # the buckets octo-server actually touches (`file`, `chat`,
+      # `moment`, `sticker`, `report`, `chatbg`, `common`, `download`,
+      # `group`, `avatar` — the whitelist in
+      # octo-server/modules/file/helpers.go). Rotation now means
+      # restarting `minio-init` + `octo-server` only; the root password
+      # stays put.
+      TS_MINIO_ACCESSKEYID:     "${OCTO_MINIO_APP_USER:-octo-app}"
+      TS_MINIO_SECRETACCESSKEY: "${OCTO_MINIO_APP_PASSWORD}"
       # --- MinIO client-facing download URL.
       # --- An empty `minio.downloadURL` falls back to `minio.url`
       # --- (= http://minio:9000), which only resolves inside the
@@ -249,6 +346,8 @@ services:
         condition: service_started
       minio:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     ports:
       - "${OCTO_SERVER_PORT:-28081}:8090"
     volumes:
@@ -427,17 +526,28 @@ services:
       OCTO_API_URL:   http://octo-server:8090
       DMWORK_API_URL: http://octo-server:8090
       LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
-      LLM_API_KEY:  ${LLM_API_KEY:-}
+      # summary-worker (cmd/summary-worker/main.go) calls
+      # config.ValidateRequired on LLM_API_KEY and exits the process when
+      # it's empty — unlike summary-api / matter, which only fail at first
+      # LLM call. To keep `docker compose up -d` reaching `(healthy)` for
+      # the OOTB smoke-test path, fall back to a clearly-fake placeholder
+      # when .env leaves LLM_API_KEY blank. The worker boots, advertises
+      # /internal/healthz, and ONLY explodes when an actual summarization
+      # task hits the LLM client. Set LLM_API_KEY in .env before exercising
+      # smart-summary features. See README "Validation" for the probe.
+      LLM_API_KEY:  ${LLM_API_KEY:-changeme-set-real-llm-api-key-to-enable-summary}
       LLM_MODEL:    ${LLM_MODEL:-claude-sonnet-4-6}
       WORKER_INTERNAL_PORT:    "8082"
       WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
       WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
     networks:
       - octo-net
-    # TCP healthcheck because the worker only exposes /internal/* on 8082
-    # and has no public /health route; matches kustomize livenessProbe.
+    # The worker exposes /internal/healthz on 8082 (no public /health).
+    # Probe that explicitly — the previous `nc -z` fallback masked
+    # process-exits because compose still sees the port as listening
+    # while a panicking goroutine winds the process down.
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:8082/internal/healthz >/dev/null 2>&1 || nc -z localhost 8082 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8082/internal/healthz >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

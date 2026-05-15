@@ -1,0 +1,49 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OctoAppBucketReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads"
+      ],
+      "Resource": [
+        "arn:aws:s3:::file",
+        "arn:aws:s3:::chat",
+        "arn:aws:s3:::moment",
+        "arn:aws:s3:::sticker",
+        "arn:aws:s3:::report",
+        "arn:aws:s3:::chatbg",
+        "arn:aws:s3:::common",
+        "arn:aws:s3:::download",
+        "arn:aws:s3:::group",
+        "arn:aws:s3:::avatar"
+      ]
+    },
+    {
+      "Sid": "OctoAppObjectReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploadParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::file/*",
+        "arn:aws:s3:::chat/*",
+        "arn:aws:s3:::moment/*",
+        "arn:aws:s3:::sticker/*",
+        "arn:aws:s3:::report/*",
+        "arn:aws:s3:::chatbg/*",
+        "arn:aws:s3:::common/*",
+        "arn:aws:s3:::download/*",
+        "arn:aws:s3:::group/*",
+        "arn:aws:s3:::avatar/*"
+      ]
+    }
+  ]
+}

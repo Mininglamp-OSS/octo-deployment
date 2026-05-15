@@ -24,8 +24,8 @@ cd octo-deployment
 
 cp docker/.env.example docker/.env
 # Edit docker/.env — at minimum change the placeholders flagged in the file:
-#   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MASTER_KEY,
-#   OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
+#   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MINIO_APP_PASSWORD,
+#   OCTO_MASTER_KEY, OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
 
 cd docker
 docker compose config            # validate before starting
@@ -54,11 +54,12 @@ backing-service guards in `init-extra-dbs.sh`.
 | Variable | What it is | How to generate |
 | --- | --- | --- |
 | `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN`) | `openssl rand -hex 16` |
-| `MINIO_ROOT_PASSWORD` | MinIO root credential | `openssl rand -hex 16` |
+| `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. | `openssl rand -hex 16` |
+| `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user and attaches the bucket-scoped policy on first boot. | `openssl rand -hex 24` |
 | `OCTO_MASTER_KEY` | 32-byte server master key | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share | `openssl rand -hex 32` |
-| `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token, also used by octo-server | `openssl rand -hex 32` |
-| `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary (required for those features; leave blank for a smoke-test stack) | from your provider |
+| `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token. Bound on WuKongIM via `WK_MANAGERTOKEN` (Viper auto-binds to YAML `managerToken`) and on octo-server via `TS_WUKONGIM_MANAGERTOKEN`. Leaving it empty makes WuKongIM's manager API reachable AND USABLE without auth — set a real value before exposing the stack. | `openssl rand -hex 32` |
+| `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary. Required for those features. The compose file falls back to a fake placeholder for `summary-worker` so the OOTB stack still reaches `(healthy)` — actual summarization calls fail until this is set. | from your provider |
 
 Everything else has sane defaults documented inline in
 [`docker/.env.example`](.env.example).
@@ -111,8 +112,12 @@ path prefix) in `docker-compose.yaml`.
 
 The data is protected by:
 
-- the MinIO root credentials (`MINIO_ROOT_*`) — never sent over the
-  wire by the server,
+- the **application-scoped IAM credentials** (`OCTO_MINIO_APP_*`) that
+  octo-server signs with — provisioned by the one-shot `minio-init`
+  service (see "MinIO bootstrap & credential scoping" below). These
+  credentials grant read/write/delete on the bucket whitelist and
+  nothing else; they do NOT grant `mc admin` / IAM / console rights,
+  and the MinIO root pair never reaches octo-server's environment.
 - the **short TTL** of every presigned URL (minutes, not days),
 - octo-server's authorisation layer in front of `/api/v1/file/*`.
 
@@ -123,6 +128,49 @@ range that can reach `28080` — do not block it.
 If you absolutely need every public port to live behind nginx, you'd
 need a SigV4-aware proxy (e.g. one that re-signs each request) — that
 is out of scope for this compose stack.
+
+---
+
+## MinIO bootstrap & credential scoping
+
+The stack ships with an `octo-server` MinIO client that is **not** the
+MinIO root user. On first start the `minio-init` one-shot service
+runs after `minio` becomes healthy and:
+
+1. Creates the IAM user named in `OCTO_MINIO_APP_USER` (default
+   `octo-app`) with the password from `OCTO_MINIO_APP_PASSWORD`.
+2. (Re)installs the `octo-app` policy from
+   [`docker/configs/minio-octo-app-policy.json`](configs/minio-octo-app-policy.json),
+   which grants `s3:GetObject`/`PutObject`/`DeleteObject`/multipart
+   actions plus `s3:ListBucket` on the bucket whitelist octo-server
+   uses (`file`, `chat`, `moment`, `sticker`, `report`, `chatbg`,
+   `common`, `download`, `group`, `avatar`). Notably absent:
+   `s3:CreateBucket`, `mc admin` rights, console access, IAM control.
+3. Attaches the policy to `octo-app`.
+4. Pre-creates each whitelisted bucket so the first
+   `/api/v1/file/upload` call does not depend on the app user holding
+   bucket admin privileges.
+
+`octo-server` then runs with the app credentials only — root credentials
+live exclusively in the `minio-init` job, the `mc` CLI path, and the
+console. A leak of `octo-server`'s environment / config-map / log
+spillage gives an attacker bucket-level data access at most, not the
+ability to add users, change root, or take over the cluster.
+
+To rotate the app password:
+
+```bash
+# 1. set new value in docker/.env
+sed -i 's/^OCTO_MINIO_APP_PASSWORD=.*/OCTO_MINIO_APP_PASSWORD=<new>/' docker/.env
+# 2. re-run the stack — minio-init is idempotent, will reset the secret,
+#    octo-server picks it up on its next env render
+docker compose up -d
+```
+
+To rotate the policy itself, edit
+`docker/configs/minio-octo-app-policy.json` and re-run `docker compose
+up -d` — `minio-init` calls `mc admin policy update` whenever the
+policy already exists.
 
 ---
 
@@ -228,8 +276,17 @@ Before exposing the stack beyond a developer laptop:
 - Narrow `OCTO_NETWORK_SUBNET` further (already defaults to `/24`) if
   it overlaps an existing VPN / VPC range.
 - Set a real `OCTO_WUKONGIM_MANAGER_TOKEN`. WuKongIM's `tokenAuthOn`
-  is true in `wk.yaml`; an empty token means admin endpoints are
-  reachable but unusable.
+  is `true` in `wk.yaml`, but the token is bound from the env var
+  `WK_MANAGERTOKEN` (Viper auto-binds upper-case `WK_<KEY>` to the
+  YAML key). When that env var is empty, BOTH WuKongIM and
+  octo-server short-circuit token comparison and accept any string,
+  so the manager API stays reachable AND USABLE without auth — the
+  opposite of the safe-by-default behaviour the wording on this line
+  used to imply. The wukongim image is pinned to a specific release
+  (`v2.2.4-20260313`) precisely so the env-var contract is stable;
+  if you bump `OCTO_WK_IMAGE`, re-validate that
+  `WK_MANAGERTOKEN` still binds and that `tokenAuthOn: true` is not
+  rejected at startup on the new tag.
 - Set `OCTO_WEBHOOK_SECRET_KEY` if you accept inbound webhooks.
 - Switch `OCTO_DOMAIN` to a real hostname and front the stack with TLS
   (uncomment the `443` block in `docker-compose.yaml` and the HTTPS
@@ -330,6 +387,25 @@ for p in /_nginx_up /api/v1/health /matter/health /summary/health /; do
 done
 ```
 
+The `summary-worker` container has no public route — it serves
+`/internal/healthz` on port `8082` inside the `octo-net` network only.
+The route covered by the docker healthcheck above is not reachable from
+the host. To verify the worker explicitly (covers `LLM_API_KEY` /
+`MYSQL_DSN` validation, which would otherwise show up only as a stuck
+`(starting)` state):
+
+```bash
+docker compose exec summary-worker \
+  wget -qO- http://localhost:8082/internal/healthz
+docker compose ps summary-worker   # expect (healthy)
+```
+
+If the container is stuck `(unhealthy)` / restarting, inspect
+`docker compose logs summary-worker | tail -50` for `required environment
+variables not set` — the most common OOTB cause is an empty
+`LLM_API_KEY` paired with an `OCTO_SUMMARY_WORKER_IMAGE` pin that
+predates the placeholder fallback in `docker-compose.yaml`.
+
 ---
 
 ## Layout
@@ -341,7 +417,8 @@ docker/
 ├── README.md                 # this file
 ├── configs/
 │   ├── octo-server.yaml      # mounted at /home/configs/tsdd.yaml
-│   └── wk.yaml               # WuKongIM runtime config
+│   ├── wk.yaml               # WuKongIM runtime config
+│   └── minio-octo-app-policy.json  # IAM policy installed by minio-init
 ├── nginx/
 │   ├── nginx.conf            # gzip + main http block
 │   ├── empty-default.conf    # silences the stock nginx welcome vhost
