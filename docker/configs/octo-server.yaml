@@ -15,10 +15,19 @@
 # Runtime mode: debug | release
 mode: "release"
 
+# external.* is intentionally left empty here. The mounted YAML loses
+# precedence to env vars at runtime; the compose `octo-server` service
+# block sets:
+#   TS_EXTERNAL_BASEURL = http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}
+#   TS_EXTERNAL_IP      = ${OCTO_EXTERNAL_IP}
+# Those values are the single source of truth — change them in `.env`,
+# not here. Hard-coding them in this file shadows the env vars and
+# silently strands operators on `octo.local:28080` no matter what they
+# put in `.env`.
 external:
-  ip: "127.0.0.1"
-  baseURL: "http://octo.local:28080"
-  # webLoginURL: "http://octo.local:28080/"
+  ip: ""
+  baseURL: ""
+  # webLoginURL: ""
 
 # Test-only SMS verification code. Ignored in release mode.
 smsCode: ""

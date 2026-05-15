@@ -221,6 +221,19 @@ services:
       # --- default (see the `minio` service block) so this URL is
       # --- reachable from the same hosts that hit the nginx vhost.
       TS_MINIO_DOWNLOADURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
+      # --- octo-server's own external URL (the value it returns to
+      # --- clients in places that need an absolute URL — e.g. login
+      # --- redirects, OIDC callback hints, public asset links). The
+      # --- baseURL must include the user-visible host AND the nginx
+      # --- HTTP port, because the SPA / admin / mobile clients all
+      # --- hit nginx on OCTO_HTTP_PORT, not octo-server on 8090.
+      # --- TS_EXTERNAL_IP is what octo-server advertises when a peer
+      # --- needs the host's IP literal (rare; defaults to loopback so
+      # --- it is never a leak vector). The mounted octo-server.yaml
+      # --- carries empty `external.*` placeholders so these env vars
+      # --- are the single source of truth.
+      TS_EXTERNAL_BASEURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}"
+      TS_EXTERNAL_IP: "${OCTO_EXTERNAL_IP:-127.0.0.1}"
       NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
       # First-admin bootstrap. Uncomment to have octo-server seed a
       # superAdmin row (username "superAdmin", password bcrypt(<value>))
