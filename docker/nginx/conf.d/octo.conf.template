@@ -1,0 +1,218 @@
+upstream octo_api {
+    server octo-server:8090;
+    keepalive 16;
+}
+
+upstream octo_ws {
+    server wukongim:5200;
+    keepalive 8;
+}
+
+upstream octo_minio_api {
+    server minio:9000;
+    keepalive 8;
+}
+
+# The MinIO console (port 9001) is intentionally NOT exposed through
+# nginx in this template. Earlier revisions proxied it under
+# `/minio-console/`, but that put the MinIO admin login one click away
+# from anyone who reached OCTO_HTTP_PORT — and a stack booted with the
+# placeholder root password would have a known-default credential
+# accepted there. Operators who need the console reach it via an SSH
+# tunnel against `OCTO_MINIO_CONSOLE_BIND` (loopback :29001 by default):
+#
+#     ssh -L 9001:127.0.0.1:29001 user@host
+#     # then visit http://localhost:9001 in your browser
+#
+# To re-enable the public route (NOT recommended; only do this after
+# rotating MINIO_ROOT_PASSWORD and placing the proxy behind auth):
+#
+#     upstream octo_minio_console {
+#         server minio:9001;
+#         keepalive 8;
+#     }
+#     # add inside the server { } block:
+#     location /minio-console/ {
+#         proxy_pass         http://octo_minio_console/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+
+server {
+    listen       80 default_server;
+    listen       [::]:80 default_server;
+    server_name  ${OCTO_DOMAIN} localhost _;
+
+    client_max_body_size    1000m;
+    client_body_buffer_size 8m;
+
+    # Security headers — applied on every response from this vhost.
+    # Mirrors the posture in kustomize/base/octo-web-nginx-config.yaml so
+    # the docker-compose deployment isn't materially weaker than the
+    # production overlay. CSP is omitted here because the OCTO web SPA
+    # bundles inline scripts/styles that need `unsafe-inline` /
+    # `unsafe-eval` and the exact set of allowed sources is environment-
+    # specific — operators add it after first deploy if they need it.
+    add_header X-Frame-Options          "SAMEORIGIN" always;
+    add_header X-Content-Type-Options   "nosniff" always;
+    add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
+
+    location = /_nginx_up {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location /api/ {
+        # Rate limit + small burst — same shape applied to /v1/. Keeps a
+        # rogue client from exhausting octo-server while still passing
+        # bursty page loads. zone= names are declared in nginx.conf.
+        limit_req zone=octo_api burst=60 nodelay;
+        proxy_pass         http://octo_api/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+        proxy_read_timeout 600s;
+    }
+
+    # OIDC SSO / auth endpoints — octo-server mounts these directly
+    # under /v1/ (no /api prefix), matching what
+    # kustomize/base/octo-web-nginx-config.yaml forwards. OIDC is
+    # disabled in the OSS profile by default; this route is here so
+    # enabling it later does not require a deploy-time nginx change.
+    # `^~` makes the prefix match win over the SPA catch-all `/`.
+    location ^~ /v1/ {
+        # Tighter rate (auth surface) — see octo_auth zone in nginx.conf.
+        limit_req zone=octo_auth burst=20 nodelay;
+        proxy_pass         http://octo_api/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+        proxy_read_timeout 600s;
+    }
+
+    location /ws {
+        proxy_pass          http://octo_ws;
+        proxy_http_version  1.1;
+        proxy_set_header    Upgrade           $http_upgrade;
+        proxy_set_header    Connection        "upgrade";
+        proxy_set_header    Host              $host;
+        proxy_set_header    X-Real-IP         $remote_addr;
+        proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto $scheme;
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+    }
+
+    location /minio/ {
+        proxy_pass         http://octo_minio_api/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+        proxy_read_timeout 600s;
+        proxy_request_buffering off;
+    }
+
+    # /minio-console/ is intentionally NOT exposed here — see the comment
+    # at the top of this file. SSH-forward :29001 for console access.
+
+    location = /admin {
+        return 301 /admin/;
+    }
+    location /admin/ {
+        proxy_pass         http://admin/admin/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    location /matter/ {
+        # Same octo_api zone (30r/s, 10MB) used by /api/ — keeps the
+        # nginx-fronted matter surface within the same per-IP budget
+        # as the rest of the OCTO REST API. The matter / summary
+        # backing ports stay loopback-only by default precisely
+        # because nginx is the rate-limited public path; without this
+        # `limit_req` the README claim ("nginx applies rate limiting"
+        # as one of the three reasons direct ports are loopback) was
+        # not actually true on these two routes. burst=20 absorbs
+        # short page-load spikes without 503ing legitimate clients.
+        limit_req zone=octo_api burst=20 nodelay;
+        proxy_pass         http://matter:8080/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    location /summary/ {
+        # See /matter/ above — same octo_api zone applied for
+        # consistency with the documented security model.
+        limit_req zone=octo_api burst=20 nodelay;
+        proxy_pass         http://summary-api:8080/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    location = /_octo_up {
+        default_type text/html;
+        return 200 '<!doctype html>
+<html><head><meta charset="utf-8"><title>OCTO Server</title>
+<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;color:#222}h1{margin-bottom:.25rem}code{background:#f4f4f7;padding:2px 6px;border-radius:4px}ul{line-height:1.9}</style></head>
+<body><h1>OCTO Server</h1><p>The stack is up. Quick links:</p>
+<ul>
+<li><a href="/">Web (SPA)</a></li>
+<li><a href="/admin/">Admin console</a></li>
+<li><a href="/api/v1/ping">REST · <code>/api/v1/ping</code></a></li>
+<li><a href="/api/v1/health">REST · <code>/api/v1/health</code></a></li>
+<li><a href="/matter/health">Matter · <code>/matter/health</code></a></li>
+<li><a href="/summary/health">Smart-summary · <code>/summary/health</code></a></li>
+</ul>
+<p>MinIO console is loopback-only (port 29001 on the host). SSH-forward
+to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
+<p>See <code>docker/.env.example</code> for configuration.</p></body></html>
+';
+    }
+
+    location / {
+        proxy_pass         http://web/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}
+
+# -----------------------------------------------------------------------------
+# HTTPS listener (disabled by default).
+# Enable by: uncommenting the 443 port in docker-compose.yaml, placing certs
+# under ./nginx/certs/, and uncommenting the block below.
+# -----------------------------------------------------------------------------
+# server {
+#     listen       443 ssl http2;
+#     listen       [::]:443 ssl http2;
+#     server_name  ${OCTO_DOMAIN};
+#     ssl_certificate      /etc/nginx/certs/fullchain.pem;
+#     ssl_certificate_key  /etc/nginx/certs/privkey.pem;
+#     ssl_protocols        TLSv1.2 TLSv1.3;
+#     ssl_ciphers          HIGH:!aNULL:!MD5;
+#     # paste the same location blocks as the HTTP listener above
+# }

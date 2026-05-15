@@ -1,0 +1,794 @@
+# -----------------------------------------------------------------------------
+# OCTO Server · one-shot deployment stack (OSS)
+# -----------------------------------------------------------------------------
+# Brings up OCTO Server + all required dependencies behind an nginx reverse
+# proxy that serves a user-chosen domain (default: octo.local). Everything is
+# scoped under a dedicated Docker bridge so it does not collide with other
+# stacks on the host.
+#
+# Quick start:
+#
+#     cp docker/.env.example docker/.env
+#     # edit docker/.env — at minimum change passwords + OCTO_MASTER_KEY
+#     cd docker
+#     docker compose up -d
+#     # when healthy, visit http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/api/v1/health
+#
+# Tear-down (removes volumes too):
+#
+#     docker compose down -v
+#
+# See docker/README.md for the full walkthrough.
+# -----------------------------------------------------------------------------
+
+name: octo
+
+networks:
+  octo-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${OCTO_NETWORK_SUBNET:-172.28.0.0/24}
+
+volumes:
+  mysql-data:
+  redis-data:
+  minio-data:
+  wukongim-data:
+  server-logs:
+  nginx-logs:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Preflight (one-shot)
+  # ---------------------------------------------------------------------------
+  # Refuses to let the stack come up with shared-secret tokens still on
+  # their `.env.example` `CHANGE_ME_*` / `CHG_ME*` placeholders.
+  # `init-extra-dbs.sh` already handles the MySQL service-account
+  # passwords (it runs inside MySQL's docker-entrypoint-initdb.d on the
+  # first volume init), and `minio-init` handles the MinIO root + app
+  # passwords. The two values left without a fail-fast were the
+  # cross-service auth tokens:
+  #
+  #   - OCTO_NOTIFY_INTERNAL_TOKEN — HMAC secret octo-server / matter /
+  #     summary-api use on /internal/* callbacks. Without rotation, a
+  #     stack widening any of the app-service binds (or a peer on the
+  #     same LAN reaching octo-net) can forge `task-event` /
+  #     `worker-trigger` calls with the well-known `CHANGE_ME_*`
+  #     literal.
+  #   - OCTO_WUKONGIM_MANAGER_TOKEN — admin token for WuKongIM's
+  #     manager API. wk.yaml ships with `tokenAuthOn: true`, but an
+  #     empty / placeholder value short-circuits the comparison and
+  #     accepts any string.
+  #
+  # The matching MinIO / MySQL / OCTO_MASTER_KEY checks live elsewhere
+  # (see minio-init for MINIO_ROOT_PASSWORD / OCTO_MINIO_APP_PASSWORD,
+  # init-extra-dbs.sh for MYSQL_ROOT_PASSWORD + the three DB account
+  # passwords, octo-server's own startup for the 32-byte length on
+  # OCTO_MASTER_KEY). This preflight stays narrowly scoped to the
+  # tokens that have no other guard.
+  preflight:
+    image: ${OCTO_PREFLIGHT_IMAGE:-busybox:1.36}
+    container_name: octo-preflight
+    restart: "no"
+    environment:
+      OCTO_NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
+      OCTO_WUKONGIM_MANAGER_TOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # Lower-case the value before pattern matching so any casing
+        # of the placeholder (`CHANGE_ME_*`, `Change_Me_*`, `chg_me*`)
+        # trips the same branch — busybox sh has no `nocasematch`.
+        check() {
+          name=$$1
+          raw=$$(eval "printf %s \"\$$$$name\"")
+          if [ -z "$$raw" ]; then
+            echo "[preflight] FATAL: $$name is empty — set it in .env (openssl rand -hex 32)" >&2
+            exit 1
+          fi
+          lc=$$(printf %s "$$raw" | tr 'A-Z' 'a-z')
+          case "$$lc" in
+            change_me_*|chg_me*)
+              echo "[preflight] FATAL: $$name is still a CHANGE_ME / CHG_ME placeholder." >&2
+              echo "[preflight]        Rotate it in .env (openssl rand -hex 32) before bringing the stack up." >&2
+              exit 1
+              ;;
+          esac
+        }
+        check OCTO_NOTIFY_INTERNAL_TOKEN
+        check OCTO_WUKONGIM_MANAGER_TOKEN
+        echo "[preflight] tokens look rotated"
+    networks:
+      - octo-net
+
+  mysql:
+    image: mysql:8.0
+    container_name: octo-mysql
+    restart: unless-stopped
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    environment:
+      TZ: ${TZ:-UTC}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-octo}
+      OCTO_MATTER_DB_PASSWORD: ${OCTO_MATTER_DB_PASSWORD:-matter}
+      OCTO_SUMMARY_DB_PASSWORD: ${OCTO_SUMMARY_DB_PASSWORD:-summary}
+      OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
+    # Backing service: bound to loopback by default so a missed-config moment
+    # does not expose MySQL with the placeholder root password to the public
+    # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
+    # the implications.
+    ports:
+      - "${OCTO_MYSQL_BIND:-127.0.0.1}:${OCTO_MYSQL_PORT:-23306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts/init-extra-dbs.sh:/docker-entrypoint-initdb.d/01-extra-dbs.sh:ro
+    # MYSQL_PWD avoids leaking the root password into `/proc/<pid>/cmdline`
+    # the way `-p"$MYSQL_ROOT_PASSWORD"` would (any container co-tenant
+    # could `cat /proc/<pid>/cmdline` and read it). The mysql client
+    # reads MYSQL_PWD from the env automatically. mysqladmin emits a
+    # one-line warning to stderr about MYSQL_PWD being insecure on
+    # multi-user hosts; that warning does not affect the exit code or
+    # the healthcheck verdict.
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -u root --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - octo-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: octo-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    # Backing service: loopback-only by default. See OCTO_MYSQL_BIND comment.
+    ports:
+      - "${OCTO_REDIS_BIND:-127.0.0.1}:${OCTO_REDIS_PORT:-26379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - octo-net
+
+  minio:
+    # Pinned to a specific MinIO release rather than `:latest`. Two
+    # contracts in this stack break silently when the upstream image
+    # rolls forward:
+    #   1. `minio-init` runs `mc admin user add` / `mc admin policy
+    #      create` / `mc admin policy attach`. The CLI semantics across
+    #      these commands have flipped before — the `mc admin user add`
+    #      upsert behaviour we rely on (see the comment block in the
+    #      `minio-init` service) is a contract that has changed across
+    #      MinIO releases, so the `mc` image is pinned to a known-good
+    #      release and the server image must come from the same release
+    #      family to keep them in sync.
+    #   2. `MINIO_ROOT_PASSWORD` ≥8-char minimum-length check is the
+    #      first placeholder fail-fast layer (see .env.example: the
+    #      7-char `CHG_ME!` placeholder trips MinIO's own length check
+    #      at boot before `minio-init` even runs). If a future MinIO
+    #      release softens or removes that check, the `CHG_ME!` trap
+    #      stops working and an unrotated stack would reach `(healthy)`.
+    # Bump deliberately after validating the new server tag against the
+    # `mc` tag below (and re-running the placeholder fail-fast smoke
+    # test). Override via .env -> OCTO_MINIO_IMAGE, mirroring the
+    # OCTO_WK_IMAGE / OCTO_MINIO_MC_IMAGE pattern.
+    image: ${OCTO_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    container_name: octo-minio
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-octoadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # MINIO_SERVER_URL is what MinIO uses to construct absolute URLs
+      # in multipart redirects, error responses with retry hints, and
+      # federated bucket discovery. It must point at the SAME endpoint
+      # octo-server tells browser clients to hit when handing out
+      # presigned URLs (TS_MINIO_DOWNLOADURL below) — otherwise MinIO-
+      # emitted absolute URLs route through nginx `/minio/` while
+      # presigned URLs hit `:29000` directly, and a SigV4 signature
+      # signed for one path will not validate on the other.
+      #
+      # Host:port-only form is therefore the canonical default. The
+      # nginx /minio/ passthrough at nginx/conf.d/octo.conf.template:116
+      # stays exposed for in-cluster diagnostics (curl from a sidecar
+      # against the host's nginx is convenient), but it is NOT the URL
+      # MinIO advertises to clients. To override (e.g. when fronting
+      # with TLS at a different hostname), set MINIO_SERVER_URL to a
+      # literal value in .env.
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}}
+      # MINIO_BROWSER_REDIRECT_URL is the canonical URL MinIO redirects
+      # the console to after auth. The previous default pointed at the
+      # nginx /minio-console/ route, but that route is no longer exposed
+      # by default (see nginx/conf.d/octo.conf.template) — operators reach
+      # the console via an SSH tunnel against the loopback :29001 bind.
+      # Leaving this empty makes MinIO render the console at whatever URL
+      # the request arrived on, which is the right behaviour for a tunnel.
+      # Set a literal value in .env if you re-enable the nginx route or
+      # front the console with a different proxy.
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-}
+    # MinIO API is public by default: octo-server hands browser clients
+    # presigned (SigV4) URLs that point at this port directly, and SigV4
+    # signatures cannot survive an nginx path-prefix rewrite. Access keys
+    # protect the data — the port being reachable does not.
+    # The MinIO console is loopback-only — admins reach it through the
+    # nginx /minio-console/ route or via SSH-forwarded :9001.
+    ports:
+      - "${OCTO_MINIO_API_BIND:-0.0.0.0}:${OCTO_MINIO_API_PORT:-29000}:9000"
+      - "${OCTO_MINIO_CONSOLE_BIND:-127.0.0.1}:${OCTO_MINIO_CONSOLE_PORT:-29001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - octo-net
+
+  # ---------------------------------------------------------------------------
+  # MinIO bootstrap (one-shot)
+  # ---------------------------------------------------------------------------
+  # Provisions a dedicated IAM user (`octo-app` by default) scoped to the
+  # bucket whitelist octo-server uses (see modules/file/helpers.go). The
+  # `octo-server` service then mounts THESE credentials as
+  # TS_MINIO_ACCESSKEYID / TS_MINIO_SECRETACCESSKEY instead of the MinIO
+  # root pair, so a leak of the app credentials does not hand over
+  # `mc admin` / console / IAM control.
+  #
+  # Idempotent: every `mc` call is wrapped in `|| true` (or guarded by
+  # `--insecure` semantics on update commands) so re-running the service
+  # after the first boot is a no-op rather than an error. The compose
+  # `service_completed_successfully` gate on octo-server therefore keeps
+  # working across restarts of the stack.
+  minio-init:
+    image: ${OCTO_MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    container_name: octo-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-octoadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      OCTO_MINIO_APP_USER: ${OCTO_MINIO_APP_USER:-octo-app}
+      OCTO_MINIO_APP_PASSWORD: ${OCTO_MINIO_APP_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # ---------------------------------------------------------------
+        # Placeholder fail-fast.
+        # ---------------------------------------------------------------
+        # MinIO itself enforces a ≥8-char minimum on MINIO_ROOT_PASSWORD,
+        # and the .env.example placeholder is intentionally 7 chars so
+        # that an unrotated config never even reaches a healthy `minio`
+        # container. The check below is the second layer: it catches any
+        # ≥8-char value that still matches the well-known
+        # `CHANGE_ME_*` / `CHG_ME*` placeholder pattern (e.g. an operator
+        # who lengthened the placeholder rather than replacing it). At
+        # that point the only safe move is to refuse to attach the
+        # octo-app IAM policy — otherwise minio-init would happily wire
+        # up presigned-URL credentials against a known-default root
+        # password while the public 0.0.0.0:29000 API and the
+        # nginx-proxied /minio-console/ route stay reachable.
+        #
+        # We check both root and app credentials. The app pair is what
+        # octo-server signs presigned URLs with; root is what `mc admin`
+        # / the MinIO console accept. Either at a placeholder is a
+        # blocking condition.
+        #
+        # Lower-case before matching so any casing of the placeholder
+        # (`CHANGE_ME_*`, `Change_Me_*`, `chg_me*`) trips the same
+        # branch — busybox sh in the `mc` image has no `nocasematch`,
+        # so we normalise with `tr` instead of growing the case list.
+        root_lc=$$(printf %s "$${MINIO_ROOT_PASSWORD:-}" | tr 'A-Z' 'a-z')
+        case "$$root_lc" in
+          ""|change_me_*|chg_me*)
+            echo "[minio-init] FATAL: MINIO_ROOT_PASSWORD is empty or still a CHANGE_ME / CHG_ME placeholder." >&2
+            echo "[minio-init]        Rotate it in .env (openssl rand -hex 16) before bringing the stack up." >&2
+            exit 1
+            ;;
+        esac
+        app_lc=$$(printf %s "$${OCTO_MINIO_APP_PASSWORD:-}" | tr 'A-Z' 'a-z')
+        case "$$app_lc" in
+          "")
+            echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is empty — set it in .env" >&2
+            exit 1
+            ;;
+          change_me_*|chg_me*)
+            echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is still a CHANGE_ME / CHG_ME placeholder." >&2
+            echo "[minio-init]        Rotate it in .env (openssl rand -hex 24) before bringing the stack up." >&2
+            exit 1
+            ;;
+        esac
+        echo "[minio-init] waiting for MinIO root alias…"
+        until mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+          sleep 1
+        done
+
+        echo "[minio-init] ensuring application user exists"
+        # `mc admin user add` is upsert-semantics on current MinIO releases:
+        # it creates the user on first call, and overwrites the secret on
+        # subsequent calls. That makes rotation a matter of bumping
+        # OCTO_MINIO_APP_PASSWORD in .env and re-running `up -d`. We swallow
+        # stdout (just a status string, never the secret) to keep logs
+        # clean and avoid any chance of confusing operators with re-prints
+        # on every boot.
+        mc admin user add local "$$OCTO_MINIO_APP_USER" "$$OCTO_MINIO_APP_PASSWORD" >/dev/null
+
+        echo "[minio-init] (re)installing octo-app policy"
+        mc admin policy create local octo-app /etc/minio/octo-app-policy.json 2>/dev/null \
+          || mc admin policy update local octo-app /etc/minio/octo-app-policy.json
+
+        echo "[minio-init] attaching octo-app policy to $$OCTO_MINIO_APP_USER"
+        mc admin policy attach local octo-app --user "$$OCTO_MINIO_APP_USER" 2>/dev/null || true
+
+        # Pre-create the bucket whitelist octo-server uses so the first
+        # /api/v1/file/upload call does NOT depend on the app user having
+        # CreateBucket privileges (the policy below intentionally omits
+        # bucket admin actions). Each `mb` is `--ignore-existing` so the
+        # service stays idempotent.
+        for b in file chat moment sticker report chatbg common download group avatar; do
+          mc mb --ignore-existing "local/$$b" >/dev/null
+        done
+
+        echo "[minio-init] done"
+    volumes:
+      - ./configs/minio-octo-app-policy.json:/etc/minio/octo-app-policy.json:ro
+    networks:
+      - octo-net
+
+  wukongim:
+    # Pinned to a specific WuKongIM release. `:latest` is a moving target —
+    # different channels disagree on whether `tokenAuthOn: true` is honoured
+    # or rejected at startup, and the env-var contract for `managerToken`
+    # has not been stable across pre-2.x builds. Bump deliberately after
+    # validating the new tag against `wk.yaml` (tokenAuthOn) and the
+    # WK_MANAGERTOKEN binding below. Override via .env -> OCTO_WK_IMAGE.
+    image: ${OCTO_WK_IMAGE:-wukongim/wukongim:v2.2.4-20260313}
+    container_name: octo-wukongim
+    restart: unless-stopped
+    environment:
+      WK_MODE: ${WK_MODE:-debug}
+      WK_EXTERNAL_IP: ${OCTO_EXTERNAL_IP:-127.0.0.1}
+      WK_EXTERNAL_TCPADDR: ${OCTO_WK_TCP_ADDR:-}
+      # Composition kept in YAML (not .env) because compose only interpolates
+      # `${...}` once on parse — values that come out of .env do NOT get a
+      # second pass. Putting the default expression here lets operators set
+      # OCTO_WK_WS_ADDR to a literal in .env when they want to override.
+      WK_EXTERNAL_WSADDR:  ${OCTO_WK_WS_ADDR:-ws://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/ws}
+      WK_EXTERNAL_WSSADDR: ${OCTO_WK_WSS_ADDR:-}
+      # Shared admin token. WuKongIM binds env vars to YAML keys via Viper's
+      # default key replacer (`.` -> `_`, upper-cased, prefix `WK_`), so the
+      # YAML key `managerToken` is set from the env var `WK_MANAGERTOKEN`.
+      # There is NO top-level `token` / `WK_TOKEN` key — that name is
+      # silently ignored, which is exactly what the previous revision of
+      # this stack did, and which left `wk.yaml`'s `tokenAuthOn: true`
+      # paired with an empty `managerToken` (= admin endpoints reachable
+      # without auth). The single .env value below feeds both this binding
+      # and octo-server's TS_WUKONGIM_MANAGERTOKEN so they cannot drift.
+      WK_MANAGERTOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+    # Gate WuKongIM behind the preflight one-shot. Without this dependency
+    # compose starts wukongim in parallel with preflight: if preflight
+    # aborts on a placeholder OCTO_WUKONGIM_MANAGER_TOKEN, octo-server /
+    # matter / summary-api correctly stay down (their own depends_on:
+    # preflight blocks them), but wukongim has already bound the manager
+    # API / TCP / WS surfaces on 0.0.0.0 with `tokenAuthOn: true` and a
+    # known placeholder token. WuKongIM's manager-token comparison
+    # accepts the literal placeholder string, so anyone reading
+    # `.env.example` can hit the manager API from the network until the
+    # operator notices and tears the stack down. Compose does NOT
+    # auto-stop already-running services when a sibling's gate fails.
+    # `service_completed_successfully` here closes that window — wukongim
+    # cannot bind any port until preflight has returned exit 0.
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+    ports:
+      - "${OCTO_WK_API_PORT:-25001}:5001"
+      - "${OCTO_WK_TCP_PORT:-25100}:5100"
+      - "${OCTO_WK_WS_PORT:-25200}:5200"
+      # Monitor port is an internal observability surface (varz / metrics
+      # / `/route` admin), not a chat transport — bind to loopback by
+      # default. Override via OCTO_WK_MONITOR_BIND for operators who want
+      # to reach it from a jumphost. The user-facing surfaces above
+      # (API/TCP/WS) stay on 0.0.0.0 because clients connect to them.
+      - "${OCTO_WK_MONITOR_BIND:-127.0.0.1}:${OCTO_WK_MONITOR_PORT:-25300}:5300"
+    volumes:
+      - wukongim-data:/root/wukongim
+      - ./configs/wk.yaml:/root/wukongim/wk.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:5001/health >/dev/null 2>&1 || wget -q -O - http://localhost:5001/varz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - octo-net
+
+  octo-server:
+    image: ${OCTO_SERVER_IMAGE:-mininglamposs/octo-server:latest}
+    container_name: octo-server
+    restart: unless-stopped
+    command: ["api"]
+    # -------------------------------------------------------------------
+    # Why this env block carries TWO names for the same value
+    # -------------------------------------------------------------------
+    # The current octo-server binary configures Viper with
+    # `SetEnvPrefix("TS")` + `SetEnvKeyReplacer(".", "_")` + `AutomaticEnv()`,
+    # so it reads YAML keys like `db.mysqlAddr` from `TS_DB_MYSQLADDR`,
+    # `db.redisAddr` from `TS_DB_REDISADDR`, `wukongIM.managerToken`
+    # from `TS_WUKONGIM_MANAGERTOKEN`, and the `minio.*` block from
+    # the matching `TS_MINIO_*` names. The kustomize overlays use a
+    # different convention (`DM_MYSQL_DSN`, `DM_REDIS_ADDR`,
+    # `WUKONGIM_MANAGER_TOKEN`) that is NOT honoured by the current
+    # binary. We pass both name sets so that:
+    #   - the running binary actually picks the values up (TS_*),
+    #   - any sidecar / external tooling that follows the kustomize
+    #     names keeps working (DM_*).
+    # The aliases can be dropped once octo-server adds explicit BindEnv
+    # mappings for the kustomize names (or unifies on a single prefix).
+    # -------------------------------------------------------------------
+    environment:
+      TZ: ${TZ:-UTC}
+      OCTO_MASTER_KEY: ${OCTO_MASTER_KEY}
+      DMWORK_MASTER_KEY: ${OCTO_MASTER_KEY}
+      # --- DB / cache: TS_* are read by the binary, DM_* mirror the
+      # --- kustomize/base/octo-server-secret naming for tooling parity.
+      TS_DB_MYSQLADDR:  "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      TS_DB_REDISADDR:  "redis:6379"
+      DM_MYSQL_DSN:     "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      DM_REDIS_ADDR:    "redis:6379"
+      # --- WuKongIM admin token: TS_WUKONGIM_MANAGERTOKEN is what the
+      # --- binary reads (overrides wukongIM.managerToken in tsdd.yaml);
+      # --- WUKONGIM_MANAGER_TOKEN is the kustomize alias. Both come
+      # --- from the same .env value so they cannot drift, and must
+      # --- match wk.yaml's tokenAuthOn / WK_TOKEN.
+      TS_WUKONGIM_MANAGERTOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+      WUKONGIM_MANAGER_TOKEN:   ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+      # Optional inbound webhook HMAC. Compose-only addition (not in
+      # kustomize) — explained in .env.example.
+      TS_WEBHOOK_SECRET_KEY: ${OCTO_WEBHOOK_SECRET_KEY:-}
+      # MinIO credentials surfaced as Viper-style env overrides for the
+      # tsdd.yaml `minio:` block. Compose-only — kustomize installs use
+      # tencentCOS / s3 instead and ship credentials via octo-server-secret.
+      #
+      # These are deliberately NOT the MinIO root credentials. The root
+      # credentials are also what `mc admin` and the MinIO console use,
+      # so reusing them here would mean a single env-dump / log spillage
+      # / Docker-socket exposure hands an attacker full IAM control of
+      # the bucket store, not just app-level read/write. The `minio-init`
+      # service (below) provisions a dedicated `octo-app` user scoped to
+      # the buckets octo-server actually touches (`file`, `chat`,
+      # `moment`, `sticker`, `report`, `chatbg`, `common`, `download`,
+      # `group`, `avatar` — the whitelist in
+      # octo-server/modules/file/helpers.go). Rotation now means
+      # restarting `minio-init` + `octo-server` only; the root password
+      # stays put.
+      TS_MINIO_ACCESSKEYID:     "${OCTO_MINIO_APP_USER:-octo-app}"
+      TS_MINIO_SECRETACCESSKEY: "${OCTO_MINIO_APP_PASSWORD}"
+      # --- MinIO client-facing download URL.
+      # --- An empty `minio.downloadURL` falls back to `minio.url`
+      # --- (= http://minio:9000), which only resolves inside the
+      # --- octo-net Docker bridge. Browser clients on the host or LAN
+      # --- cannot reach that hostname, so /api/v1/file/* responses
+      # --- become unusable. We override with a host-reachable URL.
+      # ---
+      # --- Host:port form (no path prefix) is intentional. SigV4
+      # --- presigned URLs sign the canonical path, so any nginx
+      # --- /minio rewrite breaks the signature. octo-server PR#50 R4
+      # --- (YUJ-728) drops path-prefix support and validates that
+      # --- DownloadURL is host:port only — anything else is rejected
+      # --- at startup. The MinIO API port is bound to 0.0.0.0 by
+      # --- default (see the `minio` service block) so this URL is
+      # --- reachable from the same hosts that hit the nginx vhost.
+      TS_MINIO_DOWNLOADURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
+      # --- octo-server's own external URL (the value it returns to
+      # --- clients in places that need an absolute URL — e.g. login
+      # --- redirects, OIDC callback hints, public asset links). The
+      # --- baseURL must include the user-visible host AND the nginx
+      # --- HTTP port, because the SPA / admin / mobile clients all
+      # --- hit nginx on OCTO_HTTP_PORT, not octo-server on 8090.
+      # --- TS_EXTERNAL_IP is what octo-server advertises when a peer
+      # --- needs the host's IP literal (rare; defaults to loopback so
+      # --- it is never a leak vector). The mounted octo-server.yaml
+      # --- carries empty `external.*` placeholders so these env vars
+      # --- are the single source of truth.
+      TS_EXTERNAL_BASEURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}"
+      TS_EXTERNAL_IP: "${OCTO_EXTERNAL_IP:-127.0.0.1}"
+      # No `:-` default — an empty value here would silently drop
+      # /internal/* callback HMAC verification on the octo-server side
+      # and leave matter / summary-api trusting unsigned requests. The
+      # `preflight` service refuses placeholder tokens; compose itself
+      # warns when this var is missing from .env. Two-name sync with
+      # matter (line below) keeps the contract symmetric.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
+      # First-admin bootstrap. Uncomment to have octo-server seed a
+      # superAdmin row (username "superAdmin", password bcrypt(<value>))
+      # on first start when the user table is empty. See "First-admin
+      # bootstrap · Option A" in docker/README.md before enabling.
+      # TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # `service_started` (not `service_healthy`) is intentional: the
+      # octo-server -> wukongim contract is webhook-style (gRPC at
+      # octo-server:6979, WuKongIM dials *us*), so wukongim only needs
+      # to be running, not yet healthy. Using `service_healthy` here
+      # would create a deadlock — wukongim's healthcheck has flapped
+      # in past releases and a stuck WK kept octo-server from booting
+      # even though the missing piece was wukongim itself.
+      wukongim:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    # Direct REST port, intended for operator smoke tests / debugging.
+    # Loopback by default so the OOTB stack does not expose octo-server
+    # past the rate-limited nginx vhost (`/api/`, `/v1/` carry the
+    # octo_api / octo_auth limit_req zones from nginx.conf:31-32; a
+    # client hitting :28081 directly bypasses both). Flip
+    # OCTO_SERVER_BIND to 0.0.0.0 for an operator who needs the port
+    # reachable from a different host.
+    ports:
+      - "${OCTO_SERVER_BIND:-127.0.0.1}:${OCTO_SERVER_PORT:-28081}:8090"
+    volumes:
+      - ./configs/octo-server.yaml:/home/configs/tsdd.yaml:ro
+      - server-logs:/home/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8090/v1/ping >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      - octo-net
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: octo-nginx
+    restart: unless-stopped
+    depends_on:
+      octo-server:
+        condition: service_healthy
+    environment:
+      OCTO_DOMAIN: ${OCTO_DOMAIN:-octo.local}
+    ports:
+      - "${OCTO_HTTP_PORT:-28080}:80"
+      # - "${OCTO_HTTPS_PORT:-28443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/templates:ro
+      - ./nginx/empty-default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Persist access + error logs across container restarts so that
+      # post-mortems on a crashed stack still have request history.
+      # Mounted as a named volume rather than a host bind to keep the
+      # OOTB stack portable; redirect to a host path if your operator
+      # tooling needs them on disk.
+      - nginx-logs:/var/log/nginx
+      # - ./nginx/certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost/_nginx_up >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - octo-net
+
+  # ---------------------------------------------------------------------------
+  # Frontend: octo-web
+  # ---------------------------------------------------------------------------
+  web:
+    image: ${OCTO_WEB_IMAGE:-mininglamposs/octo-web:latest}
+    container_name: octo-web
+    restart: unless-stopped
+    depends_on:
+      octo-server:
+        condition: service_healthy
+    environment:
+      API_URL: http://octo-server:8090
+      SUMMARY_API_URL: ${OCTO_SUMMARY_API_URL:-http://summary-api:8080}
+    ports:
+      - "${OCTO_WEB_PORT:-28083}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - octo-net
+
+  # ---------------------------------------------------------------------------
+  # Admin console: octo-admin
+  # ---------------------------------------------------------------------------
+  admin:
+    image: ${OCTO_ADMIN_IMAGE:-mininglamposs/octo-admin:latest}
+    container_name: octo-admin
+    restart: unless-stopped
+    depends_on:
+      octo-server:
+        condition: service_healthy
+    environment:
+      API_BACKEND: octo-server:8090
+    ports:
+      - "${OCTO_ADMIN_PORT:-28082}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/admin/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - octo-net
+
+  # ---------------------------------------------------------------------------
+  # Matter service (tasks / todos)
+  # ---------------------------------------------------------------------------
+  matter:
+    image: ${OCTO_MATTER_IMAGE:-mininglamposs/octo-matter:latest}
+    container_name: octo-matter
+    restart: unless-stopped
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      octo-server:
+        condition: service_started
+    environment:
+      APP_ENV: ${MATTER_APP_ENV:-prod}
+      MYSQL_DSN: "matter:${OCTO_MATTER_DB_PASSWORD:-matter}@tcp(mysql:3306)/octo_matter?charset=utf8mb4&parseTime=true"
+      # Canonical env names from kustomize/base/octo-matter-config.
+      DMWORKIM_URL: http://octo-server:8090
+      WUKONGIM_URL: http://wukongim:5001
+      SERVER_PORT: "8080"
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
+      LLM_API_URL: ${LLM_API_URL:-https://api.example.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
+      LLM_TIMEOUT: "30"
+    # Direct port, intended for operator smoke tests. Loopback by
+    # default — production traffic reaches matter via nginx /matter/
+    # which carries the octo_api rate-limit zone. Override
+    # OCTO_MATTER_BIND when an operator needs the port from another
+    # host.
+    ports:
+      - "${OCTO_MATTER_BIND:-127.0.0.1}:${OCTO_MATTER_PORT:-28086}:8080"
+    networks:
+      - octo-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Smart summary API + worker
+  # ---------------------------------------------------------------------------
+  summary-api:
+    image: ${OCTO_SUMMARY_API_IMAGE:-mininglamposs/octo-smart-summary-api:latest}
+    container_name: octo-summary-api
+    restart: unless-stopped
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN:    "summary:${OCTO_SUMMARY_DB_PASSWORD:-summary}@tcp(mysql:3306)/octo_summary?charset=utf8mb4&parseTime=true"
+      IM_MYSQL_DSN: "summary_reader:${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true"
+      # The current octo-smart-summary binary requires OCTO_API_URL on
+      # startup (cmd/summary-api/main.go marks it required); without it
+      # the container exits with "required environment variables not
+      # set: OCTO_API_URL". DMWORK_API_URL is the kustomize alias and
+      # is kept so any tooling that still reads it keeps working.
+      OCTO_API_URL:   http://octo-server:8090
+      DMWORK_API_URL: http://octo-server:8090
+      LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
+      LLM_API_KEY:  ${LLM_API_KEY:-}
+      LLM_MODEL:    ${LLM_MODEL:-claude-sonnet-4-6}
+      API_PORT:          "8080"
+      API_INTERNAL_PORT: "8081"
+      # Canonical worker trigger / callback paths (kustomize alignment).
+      WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
+      WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
+      # HMAC secret on /internal/worker-trigger and /internal/task-event
+      # (router.go:91-92). Without it, callbacks between summary-api,
+      # summary-worker, and octo-server either fall back to insecure
+      # mode or silently no-op (worst case: a triggered summary task
+      # never gets dispatched to the worker). Same shape as
+      # octo-server / matter — no `:-` default; preflight refuses
+      # placeholder tokens before any service starts.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
+    # Direct port. Loopback by default; nginx /summary/ is the public
+    # path and carries octo_api rate-limit. Override OCTO_SUMMARY_API_BIND
+    # for cross-host operator access.
+    ports:
+      - "${OCTO_SUMMARY_API_BIND:-127.0.0.1}:${OCTO_SUMMARY_API_PORT:-28087}:8080"
+    networks:
+      - octo-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Bumped to 30s to match octo-server's `start_period`. The
+      # summary-api boot path warms a MySQL connection pool against
+      # the loopback-bound mysql service AND validates required env
+      # (OCTO_API_URL etc.) before serving /health, which on a cold
+      # `docker compose up` overlaps with mysql still finishing its
+      # init script. 10s left the OOTB stack reporting transient
+      # `(unhealthy)` on cold boot.
+      start_period: 30s
+
+  summary-worker:
+    image: ${OCTO_SUMMARY_WORKER_IMAGE:-mininglamposs/octo-smart-summary-worker:latest}
+    container_name: octo-summary-worker
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      summary-api:
+        condition: service_started
+    environment:
+      MYSQL_DSN:    "summary:${OCTO_SUMMARY_DB_PASSWORD:-summary}@tcp(mysql:3306)/octo_summary?charset=utf8mb4&parseTime=true"
+      IM_MYSQL_DSN: "summary_reader:${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true"
+      # Worker shares the same OCTO_API_URL contract as summary-api;
+      # DMWORK_API_URL kept as a kustomize-naming alias.
+      OCTO_API_URL:   http://octo-server:8090
+      DMWORK_API_URL: http://octo-server:8090
+      LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
+      # summary-worker (cmd/summary-worker/main.go) calls
+      # config.ValidateRequired on LLM_API_KEY and exits the process when
+      # it's empty — unlike summary-api / matter, which only fail at first
+      # LLM call. To keep `docker compose up -d` reaching `(healthy)` for
+      # the OOTB smoke-test path, fall back to a clearly-fake placeholder
+      # when .env leaves LLM_API_KEY blank. The worker boots, advertises
+      # /internal/healthz, and ONLY explodes when an actual summarization
+      # task hits the LLM client. Set LLM_API_KEY in .env before exercising
+      # smart-summary features. See README "Validation" for the probe.
+      LLM_API_KEY:  ${LLM_API_KEY:-changeme-set-real-llm-api-key-to-enable-summary}
+      LLM_MODEL:    ${LLM_MODEL:-claude-sonnet-4-6}
+      WORKER_INTERNAL_PORT:    "8082"
+      WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
+      WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
+      # Same HMAC secret summary-api / matter / octo-server use on
+      # /internal/* callbacks. Required — no `:-` default — so the
+      # worker fails closed when .env is missing the token instead of
+      # silently posting unsigned task-events back to summary-api.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
+    networks:
+      - octo-net
+    # The worker exposes /internal/healthz on 8082 (no public /health).
+    # Probe that explicitly — the previous `nc -z` fallback masked
+    # process-exits because compose still sees the port as listening
+    # while a panicking goroutine winds the process down.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8082/internal/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 30s matches octo-server / summary-api so the cold-boot grace
+      # window does not wedge the worker into `(unhealthy)` while the
+      # mysql init script is still finishing.
+      start_period: 30s

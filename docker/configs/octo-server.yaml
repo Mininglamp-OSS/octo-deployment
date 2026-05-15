@@ -1,0 +1,93 @@
+# -----------------------------------------------------------------------------
+# OCTO Server runtime config — minimal single-host deployment.
+# -----------------------------------------------------------------------------
+# Values shared with MySQL / Redis / MinIO / WuKongIM match the service
+# names (not ports) on the `octo-net` bridge network declared in
+# docker-compose.yaml. Do not change those strings unless you also rename
+# the corresponding compose services.
+#
+# Credentials with CHANGE_ME_* placeholders are overridden at runtime via
+# Viper's AutomaticEnv (`SetEnvPrefix("TS")`, `.` -> `_`). The compose file
+# passes the matching `TS_*` env names — see the `octo-server` service
+# block in `docker-compose.yaml` for the full list.
+# -----------------------------------------------------------------------------
+
+# Runtime mode: debug | release
+mode: "release"
+
+# external.* is intentionally left empty here. The mounted YAML loses
+# precedence to env vars at runtime; the compose `octo-server` service
+# block sets:
+#   TS_EXTERNAL_BASEURL = http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}
+#   TS_EXTERNAL_IP      = ${OCTO_EXTERNAL_IP}
+# Those values are the single source of truth — change them in `.env`,
+# not here. Hard-coding them in this file shadows the env vars and
+# silently strands operators on `octo.local:28080` no matter what they
+# put in `.env`.
+external:
+  ip: ""
+  baseURL: ""
+  # webLoginURL: ""
+
+# Test-only SMS verification code. Ignored in release mode.
+smsCode: ""
+
+# First-admin bootstrap.
+# When non-empty AND no row exists for `account.adminUID` (default "admin"),
+# octo-server creates a superAdmin row on startup with username "superAdmin"
+# and password = bcrypt(adminPwd). Idempotent across restarts. Override via
+# .env -> TS_ADMINPWD on the octo-server service. Leave blank to skip the
+# bootstrap and seed the first admin manually (see docker/README.md).
+adminPwd: ""
+
+db:
+  # mysqlAddr / redisAddr are overridden at runtime by TS_DB_MYSQLADDR /
+  # TS_DB_REDISADDR set in docker-compose.yaml (which sources them from
+  # .env). Leave the placeholders below — they exist only so the YAML
+  # structure parses, and contain no credentials so a config dump from
+  # this file alone never carries a real password.
+  mysqlAddr: ""
+  redisAddr: ""
+  redisPass: ""
+
+wukongIM:
+  apiURL: "http://wukongim:5001"
+  # managerToken is overridden via TS_WUKONGIM_MANAGERTOKEN env from .env;
+  # leaving this empty means tokenAuthOn-protected admin calls will fail.
+  managerToken: ""
+
+# Image upload requires the PresignedPutter implementation merged in
+# Mininglamp-OSS/octo-server#24 (or any octo-server image built from a
+# commit that includes it). If your OCTO_SERVER_IMAGE pin predates that
+# fix, /api/v1/file/upload will 500 even with this stack healthy.
+fileService: "minio"
+minio:
+  # In-cluster API endpoint used by the server itself for uploads / GETs
+  # against MinIO. Stays as the Docker DNS name since that traffic never
+  # leaves octo-net.
+  url: "http://minio:9000"
+  # Client-facing endpoint baked into the URLs returned by /api/v1/file/*.
+  # Empty here so the compose env (TS_MINIO_DOWNLOADURL) is the single
+  # source of truth — see the octo-server service block in
+  # docker-compose.yaml for the chosen value and the rationale.
+  downloadURL: ""
+  # accessKeyID / secretAccessKey are overridden at runtime by
+  # TS_MINIO_ACCESSKEYID / TS_MINIO_SECRETACCESSKEY (sourced from
+  # OCTO_MINIO_APP_USER / OCTO_MINIO_APP_PASSWORD in .env). Keeping the
+  # YAML values blank — same pattern as `external.*` above — means a
+  # leaked tsdd.yaml never contains a credential string and no
+  # known-default credential can sneak through if an operator forgets
+  # to set TS_MINIO_*.
+  accessKeyID: ""
+  secretAccessKey: ""
+
+logger:
+  level: 2
+  dir: "./logs"
+  lineNum: false
+
+register:
+  off: true
+  onlyChina: false
+  emailOn: false
+

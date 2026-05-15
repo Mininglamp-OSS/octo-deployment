@@ -1,3 +1,6 @@
+# Docker Compose local env (contains real passwords — never commit)
+docker/.env
+
 # Never commit real Secret files. Templates use the *-secret.example.yaml suffix
 # and are tracked; the populated copies must stay local.
 kustomize/**/*-secret.yaml
@@ -10,3 +13,9 @@ kustomize/overlays/**
 !kustomize/overlays/dev/**
 !kustomize/overlays/prod/
 !kustomize/overlays/prod/**
+
+# nginx TLS material — keep certificates / keys out of the repo. The
+# `docker/nginx/certs/` mount is commented out in docker-compose.yaml
+# until an operator wires HTTPS, but the path is gitignored anyway so
+# `cp` / `mv` accidents do not commit a real cert.
+docker/nginx/certs/
