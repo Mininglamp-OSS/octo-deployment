@@ -53,12 +53,12 @@ backing-service guards in `init-extra-dbs.sh`.
 
 | Variable | What it is | How to generate |
 | --- | --- | --- |
-| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `DM_MYSQL_DSN`) | `openssl rand -hex 16` |
+| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN`) | `openssl rand -hex 16` |
 | `MINIO_ROOT_PASSWORD` | MinIO root credential | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32-byte server master key | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share | `openssl rand -hex 32` |
 | `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token, also used by octo-server | `openssl rand -hex 32` |
-| `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary | from your provider |
+| `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary (required for those features; leave blank for a smoke-test stack) | from your provider |
 
 Everything else has sane defaults documented inline in
 [`docker/.env.example`](.env.example).
@@ -83,47 +83,83 @@ behind a firewall.
 disabled, and there is no SMS verification fallback in this stack. So
 the first admin has to be created out-of-band.
 
-Choose **one** of the two paths below.
+The two paths below are the only ones that work against the current
+octo-server binary. Earlier drafts of this doc referenced
+`OCTO_BOOTSTRAP_ADMIN_*` env vars and an `octo-server admin
+hash-password` CLI subcommand — neither exists in the binary today.
+Use Option A unless you have a strong reason to prefer Option B.
 
-### Option A · SQL one-liner (manual, recommended for evaluation)
+### Option A · `adminPwd` config-driven bootstrap (recommended)
 
-After `docker compose up -d` reaches healthy, exec into the MySQL
-container and seed an admin row directly:
+octo-server has a built-in first-admin hook tied to the `adminPwd`
+config key. On startup, if the user row identified by
+`account.adminUID` (default `"admin"`) does not yet exist AND
+`adminPwd` is non-empty, it inserts a `superAdmin` row with
+`username = "superAdmin"`, `role = "superAdmin"`, and
+`password = bcrypt(adminPwd)`. The hook is a one-shot per database —
+once the row exists, subsequent restarts no-op even if `adminPwd` is
+still set, so leaving the value in place is safe.
+
+To use it:
+
+1. Pick a strong password (treat it as a deploy-time secret —
+   octo-server hashes it before write, but the plaintext sits in your
+   `.env`).
+2. Add to `docker/.env` and uncomment the matching env line in the
+   `octo-server` service in `docker-compose.yaml` (commented out by
+   default to keep the OOTB stack from auto-creating an admin in the
+   wrong environment):
+
+   ```bash
+   # docker/.env
+   OCTO_ADMIN_PWD=<a strong password>
+   ```
+
+   ```yaml
+   # docker/docker-compose.yaml — octo-server service environment:
+   TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
+   ```
+3. `docker compose up -d` (or `docker compose restart octo-server` if
+   the stack is already up). On first start with an empty `user`
+   table, octo-server seeds the row.
+4. Visit `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/admin/` and log in
+   with username `superAdmin` and the password from step 1.
+5. Rotate the password from the admin UI and remove `OCTO_ADMIN_PWD`
+   from `.env`. (The seeded row is the source of truth from this
+   point; the `adminPwd` config key is only consulted when the row is
+   absent.)
+
+### Option B · Manual SQL seed
+
+Use this when you cannot edit `docker-compose.yaml`, or you want a
+non-default username / UID. The schema is in
+`octo-server/modules/user/sql/20191106000003_user_legacy01.sql` (the
+relevant fields are `uid`, `username`, `name`, `password`, `role`,
+`status`).
 
 ```bash
-docker compose exec mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" octo <<'SQL'
--- Replace the placeholders before running.
---   - <UID>      : any 11-char string (e.g. shasum -a256 -b username | head -c 11)
---   - <USERNAME> : the login name
---   - <PWHASH>   : bcrypt of the password — run:
---                    docker compose exec octo-server /home/octo-server admin hash-password
---                  (or any bcrypt tool — cost 10 is fine)
-INSERT INTO `user`
-  (`uid`, `username`, `name`, `password`, `role`, `status`, `created_at`, `updated_at`)
+# 1. Generate a bcrypt hash on the host (any cost ≥ 10):
+HTPASSWD_HASH=$(htpasswd -bnBC 10 "" '<your password>' | tr -d ':\n')
+# Or in Python:
+#   python3 -c 'import bcrypt; print(bcrypt.hashpw(b"<pw>", bcrypt.gensalt(10)).decode())'
+
+# 2. Insert the row. role MUST be the string 'superAdmin' (or 'admin')
+#    — the column is VARCHAR(40), not an integer enum.
+docker compose exec mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" octo <<SQL
+INSERT INTO \`user\`
+  (uid, username, name, password, role, status, created_at, updated_at)
 VALUES
-  ('<UID>', '<USERNAME>', 'OCTO Admin', '<PWHASH>', 1, 1, NOW(), NOW());
+  ('admin', 'superAdmin', 'OCTO Admin', '${HTPASSWD_HASH}', 'superAdmin', 1, NOW(), NOW());
 SQL
 ```
 
-Then visit `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/admin/` and log in.
+Then visit `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/admin/` and log in
+with `superAdmin` and the password you hashed.
 
-### Option B · Bootstrap env vars (auto-create on first start)
-
-If your `OCTO_SERVER_IMAGE` is built from a commit that supports the
-bootstrap-admin path, you can have octo-server insert the row itself
-on first start. Add to `docker/.env`:
-
-```bash
-OCTO_BOOTSTRAP_ADMIN_USERNAME=admin
-OCTO_BOOTSTRAP_ADMIN_PASSWORD=<a strong password>
-OCTO_BOOTSTRAP_ADMIN_NAME=OCTO Admin
-```
-
-octo-server creates the row only when the `user` table is empty, so
-this is safe to leave set across restarts.
-
-> If your image does not yet honour these vars, the values are simply
-> ignored and you should fall back to Option A.
+> The placeholder UID `'admin'` matches `account.adminUID`'s default
+> value. If you change `account.adminUID` in `octo-server.yaml`, use
+> the same value here so the Option A re-seed hook stays consistent
+> with your manual row.
 
 ---
 
