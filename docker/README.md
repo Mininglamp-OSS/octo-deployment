@@ -53,26 +53,30 @@ These MUST be changed before bringing the stack up. Defaults are
 placeholder values designed to fail fast: `OCTO_MASTER_KEY` is one byte
 short of octo-server's length check, `MINIO_ROOT_PASSWORD` is 7 chars
 (MinIO requires ≥8) so the `minio` container refuses to boot, the
-`minio-init` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value for
-the MinIO root or app credentials, and `init-extra-dbs.sh` aborts when
-any service-account password contains characters outside
-`[A-Za-z0-9._-]` or when `MYSQL_ROOT_PASSWORD` does. The
-service-account defaults below (`matter` / `summary` /
-`summary_reader`) are the one weak spot — they DO let the stack come
-up unrotated, which is why they are first-class entries in this table
-and called out in the Hardening checklist.
+`minio-init` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value
+(case-insensitive) for the MinIO root or app credentials, the
+`preflight` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value for
+`OCTO_NOTIFY_INTERNAL_TOKEN` and `OCTO_WUKONGIM_MANAGER_TOKEN`, and
+`init-extra-dbs.sh` aborts when `MYSQL_ROOT_PASSWORD` is still a
+`CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
+password contains characters outside `[A-Za-z0-9._-]`, or when
+`OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` /
+`OCTO_SUMMARY_READER_PASSWORD` is left at the literal-string defaults
+(`matter` / `summary` / `summary_reader`). Together these checks mean
+the OOTB stack cannot reach `(healthy)` with any of the placeholder
+values still in place.
 
 | Variable | What it is | How to generate |
 | --- | --- | --- |
-| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN` and validated against `[A-Za-z0-9._-]` by `init-extra-dbs.sh` so the Go MySQL DSN parser does not silently misread the user/host boundary) | `openssl rand -hex 16` |
-| `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. The 7-char placeholder shipped in `.env.example` trips MinIO's own ≥8-char length check; `minio-init` then independently aborts on any `CHANGE_ME_*` / `CHG_ME*` value as defense in depth. | `openssl rand -hex 16` |
-| `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user, attaches the bucket-scoped policy on first boot, AND aborts with a clear error when this value is empty or still a `CHANGE_ME_*` / `CHG_ME*` placeholder. | `openssl rand -hex 24` |
-| `OCTO_MATTER_DB_PASSWORD` | MySQL service account `matter` (full DML on `octo_matter`). MySQL is loopback-only by default, but a stack that widens `OCTO_MYSQL_BIND` without rotating this hands write access on the matter schema to anyone who reaches `:23306` and guesses the literal default `matter`. | `openssl rand -hex 16` |
-| `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary` (full DML on `octo_summary`). Same widen-bind risk profile as `OCTO_MATTER_DB_PASSWORD`. | `openssl rand -hex 16` |
-| `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader` (`SELECT` on the OCTO IM schema — see the `GRANT` block in `init-extra-dbs.sh`). Without rotation, widening `OCTO_MYSQL_BIND` exposes a read snapshot of every conversation in the IM schema to the network. | `openssl rand -hex 16` |
+| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN` and validated against `[A-Za-z0-9._-]` by `init-extra-dbs.sh` so the Go MySQL DSN parser does not silently misread the user/host boundary; the script also refuses any `CHANGE_ME_*` / `CHG_ME*` casing) | `openssl rand -hex 16` |
+| `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. The 7-char placeholder shipped in `.env.example` trips MinIO's own ≥8-char length check; `minio-init` then independently aborts on any `CHANGE_ME_*` / `CHG_ME*` value (case-insensitive) as defense in depth. | `openssl rand -hex 16` |
+| `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user, attaches the bucket-scoped policy on first boot, AND aborts with a clear error when this value is empty or still a `CHANGE_ME_*` / `CHG_ME*` placeholder (case-insensitive). | `openssl rand -hex 24` |
+| `OCTO_MATTER_DB_PASSWORD` | MySQL service account `matter` (full DML on `octo_matter`). `init-extra-dbs.sh` refuses the literal default `matter` so the OOTB stack cannot bring MySQL up with a guess-once credential. | `openssl rand -hex 16` |
+| `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary` (full DML on `octo_summary`). `init-extra-dbs.sh` refuses the literal default `summary`. | `openssl rand -hex 16` |
+| `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader` (`SELECT` on the OCTO IM schema — see the `GRANT` block in `init-extra-dbs.sh`). `init-extra-dbs.sh` refuses the literal default `summary_reader`. | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32-byte server master key | `openssl rand -hex 16` |
-| `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share | `openssl rand -hex 32` |
-| `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token. Bound on WuKongIM via `WK_MANAGERTOKEN` (Viper auto-binds to YAML `managerToken`) and on octo-server via `TS_WUKONGIM_MANAGERTOKEN`. Leaving it empty makes WuKongIM's manager API reachable AND USABLE without auth — set a real value before exposing the stack. | `openssl rand -hex 32` |
+| `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share. The `preflight` one-shot service refuses any `CHANGE_ME_*` / `CHG_ME*` casing. | `openssl rand -hex 32` |
+| `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token. Bound on WuKongIM via `WK_MANAGERTOKEN` (Viper auto-binds to YAML `managerToken`) and on octo-server via `TS_WUKONGIM_MANAGERTOKEN`. Leaving it empty makes WuKongIM's manager API reachable AND USABLE without auth — `preflight` refuses any `CHANGE_ME_*` / `CHG_ME*` casing as well. | `openssl rand -hex 32` |
 | `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary. Required for those features. The compose file falls back to a fake placeholder for `summary-worker` so the OOTB stack still reaches `(healthy)` — actual summarization calls fail until this is set. | from your provider |
 
 Everything else has sane defaults documented inline in
@@ -87,6 +91,17 @@ loopback**. The nginx-proxied paths (`/`, `/api/`, `/v1/`, `/admin/`,
 `/matter/`, `/summary/`, `/ws`, `/minio/`) remain public — note that
 `/minio-console/` is **not** in that list (see "Network surface"
 below).
+
+The same loopback default applies to the direct ports for
+`octo-server` (`OCTO_SERVER_BIND`), `octo-matter` (`OCTO_MATTER_BIND`),
+`smart-summary API` (`OCTO_SUMMARY_API_BIND`), and the WuKongIM
+monitor port (`OCTO_WK_MONITOR_BIND`). The first three skip the
+`octo_api` / `octo_auth` rate-limit zones the nginx vhost applies to
+`/api/`, `/v1/`, `/matter/`, and `/summary/`, so leaving them
+loopback-only keeps an operator-debug port from becoming a
+rate-limit-free production path. The WuKongIM monitor port is an
+admin surface, not a chat transport — chat clients reach WuKongIM via
+the user-facing API/TCP/WS ports, which stay on `0.0.0.0`.
 
 `OCTO_MINIO_API_BIND` is the asymmetric case — see "Network surface"
 below for the rationale.
@@ -107,12 +122,13 @@ know which is which before changing any `OCTO_*_BIND` value.
 | Service | Port (default) | Default bind | Why |
 | --- | --- | --- | --- |
 | nginx (HTTP) | `28080` | `0.0.0.0` | user-facing entrypoint |
-| octo-server REST | `28081` | `0.0.0.0` | exposed for direct API smoke tests |
+| octo-server REST | `28081` | `127.0.0.1` | direct REST port for operator smoke tests; production traffic uses nginx `/api/` + `/v1/` (rate-limited via `octo_api`/`octo_auth` zones in `nginx.conf`). Override `OCTO_SERVER_BIND` to widen. |
 | octo-admin | `28082` | `0.0.0.0` | admin SPA (also reachable via `/admin/`) |
 | octo-web | `28083` | `0.0.0.0` | user SPA (also reachable via `/`) |
-| octo-matter | `28086` | `0.0.0.0` | task service |
-| smart-summary API | `28087` | `0.0.0.0` | summary service |
-| WuKongIM API / TCP / WS / monitor | `25001` / `25100` / `25200` / `25300` | `0.0.0.0` | IM endpoints |
+| octo-matter | `28086` | `127.0.0.1` | direct matter port for operator smoke tests; production traffic uses nginx `/matter/`. Override `OCTO_MATTER_BIND` to widen. |
+| smart-summary API | `28087` | `127.0.0.1` | direct summary-api port for operator smoke tests; production traffic uses nginx `/summary/`. Override `OCTO_SUMMARY_API_BIND` to widen. |
+| WuKongIM API / TCP / WS | `25001` / `25100` / `25200` | `0.0.0.0` | chat client transports |
+| WuKongIM monitor | `25300` | `127.0.0.1` | observability / `/route` admin surface — not a user-facing transport. Override `OCTO_WK_MONITOR_BIND` for cross-host operator access. |
 | **MinIO API** | **`29000`** | **`0.0.0.0`** | **presigned URLs — see below** |
 | MinIO console | `29001` | `127.0.0.1` | admin only; reach via SSH tunnel (see below) |
 | MySQL | `23306` | `127.0.0.1` | backing service |
@@ -306,13 +322,18 @@ Before exposing the stack beyond a developer laptop:
   an unrotated config fails octo-server's length check;
   `MINIO_ROOT_PASSWORD` ships at 7 chars so it trips MinIO's own ≥8-
   char minimum at boot; the `minio-init` one-shot independently aborts
-  on any `CHANGE_ME_*` / `CHG_ME*` value for either MinIO credential
-  pair; and `init-extra-dbs.sh` aborts on first MySQL volume init when
-  `MYSQL_ROOT_PASSWORD` (or any of the service-account passwords)
-  contains characters outside `[A-Za-z0-9._-]`. The MySQL service
-  accounts (`OCTO_MATTER_DB_PASSWORD`, `OCTO_SUMMARY_DB_PASSWORD`,
-  `OCTO_SUMMARY_READER_PASSWORD`) DO have weak literal defaults and
-  must be changed manually — see "Required environment variables".
+  on any `CHANGE_ME_*` / `CHG_ME*` value (case-insensitive) for either
+  MinIO credential pair; the `preflight` one-shot aborts on any
+  `CHANGE_ME_*` / `CHG_ME*` casing for `OCTO_NOTIFY_INTERNAL_TOKEN` and
+  `OCTO_WUKONGIM_MANAGER_TOKEN`; and `init-extra-dbs.sh` aborts on
+  first MySQL volume init when `MYSQL_ROOT_PASSWORD` is still a
+  `CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
+  password contains characters outside `[A-Za-z0-9._-]`, or when the
+  three MySQL service-account passwords (`OCTO_MATTER_DB_PASSWORD`,
+  `OCTO_SUMMARY_DB_PASSWORD`, `OCTO_SUMMARY_READER_PASSWORD`) are
+  still at their literal-string defaults. There is no longer a path
+  for the OOTB stack to come up with placeholder credentials in
+  place.
 - Keep `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` /
   `OCTO_MINIO_CONSOLE_BIND` at `127.0.0.1`. Only widen after rotating
   credentials and placing the host behind a firewall.

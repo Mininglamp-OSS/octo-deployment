@@ -21,6 +21,12 @@ monitor:
   addr: "0.0.0.0:5300"
 
 webhook:
+  # `octo-server:6979` is octo-server's internal gRPC listener. WuKongIM
+  # dials this address whenever it needs to deliver a message-event
+  # webhook back to OCTO, so the hostname must resolve inside the
+  # octo-net Docker bridge — which `octo-server` (the docker service
+  # name) does. This is an internal-only port; it is NOT published to
+  # the host.
   grpcAddr: "octo-server:6979"
 
 conversation:

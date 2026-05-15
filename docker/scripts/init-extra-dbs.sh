@@ -57,6 +57,40 @@ validate_password() {
       exit 1
       ;;
   esac
+  # Reject the canonical `.env.example` placeholders. Lower-case first
+  # so any casing of the prefix trips the same branch — bash 4 in the
+  # mysql:8.0 entrypoint image has nocasematch, but we keep the script
+  # POSIX-friendly to match the rest of the file.
+  local lc
+  lc=$(printf %s "$value" | tr 'A-Z' 'a-z')
+  case "$lc" in
+    change_me_*|chg_me*)
+      echo "[init-extra-dbs] FATAL: $name is still a CHANGE_ME / CHG_ME placeholder." >&2
+      echo "[init-extra-dbs]        Rotate it in .env (openssl rand -hex 16) before initialising MySQL." >&2
+      echo "[init-extra-dbs]        This is a one-shot bootstrap — re-running with a rotated value" >&2
+      echo "[init-extra-dbs]        requires \`docker compose down -v\` to drop the mysql-data volume." >&2
+      exit 1
+      ;;
+  esac
+}
+
+# Reject the literal-string defaults shipped in .env.example for the
+# three service-account passwords. The general allowlist above happily
+# accepts `matter` / `summary` / `summary_reader` because they are
+# inside [A-Za-z0-9._-]; without this extra check the OOTB stack would
+# stand up with three predictable credentials on a MySQL that — if an
+# operator widens OCTO_MYSQL_BIND past loopback — is reachable on
+# :23306. The blocklist is per-variable so an unrelated rotation that
+# happens to land on (e.g.) the literal string `summary` still trips.
+reject_literal_default() {
+  local name="$1"
+  local value="$2"
+  local default="$3"
+  if [ "$value" = "$default" ]; then
+    echo "[init-extra-dbs] FATAL: $name is still the .env.example literal default ('$default')." >&2
+    echo "[init-extra-dbs]        Rotate it in .env (openssl rand -hex 16) before initialising MySQL." >&2
+    exit 1
+  fi
 }
 
 validate_identifier() {
@@ -77,6 +111,12 @@ validate_identifier() {
 validate_password  OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"
 validate_password  OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"
 validate_password  OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD"
+# Block the literal-string defaults from .env.example. These three
+# names are the well-known username for each account, so leaving the
+# password equal to the username is a "guess once" credential.
+reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"      "matter"
+reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
+reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
 # MYSQL_ROOT_PASSWORD is interpolated directly into TS_DB_MYSQLADDR /
 # DM_MYSQL_DSN in docker-compose.yaml (Go-MySQL DSN format). Special
 # characters such as `@`, `#`, `!`, `$`, `&`, `:`, `/` make the DSN
@@ -86,10 +126,19 @@ validate_password  OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD"
 # the application DSNs. Operators who insist on richer characters need
 # to either percent-encode the DSN by hand or move credentials to a
 # secrets store outside this stack.
+#
+# `validate_password` also refuses any `CHANGE_ME_*` / `CHG_ME*`
+# placeholder casing, so an unrotated `.env` cannot complete the
+# first-volume MySQL init.
 validate_password  MYSQL_ROOT_PASSWORD            "$MYSQL_ROOT_PASSWORD"
 validate_identifier MYSQL_DATABASE               "$MYSQL_DATABASE"
 
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+# Use MYSQL_PWD instead of `-p"$MYSQL_ROOT_PASSWORD"` so the password
+# does not appear in `/proc/<pid>/cmdline` — co-tenant containers on
+# the host can read that. The mysql client picks MYSQL_PWD up
+# automatically and prints a one-line warning to stderr; the warning
+# does not affect the SQL or the exit code.
+MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
 -- Schemas ---------------------------------------------------------------------
 CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;

@@ -39,6 +39,70 @@ volumes:
   nginx-logs:
 
 services:
+  # ---------------------------------------------------------------------------
+  # Preflight (one-shot)
+  # ---------------------------------------------------------------------------
+  # Refuses to let the stack come up with shared-secret tokens still on
+  # their `.env.example` `CHANGE_ME_*` / `CHG_ME*` placeholders.
+  # `init-extra-dbs.sh` already handles the MySQL service-account
+  # passwords (it runs inside MySQL's docker-entrypoint-initdb.d on the
+  # first volume init), and `minio-init` handles the MinIO root + app
+  # passwords. The two values left without a fail-fast were the
+  # cross-service auth tokens:
+  #
+  #   - OCTO_NOTIFY_INTERNAL_TOKEN — HMAC secret octo-server / matter /
+  #     summary-api use on /internal/* callbacks. Without rotation, a
+  #     stack widening any of the app-service binds (or a peer on the
+  #     same LAN reaching octo-net) can forge `task-event` /
+  #     `worker-trigger` calls with the well-known `CHANGE_ME_*`
+  #     literal.
+  #   - OCTO_WUKONGIM_MANAGER_TOKEN — admin token for WuKongIM's
+  #     manager API. wk.yaml ships with `tokenAuthOn: true`, but an
+  #     empty / placeholder value short-circuits the comparison and
+  #     accepts any string.
+  #
+  # The matching MinIO / MySQL / OCTO_MASTER_KEY checks live elsewhere
+  # (see minio-init for MINIO_ROOT_PASSWORD / OCTO_MINIO_APP_PASSWORD,
+  # init-extra-dbs.sh for MYSQL_ROOT_PASSWORD + the three DB account
+  # passwords, octo-server's own startup for the 32-byte length on
+  # OCTO_MASTER_KEY). This preflight stays narrowly scoped to the
+  # tokens that have no other guard.
+  preflight:
+    image: ${OCTO_PREFLIGHT_IMAGE:-busybox:1.36}
+    container_name: octo-preflight
+    restart: "no"
+    environment:
+      OCTO_NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
+      OCTO_WUKONGIM_MANAGER_TOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # Lower-case the value before pattern matching so any casing
+        # of the placeholder (`CHANGE_ME_*`, `Change_Me_*`, `chg_me*`)
+        # trips the same branch — busybox sh has no `nocasematch`.
+        check() {
+          name=$$1
+          raw=$$(eval "printf %s \"\$$$$name\"")
+          if [ -z "$$raw" ]; then
+            echo "[preflight] FATAL: $$name is empty — set it in .env (openssl rand -hex 32)" >&2
+            exit 1
+          fi
+          lc=$$(printf %s "$$raw" | tr 'A-Z' 'a-z')
+          case "$$lc" in
+            change_me_*|chg_me*)
+              echo "[preflight] FATAL: $$name is still a CHANGE_ME / CHG_ME placeholder." >&2
+              echo "[preflight]        Rotate it in .env (openssl rand -hex 32) before bringing the stack up." >&2
+              exit 1
+              ;;
+          esac
+        }
+        check OCTO_NOTIFY_INTERNAL_TOKEN
+        check OCTO_WUKONGIM_MANAGER_TOKEN
+        echo "[preflight] tokens look rotated"
+    networks:
+      - octo-net
+
   mysql:
     image: mysql:8.0
     container_name: octo-mysql
@@ -63,8 +127,15 @@ services:
     volumes:
       - mysql-data:/var/lib/mysql
       - ./scripts/init-extra-dbs.sh:/docker-entrypoint-initdb.d/01-extra-dbs.sh:ro
+    # MYSQL_PWD avoids leaking the root password into `/proc/<pid>/cmdline`
+    # the way `-p"$MYSQL_ROOT_PASSWORD"` would (any container co-tenant
+    # could `cat /proc/<pid>/cmdline` and read it). The mysql client
+    # reads MYSQL_PWD from the env automatically. mysqladmin emits a
+    # one-line warning to stderr about MYSQL_PWD being insecure on
+    # multi-user hosts; that warning does not affect the exit code or
+    # the healthcheck verdict.
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -u root --silent"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -188,19 +259,26 @@ services:
         # octo-server signs presigned URLs with; root is what `mc admin`
         # / the MinIO console accept. Either at a placeholder is a
         # blocking condition.
-        case "$${MINIO_ROOT_PASSWORD:-}" in
-          ""|CHANGE_ME_*|CHG_ME*|change_me_*|chg_me*)
+        #
+        # Lower-case before matching so any casing of the placeholder
+        # (`CHANGE_ME_*`, `Change_Me_*`, `chg_me*`) trips the same
+        # branch — busybox sh in the `mc` image has no `nocasematch`,
+        # so we normalise with `tr` instead of growing the case list.
+        root_lc=$$(printf %s "$${MINIO_ROOT_PASSWORD:-}" | tr 'A-Z' 'a-z')
+        case "$$root_lc" in
+          ""|change_me_*|chg_me*)
             echo "[minio-init] FATAL: MINIO_ROOT_PASSWORD is empty or still a CHANGE_ME / CHG_ME placeholder." >&2
             echo "[minio-init]        Rotate it in .env (openssl rand -hex 16) before bringing the stack up." >&2
             exit 1
             ;;
         esac
-        case "$${OCTO_MINIO_APP_PASSWORD:-}" in
+        app_lc=$$(printf %s "$${OCTO_MINIO_APP_PASSWORD:-}" | tr 'A-Z' 'a-z')
+        case "$$app_lc" in
           "")
             echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is empty — set it in .env" >&2
             exit 1
             ;;
-          CHANGE_ME_*|CHG_ME*|change_me_*|chg_me*)
+          change_me_*|chg_me*)
             echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is still a CHANGE_ME / CHG_ME placeholder." >&2
             echo "[minio-init]        Rotate it in .env (openssl rand -hex 24) before bringing the stack up." >&2
             exit 1
@@ -277,7 +355,12 @@ services:
       - "${OCTO_WK_API_PORT:-25001}:5001"
       - "${OCTO_WK_TCP_PORT:-25100}:5100"
       - "${OCTO_WK_WS_PORT:-25200}:5200"
-      - "${OCTO_WK_MONITOR_PORT:-25300}:5300"
+      # Monitor port is an internal observability surface (varz / metrics
+      # / `/route` admin), not a chat transport — bind to loopback by
+      # default. Override via OCTO_WK_MONITOR_BIND for operators who want
+      # to reach it from a jumphost. The user-facing surfaces above
+      # (API/TCP/WS) stay on 0.0.0.0 because clients connect to them.
+      - "${OCTO_WK_MONITOR_BIND:-127.0.0.1}:${OCTO_WK_MONITOR_PORT:-25300}:5300"
     volumes:
       - wukongim-data:/root/wukongim
       - ./configs/wk.yaml:/root/wukongim/wk.yaml:ro
@@ -380,25 +463,47 @@ services:
       # --- are the single source of truth.
       TS_EXTERNAL_BASEURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}"
       TS_EXTERNAL_IP: "${OCTO_EXTERNAL_IP:-127.0.0.1}"
-      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
+      # No `:-` default — an empty value here would silently drop
+      # /internal/* callback HMAC verification on the octo-server side
+      # and leave matter / summary-api trusting unsigned requests. The
+      # `preflight` service refuses placeholder tokens; compose itself
+      # warns when this var is missing from .env. Two-name sync with
+      # matter (line below) keeps the contract symmetric.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
       # First-admin bootstrap. Uncomment to have octo-server seed a
       # superAdmin row (username "superAdmin", password bcrypt(<value>))
       # on first start when the user table is empty. See "First-admin
       # bootstrap · Option A" in docker/README.md before enabling.
       # TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
     depends_on:
+      preflight:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # `service_started` (not `service_healthy`) is intentional: the
+      # octo-server -> wukongim contract is webhook-style (gRPC at
+      # octo-server:6979, WuKongIM dials *us*), so wukongim only needs
+      # to be running, not yet healthy. Using `service_healthy` here
+      # would create a deadlock — wukongim's healthcheck has flapped
+      # in past releases and a stuck WK kept octo-server from booting
+      # even though the missing piece was wukongim itself.
       wukongim:
         condition: service_started
       minio:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
+    # Direct REST port, intended for operator smoke tests / debugging.
+    # Loopback by default so the OOTB stack does not expose octo-server
+    # past the rate-limited nginx vhost (`/api/`, `/v1/` carry the
+    # octo_api / octo_auth limit_req zones from nginx.conf:31-32; a
+    # client hitting :28081 directly bypasses both). Flip
+    # OCTO_SERVER_BIND to 0.0.0.0 for an operator who needs the port
+    # reachable from a different host.
     ports:
-      - "${OCTO_SERVER_PORT:-28081}:8090"
+      - "${OCTO_SERVER_BIND:-127.0.0.1}:${OCTO_SERVER_PORT:-28081}:8090"
     volumes:
       - ./configs/octo-server.yaml:/home/configs/tsdd.yaml:ro
       - server-logs:/home/logs
@@ -498,6 +603,8 @@ services:
     container_name: octo-matter
     restart: unless-stopped
     depends_on:
+      preflight:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
       octo-server:
@@ -514,8 +621,13 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-claude-sonnet-4-6}
       LLM_TIMEOUT: "30"
+    # Direct port, intended for operator smoke tests. Loopback by
+    # default — production traffic reaches matter via nginx /matter/
+    # which carries the octo_api rate-limit zone. Override
+    # OCTO_MATTER_BIND when an operator needs the port from another
+    # host.
     ports:
-      - "${OCTO_MATTER_PORT:-28086}:8080"
+      - "${OCTO_MATTER_BIND:-127.0.0.1}:${OCTO_MATTER_PORT:-28086}:8080"
     networks:
       - octo-net
     healthcheck:
@@ -533,6 +645,8 @@ services:
     container_name: octo-summary-api
     restart: unless-stopped
     depends_on:
+      preflight:
+        condition: service_completed_successfully
       mysql:
         condition: service_healthy
     environment:
@@ -553,8 +667,11 @@ services:
       # Canonical worker trigger / callback paths (kustomize alignment).
       WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
       WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
+    # Direct port. Loopback by default; nginx /summary/ is the public
+    # path and carries octo_api rate-limit. Override OCTO_SUMMARY_API_BIND
+    # for cross-host operator access.
     ports:
-      - "${OCTO_SUMMARY_API_PORT:-28087}:8080"
+      - "${OCTO_SUMMARY_API_BIND:-127.0.0.1}:${OCTO_SUMMARY_API_PORT:-28087}:8080"
     networks:
       - octo-net
     healthcheck:
@@ -562,7 +679,14 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # Bumped to 30s to match octo-server's `start_period`. The
+      # summary-api boot path warms a MySQL connection pool against
+      # the loopback-bound mysql service AND validates required env
+      # (OCTO_API_URL etc.) before serving /health, which on a cold
+      # `docker compose up` overlaps with mysql still finishing its
+      # init script. 10s left the OOTB stack reporting transient
+      # `(unhealthy)` on cold boot.
+      start_period: 30s
 
   summary-worker:
     image: ${OCTO_SUMMARY_WORKER_IMAGE:-mininglamposs/octo-smart-summary-worker:latest}
@@ -606,4 +730,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      # 30s matches octo-server / summary-api so the cold-boot grace
+      # window does not wedge the worker into `(unhealthy)` while the
+      # mysql init script is still finishing.
+      start_period: 30s
