@@ -25,6 +25,8 @@ cd octo-deployment
 cp docker/.env.example docker/.env
 # Edit docker/.env — at minimum change the placeholders flagged in the file:
 #   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MINIO_APP_PASSWORD,
+#   OCTO_MATTER_DB_PASSWORD, OCTO_SUMMARY_DB_PASSWORD,
+#   OCTO_SUMMARY_READER_PASSWORD,
 #   OCTO_MASTER_KEY, OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
 
 cd docker
@@ -48,14 +50,26 @@ docker compose down -v
 ## Required environment variables
 
 These MUST be changed before bringing the stack up. Defaults are
-placeholder values that will either fail length checks or trip the
-backing-service guards in `init-extra-dbs.sh`.
+placeholder values designed to fail fast: `OCTO_MASTER_KEY` is one byte
+short of octo-server's length check, `MINIO_ROOT_PASSWORD` is 7 chars
+(MinIO requires ≥8) so the `minio` container refuses to boot, the
+`minio-init` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value for
+the MinIO root or app credentials, and `init-extra-dbs.sh` aborts when
+any service-account password contains characters outside
+`[A-Za-z0-9._-]` or when `MYSQL_ROOT_PASSWORD` does. The
+service-account defaults below (`matter` / `summary` /
+`summary_reader`) are the one weak spot — they DO let the stack come
+up unrotated, which is why they are first-class entries in this table
+and called out in the Hardening checklist.
 
 | Variable | What it is | How to generate |
 | --- | --- | --- |
-| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN`) | `openssl rand -hex 16` |
-| `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. | `openssl rand -hex 16` |
-| `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user and attaches the bucket-scoped policy on first boot. | `openssl rand -hex 24` |
+| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN` and validated against `[A-Za-z0-9._-]` by `init-extra-dbs.sh` so the Go MySQL DSN parser does not silently misread the user/host boundary) | `openssl rand -hex 16` |
+| `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. The 7-char placeholder shipped in `.env.example` trips MinIO's own ≥8-char length check; `minio-init` then independently aborts on any `CHANGE_ME_*` / `CHG_ME*` value as defense in depth. | `openssl rand -hex 16` |
+| `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user, attaches the bucket-scoped policy on first boot, AND aborts with a clear error when this value is empty or still a `CHANGE_ME_*` / `CHG_ME*` placeholder. | `openssl rand -hex 24` |
+| `OCTO_MATTER_DB_PASSWORD` | MySQL service account `matter` (full DML on `octo_matter`). MySQL is loopback-only by default, but a stack that widens `OCTO_MYSQL_BIND` without rotating this hands write access on the matter schema to anyone who reaches `:23306` and guesses the literal default `matter`. | `openssl rand -hex 16` |
+| `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary` (full DML on `octo_summary`). Same widen-bind risk profile as `OCTO_MATTER_DB_PASSWORD`. | `openssl rand -hex 16` |
+| `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader` (`SELECT` on the OCTO IM schema — see the `GRANT` block in `init-extra-dbs.sh`). Without rotation, widening `OCTO_MYSQL_BIND` exposes a read snapshot of every conversation in the IM schema to the network. | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32-byte server master key | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share | `openssl rand -hex 32` |
 | `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token. Bound on WuKongIM via `WK_MANAGERTOKEN` (Viper auto-binds to YAML `managerToken`) and on octo-server via `TS_WUKONGIM_MANAGERTOKEN`. Leaving it empty makes WuKongIM's manager API reachable AND USABLE without auth — set a real value before exposing the stack. | `openssl rand -hex 32` |
@@ -70,14 +84,18 @@ Everything else has sane defaults documented inline in
 default to `127.0.0.1`. This means MySQL (`23306`), Redis (`26379`)
 and the MinIO console (`29001`) are **only reachable from the host
 loopback**. The nginx-proxied paths (`/`, `/api/`, `/v1/`, `/admin/`,
-`/matter/`, `/summary/`, `/ws`, `/minio/`, `/minio-console/`) remain
-public.
+`/matter/`, `/summary/`, `/ws`, `/minio/`) remain public — note that
+`/minio-console/` is **not** in that list (see "Network surface"
+below).
 
 `OCTO_MINIO_API_BIND` is the asymmetric case — see "Network surface"
 below for the rationale.
 
 Override the loopback defaults only if you have rotated all
-credentials and placed the host behind a firewall.
+credentials and placed the host behind a firewall. **Redis runs
+without authentication** in this stack — keep `OCTO_REDIS_BIND` on
+`127.0.0.1` (or a private interface) until you wire `--requirepass`
+into the redis service. See the "Hardening checklist" for the steps.
 
 ---
 
@@ -96,9 +114,28 @@ know which is which before changing any `OCTO_*_BIND` value.
 | smart-summary API | `28087` | `0.0.0.0` | summary service |
 | WuKongIM API / TCP / WS / monitor | `25001` / `25100` / `25200` / `25300` | `0.0.0.0` | IM endpoints |
 | **MinIO API** | **`29000`** | **`0.0.0.0`** | **presigned URLs — see below** |
-| MinIO console | `29001` | `127.0.0.1` | admin only; reach via `/minio-console/` |
+| MinIO console | `29001` | `127.0.0.1` | admin only; reach via SSH tunnel (see below) |
 | MySQL | `23306` | `127.0.0.1` | backing service |
 | Redis | `26379` | `127.0.0.1` | backing service |
+
+The MinIO console is **not** proxied through nginx by default.
+Earlier revisions exposed it under `/minio-console/`, which put the
+MinIO admin login one click away from anyone who reached
+`OCTO_HTTP_PORT` — and a stack booted with the placeholder root
+password would have a known-default credential accepted there.
+Operators reach the console via an SSH tunnel against the loopback
+bind:
+
+```bash
+ssh -L 9001:127.0.0.1:29001 user@host
+# then visit http://localhost:9001 in your browser
+```
+
+To re-enable the public route (NOT recommended; only do this after
+rotating `MINIO_ROOT_PASSWORD` and placing the proxy behind auth),
+uncomment the commented-out `octo_minio_console` upstream and
+`/minio-console/` location block at the top of
+`docker/nginx/conf.d/octo.conf.template`.
 
 ### Why the MinIO API port is public by design
 
@@ -264,12 +301,37 @@ with `superAdmin` and the password you hashed.
 
 Before exposing the stack beyond a developer laptop:
 
-- Rotate every `CHANGE_ME_*` value in `.env`. The placeholders in
-  `OCTO_MASTER_KEY` are intentionally one byte short so an unrotated
-  config fails octo-server's length check.
+- Rotate every `CHANGE_ME_*` / `CHG_ME*` value in `.env`. The
+  placeholder in `OCTO_MASTER_KEY` is intentionally one byte short so
+  an unrotated config fails octo-server's length check;
+  `MINIO_ROOT_PASSWORD` ships at 7 chars so it trips MinIO's own ≥8-
+  char minimum at boot; the `minio-init` one-shot independently aborts
+  on any `CHANGE_ME_*` / `CHG_ME*` value for either MinIO credential
+  pair; and `init-extra-dbs.sh` aborts on first MySQL volume init when
+  `MYSQL_ROOT_PASSWORD` (or any of the service-account passwords)
+  contains characters outside `[A-Za-z0-9._-]`. The MySQL service
+  accounts (`OCTO_MATTER_DB_PASSWORD`, `OCTO_SUMMARY_DB_PASSWORD`,
+  `OCTO_SUMMARY_READER_PASSWORD`) DO have weak literal defaults and
+  must be changed manually — see "Required environment variables".
 - Keep `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` /
   `OCTO_MINIO_CONSOLE_BIND` at `127.0.0.1`. Only widen after rotating
   credentials and placing the host behind a firewall.
+- Redis runs **without authentication** in this stack — there is no
+  `--requirepass` on the `redis` service `command:`. Flipping
+  `OCTO_REDIS_BIND` to `0.0.0.0` therefore exposes an unauthenticated
+  Redis to any host that can reach the port. Before widening the
+  bind, EITHER keep Redis on a private interface only, OR add
+  `--requirepass <secret>` to the `redis` service `command:` in
+  `docker-compose.yaml` AND wire the same secret into `TS_DB_REDISPASS`
+  / `DM_REDIS_PASS` on the `octo-server` service so the application
+  side keeps reaching cache. (Adding a CLI-flag-driven Redis password
+  is tracked as a follow-up; see the PR description for the link.)
+- The MinIO console is loopback-only and **not** proxied through
+  nginx by default. Reach it via SSH-forward to `:29001` (see
+  "Network surface"). If you ever uncomment the `/minio-console/`
+  block in `nginx/conf.d/octo.conf.template`, treat
+  `MINIO_ROOT_PASSWORD` rotation as a precondition — the public
+  `OCTO_HTTP_PORT` then becomes a path to `mc admin`.
 - `OCTO_MINIO_API_BIND` stays `0.0.0.0` — see "Network surface · Why
   the MinIO API port is public by design". Restrict the port at the
   firewall layer if you need to limit reach, do not close it.
@@ -291,6 +353,12 @@ Before exposing the stack beyond a developer laptop:
 - Switch `OCTO_DOMAIN` to a real hostname and front the stack with TLS
   (uncomment the `443` block in `docker-compose.yaml` and the HTTPS
   server block in `nginx/conf.d/octo.conf.template`).
+- Pin every `mininglamposs/octo-*` image to a specific tag once the
+  PresignedPutter fix in `Mininglamp-OSS/octo-server#24` ships a
+  release. The compose file currently defaults to `:latest` for
+  `octo-server`, `octo-web`, `octo-admin`, `octo-matter`, and the
+  smart-summary images — fine for a laptop, not fine for a stable
+  deployment. WuKongIM and `mc` are already pinned.
 
 ---
 

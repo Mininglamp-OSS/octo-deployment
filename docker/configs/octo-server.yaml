@@ -44,9 +44,10 @@ db:
   # mysqlAddr / redisAddr are overridden at runtime by TS_DB_MYSQLADDR /
   # TS_DB_REDISADDR set in docker-compose.yaml (which sources them from
   # .env). Leave the placeholders below — they exist only so the YAML
-  # structure parses.
-  mysqlAddr: "root:CHANGE_ME_MYSQL_PASSWORD@tcp(mysql:3306)/octo?charset=utf8mb4&parseTime=true&loc=Local"
-  redisAddr: "redis:6379"
+  # structure parses, and contain no credentials so a config dump from
+  # this file alone never carries a real password.
+  mysqlAddr: ""
+  redisAddr: ""
   redisPass: ""
 
 wukongIM:
@@ -70,8 +71,15 @@ minio:
   # source of truth — see the octo-server service block in
   # docker-compose.yaml for the chosen value and the rationale.
   downloadURL: ""
-  accessKeyID: "octoadmin"
-  secretAccessKey: "CHANGE_ME_MINIO_PASSWORD"
+  # accessKeyID / secretAccessKey are overridden at runtime by
+  # TS_MINIO_ACCESSKEYID / TS_MINIO_SECRETACCESSKEY (sourced from
+  # OCTO_MINIO_APP_USER / OCTO_MINIO_APP_PASSWORD in .env). Keeping the
+  # YAML values blank — same pattern as `external.*` above — means a
+  # leaked tsdd.yaml never contains a credential string and no
+  # known-default credential can sneak through if an operator forgets
+  # to set TS_MINIO_*.
+  accessKeyID: ""
+  secretAccessKey: ""
 
 logger:
   level: 2

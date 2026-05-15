@@ -36,6 +36,7 @@ volumes:
   minio-data:
   wukongim-data:
   server-logs:
+  nginx-logs:
 
 services:
   mysql:
@@ -100,8 +101,22 @@ services:
       # Compose interpolates these once into the YAML below; we cannot rely
       # on nested `${VAR}` inside .env values being expanded at runtime, so
       # the composition lives here instead of in .env.
+      #
+      # MINIO_SERVER_URL is the public S3 endpoint clients are told about
+      # in error responses / multipart redirects. The /minio path prefix
+      # works because nginx exposes /minio/ as a passthrough proxy to
+      # `minio:9000`.
       MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/minio}
-      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/minio-console/}
+      # MINIO_BROWSER_REDIRECT_URL is the canonical URL MinIO redirects
+      # the console to after auth. The previous default pointed at the
+      # nginx /minio-console/ route, but that route is no longer exposed
+      # by default (see nginx/conf.d/octo.conf.template) — operators reach
+      # the console via an SSH tunnel against the loopback :29001 bind.
+      # Leaving this empty makes MinIO render the console at whatever URL
+      # the request arrived on, which is the right behaviour for a tunnel.
+      # Set a literal value in .env if you re-enable the nginx route or
+      # front the console with a different proxy.
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-}
     # MinIO API is public by default: octo-server hands browser clients
     # presigned (SigV4) URLs that point at this port directly, and SigV4
     # signatures cannot survive an nginx path-prefix rewrite. Access keys
@@ -153,10 +168,44 @@ services:
     command:
       - |
         set -eu
-        if [ -z "$${OCTO_MINIO_APP_PASSWORD:-}" ]; then
-          echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is empty — set it in .env" >&2
-          exit 1
-        fi
+        # ---------------------------------------------------------------
+        # Placeholder fail-fast.
+        # ---------------------------------------------------------------
+        # MinIO itself enforces a ≥8-char minimum on MINIO_ROOT_PASSWORD,
+        # and the .env.example placeholder is intentionally 7 chars so
+        # that an unrotated config never even reaches a healthy `minio`
+        # container. The check below is the second layer: it catches any
+        # ≥8-char value that still matches the well-known
+        # `CHANGE_ME_*` / `CHG_ME*` placeholder pattern (e.g. an operator
+        # who lengthened the placeholder rather than replacing it). At
+        # that point the only safe move is to refuse to attach the
+        # octo-app IAM policy — otherwise minio-init would happily wire
+        # up presigned-URL credentials against a known-default root
+        # password while the public 0.0.0.0:29000 API and the
+        # nginx-proxied /minio-console/ route stay reachable.
+        #
+        # We check both root and app credentials. The app pair is what
+        # octo-server signs presigned URLs with; root is what `mc admin`
+        # / the MinIO console accept. Either at a placeholder is a
+        # blocking condition.
+        case "$${MINIO_ROOT_PASSWORD:-}" in
+          ""|CHANGE_ME_*|CHG_ME*|change_me_*|chg_me*)
+            echo "[minio-init] FATAL: MINIO_ROOT_PASSWORD is empty or still a CHANGE_ME / CHG_ME placeholder." >&2
+            echo "[minio-init]        Rotate it in .env (openssl rand -hex 16) before bringing the stack up." >&2
+            exit 1
+            ;;
+        esac
+        case "$${OCTO_MINIO_APP_PASSWORD:-}" in
+          "")
+            echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is empty — set it in .env" >&2
+            exit 1
+            ;;
+          CHANGE_ME_*|CHG_ME*|change_me_*|chg_me*)
+            echo "[minio-init] FATAL: OCTO_MINIO_APP_PASSWORD is still a CHANGE_ME / CHG_ME placeholder." >&2
+            echo "[minio-init]        Rotate it in .env (openssl rand -hex 24) before bringing the stack up." >&2
+            exit 1
+            ;;
+        esac
         echo "[minio-init] waiting for MinIO root alias…"
         until mc alias set local "http://minio:9000" "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
           sleep 1
@@ -378,6 +427,12 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/templates:ro
       - ./nginx/empty-default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Persist access + error logs across container restarts so that
+      # post-mortems on a crashed stack still have request history.
+      # Mounted as a named volume rather than a host bind to keep the
+      # OOTB stack portable; redirect to a host path if your operator
+      # tooling needs them on disk.
+      - nginx-logs:/var/log/nginx
       # - ./nginx/certs:/etc/nginx/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost/_nginx_up >/dev/null 2>&1 || exit 1"]
