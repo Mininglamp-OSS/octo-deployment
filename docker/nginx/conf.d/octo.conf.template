@@ -43,6 +43,23 @@ server {
         proxy_read_timeout 600s;
     }
 
+    # OIDC SSO / auth endpoints — octo-server mounts these directly
+    # under /v1/ (no /api prefix), matching what
+    # kustomize/base/octo-web-nginx-config.yaml forwards. OIDC is
+    # disabled in the OSS profile by default; this route is here so
+    # enabling it later does not require a deploy-time nginx change.
+    # `^~` makes the prefix match win over the SPA catch-all `/`.
+    location ^~ /v1/ {
+        proxy_pass         http://octo_api/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+        proxy_read_timeout 600s;
+    }
+
     location /ws {
         proxy_pass          http://octo_ws;
         proxy_http_version  1.1;
