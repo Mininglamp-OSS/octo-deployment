@@ -65,15 +65,64 @@ Everything else has sane defaults documented inline in
 
 ### Backing-service host bindings
 
-`OCTO_MYSQL_BIND`, `OCTO_REDIS_BIND`, `OCTO_MINIO_API_BIND`,
-`OCTO_MINIO_CONSOLE_BIND` default to `127.0.0.1`. This means MySQL
-(`23306`), Redis (`26379`), and the MinIO API (`29000`) / console
-(`29001`) ports are **only reachable from the host loopback**. The
-nginx-proxied paths (`/`, `/api/`, `/admin/`, `/matter/`, `/summary/`,
-`/ws`, `/minio/`, `/minio-console/`) remain public.
+`OCTO_MYSQL_BIND`, `OCTO_REDIS_BIND`, `OCTO_MINIO_CONSOLE_BIND`
+default to `127.0.0.1`. This means MySQL (`23306`), Redis (`26379`)
+and the MinIO console (`29001`) are **only reachable from the host
+loopback**. The nginx-proxied paths (`/`, `/api/`, `/v1/`, `/admin/`,
+`/matter/`, `/summary/`, `/ws`, `/minio/`, `/minio-console/`) remain
+public.
 
-Override only if you have rotated all credentials and placed the host
-behind a firewall.
+`OCTO_MINIO_API_BIND` is the asymmetric case — see "Network surface"
+below for the rationale.
+
+Override the loopback defaults only if you have rotated all
+credentials and placed the host behind a firewall.
+
+---
+
+## Network surface
+
+The stack exposes two distinct sets of host ports. Operators should
+know which is which before changing any `OCTO_*_BIND` value.
+
+| Service | Port (default) | Default bind | Why |
+| --- | --- | --- | --- |
+| nginx (HTTP) | `28080` | `0.0.0.0` | user-facing entrypoint |
+| octo-server REST | `28081` | `0.0.0.0` | exposed for direct API smoke tests |
+| octo-admin | `28082` | `0.0.0.0` | admin SPA (also reachable via `/admin/`) |
+| octo-web | `28083` | `0.0.0.0` | user SPA (also reachable via `/`) |
+| octo-matter | `28086` | `0.0.0.0` | task service |
+| smart-summary API | `28087` | `0.0.0.0` | summary service |
+| WuKongIM API / TCP / WS / monitor | `25001` / `25100` / `25200` / `25300` | `0.0.0.0` | IM endpoints |
+| **MinIO API** | **`29000`** | **`0.0.0.0`** | **presigned URLs — see below** |
+| MinIO console | `29001` | `127.0.0.1` | admin only; reach via `/minio-console/` |
+| MySQL | `23306` | `127.0.0.1` | backing service |
+| Redis | `26379` | `127.0.0.1` | backing service |
+
+### Why the MinIO API port is public by design
+
+octo-server's `/api/v1/file/*` responses contain **presigned (SigV4)
+URLs that point at the MinIO API directly** — not through nginx. SigV4
+signs the canonical request path; any nginx rewrite (`/minio/...` ->
+`/...`) breaks the signature, so the browser must reach MinIO's `9000`
+port over the same hostname octo-server signed against. That is the
+value of `TS_MINIO_DOWNLOADURL`, which is fixed to host:port form (no
+path prefix) in `docker-compose.yaml`.
+
+The data is protected by:
+
+- the MinIO root credentials (`MINIO_ROOT_*`) — never sent over the
+  wire by the server,
+- the **short TTL** of every presigned URL (minutes, not days),
+- octo-server's authorisation layer in front of `/api/v1/file/*`.
+
+Closing the port closes valid uploads / downloads. If you want a
+firewall-restricted deployment, restrict `29000` to the same client
+range that can reach `28080` — do not block it.
+
+If you absolutely need every public port to live behind nginx, you'd
+need a SigV4-aware proxy (e.g. one that re-signs each request) — that
+is out of scope for this compose stack.
 
 ---
 
@@ -170,8 +219,12 @@ Before exposing the stack beyond a developer laptop:
 - Rotate every `CHANGE_ME_*` value in `.env`. The placeholders in
   `OCTO_MASTER_KEY` are intentionally one byte short so an unrotated
   config fails octo-server's length check.
-- Keep `OCTO_*_BIND=127.0.0.1` on backing services. Only widen after
-  rotating credentials and placing the host behind a firewall.
+- Keep `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` /
+  `OCTO_MINIO_CONSOLE_BIND` at `127.0.0.1`. Only widen after rotating
+  credentials and placing the host behind a firewall.
+- `OCTO_MINIO_API_BIND` stays `0.0.0.0` — see "Network surface · Why
+  the MinIO API port is public by design". Restrict the port at the
+  firewall layer if you need to limit reach, do not close it.
 - Narrow `OCTO_NETWORK_SUBNET` further (already defaults to `/24`) if
   it overlaps an existing VPN / VPC range.
 - Set a real `OCTO_WUKONGIM_MANAGER_TOKEN`. WuKongIM's `tokenAuthOn`
@@ -207,6 +260,33 @@ implementation tracked in
 [`Mininglamp-OSS/octo-server#24`](https://github.com/Mininglamp-OSS/octo-server/issues/24).
 Pin `OCTO_SERVER_IMAGE` to a tag built from a commit that includes
 that fix (or `:latest` once it ships).
+
+### Presigned URL access fails with "connection refused" / "name resolution"
+
+Symptom: image / file upload returns 200 from `/api/v1/file/*`, but
+the browser then hangs or 0-bytes when fetching the presigned URL.
+
+The presigned URL points at `${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}`
+(default `http://octo.local:29000`), bypassing nginx. Check, in
+order:
+
+1. `OCTO_MINIO_API_BIND` is `0.0.0.0` (default). If you narrowed it
+   to `127.0.0.1`, only the host itself can reach the port — LAN /
+   browser clients on other machines will fail.
+2. `OCTO_MINIO_API_PORT` (default `29000`) is reachable from the
+   client's network — `curl -v http://${OCTO_DOMAIN}:29000/minio/health/live`
+   should return `200`.
+3. `${OCTO_DOMAIN}` resolves on the client (the `/etc/hosts` entry
+   for `octo.local` has to exist on every machine that hits the UI,
+   not just the host).
+4. `TS_MINIO_DOWNLOADURL` in the rendered config has **no path
+   component** — `docker compose config | grep TS_MINIO_DOWNLOADURL`
+   should print exactly `http://<host>:<port>`. octo-server PR#50 R4
+   rejects path-prefixed values at startup.
+
+Do **not** "fix" this by routing the URL through nginx (`/minio/...`)
+— SigV4 signatures break under any path rewrite. See "Network surface
+· Why the MinIO API port is public by design" above.
 
 ### `WuKongIM /route` returns the literal string `${OCTO_DOMAIN}`
 
