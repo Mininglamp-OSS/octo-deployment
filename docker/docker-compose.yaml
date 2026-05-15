@@ -102,10 +102,14 @@ services:
       # the composition lives here instead of in .env.
       MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/minio}
       MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/minio-console/}
-    # Backing service API on loopback by default. Console likewise — operators
-    # access it via the nginx /minio-console/ route, not the raw 9001 port.
+    # MinIO API is public by default: octo-server hands browser clients
+    # presigned (SigV4) URLs that point at this port directly, and SigV4
+    # signatures cannot survive an nginx path-prefix rewrite. Access keys
+    # protect the data — the port being reachable does not.
+    # The MinIO console is loopback-only — admins reach it through the
+    # nginx /minio-console/ route or via SSH-forwarded :9001.
     ports:
-      - "${OCTO_MINIO_API_BIND:-127.0.0.1}:${OCTO_MINIO_API_PORT:-29000}:9000"
+      - "${OCTO_MINIO_API_BIND:-0.0.0.0}:${OCTO_MINIO_API_PORT:-29000}:9000"
       - "${OCTO_MINIO_CONSOLE_BIND:-127.0.0.1}:${OCTO_MINIO_CONSOLE_PORT:-29001}:9001"
     volumes:
       - minio-data:/data
@@ -208,15 +212,14 @@ services:
       # --- cannot reach that hostname, so /api/v1/file/* responses
       # --- become unusable. We override with a host-reachable URL.
       # ---
-      # --- The host:port form below bypasses nginx — chosen because it
-      # --- works against ANY octo-server image, including ones that do
-      # --- not yet include the path-prefix preservation tracked in
-      # --- octo-server PR#50 (YUJ-728). When that ships, this can be
-      # --- flipped to the path-prefixed nginx form:
-      # ---     http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/minio
-      # --- For host:port to be reachable from non-loopback clients the
-      # --- operator must widen OCTO_MINIO_API_BIND from 127.0.0.1 to
-      # --- 0.0.0.0 in .env (single-host loopback users need no change).
+      # --- Host:port form (no path prefix) is intentional. SigV4
+      # --- presigned URLs sign the canonical path, so any nginx
+      # --- /minio rewrite breaks the signature. octo-server PR#50 R4
+      # --- (YUJ-728) drops path-prefix support and validates that
+      # --- DownloadURL is host:port only — anything else is rejected
+      # --- at startup. The MinIO API port is bound to 0.0.0.0 by
+      # --- default (see the `minio` service block) so this URL is
+      # --- reachable from the same hosts that hit the nginx vhost.
       TS_MINIO_DOWNLOADURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
       NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
       # First-admin bootstrap. Uncomment to have octo-server seed a
