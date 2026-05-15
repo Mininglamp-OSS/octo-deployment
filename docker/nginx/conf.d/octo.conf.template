@@ -141,6 +141,16 @@ server {
     }
 
     location /matter/ {
+        # Same octo_api zone (30r/s, 10MB) used by /api/ — keeps the
+        # nginx-fronted matter surface within the same per-IP budget
+        # as the rest of the OCTO REST API. The matter / summary
+        # backing ports stay loopback-only by default precisely
+        # because nginx is the rate-limited public path; without this
+        # `limit_req` the README claim ("nginx applies rate limiting"
+        # as one of the three reasons direct ports are loopback) was
+        # not actually true on these two routes. burst=20 absorbs
+        # short page-load spikes without 503ing legitimate clients.
+        limit_req zone=octo_api burst=20 nodelay;
         proxy_pass         http://matter:8080/;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
@@ -150,6 +160,9 @@ server {
     }
 
     location /summary/ {
+        # See /matter/ above — same octo_api zone applied for
+        # consistency with the documented security model.
+        limit_req zone=octo_api burst=20 nodelay;
         proxy_pass         http://summary-api:8080/;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;

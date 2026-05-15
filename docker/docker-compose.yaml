@@ -712,6 +712,14 @@ services:
       # Canonical worker trigger / callback paths (kustomize alignment).
       WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
       WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
+      # HMAC secret on /internal/worker-trigger and /internal/task-event
+      # (router.go:91-92). Without it, callbacks between summary-api,
+      # summary-worker, and octo-server either fall back to insecure
+      # mode or silently no-op (worst case: a triggered summary task
+      # never gets dispatched to the worker). Same shape as
+      # octo-server / matter — no `:-` default; preflight refuses
+      # placeholder tokens before any service starts.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
     # Direct port. Loopback by default; nginx /summary/ is the public
     # path and carries octo_api rate-limit. Override OCTO_SUMMARY_API_BIND
     # for cross-host operator access.
@@ -764,6 +772,11 @@ services:
       WORKER_INTERNAL_PORT:    "8082"
       WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
       WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
+      # Same HMAC secret summary-api / matter / octo-server use on
+      # /internal/* callbacks. Required — no `:-` default — so the
+      # worker fails closed when .env is missing the token instead of
+      # silently posting unsigned task-events back to summary-api.
+      NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
     networks:
       - octo-net
     # The worker exposes /internal/healthz on 8082 (no public /health).

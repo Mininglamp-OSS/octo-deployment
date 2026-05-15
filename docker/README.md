@@ -358,6 +358,18 @@ Before exposing the stack beyond a developer laptop:
   firewall layer if you need to limit reach, do not close it.
 - Narrow `OCTO_NETWORK_SUBNET` further (already defaults to `/24`) if
   it overlaps an existing VPN / VPC range.
+- `OCTO_MASTER_KEY` rotation gotcha: the master key is what
+  octo-server uses to AEAD-encrypt at-rest fields (the encrypted
+  per-user / per-tenant material referenced in the server config).
+  Rotating it after data has been written makes the previously
+  encrypted rows undecryptable — there is no built-in re-encrypt
+  pass. So the rotation flow is: pick a strong key at first deploy
+  (`openssl rand -hex 16`), keep it, and only swap it as part of a
+  full reset (drop the encrypted columns / re-onboard users) or a
+  coordinated migration. This applies only to `OCTO_MASTER_KEY`;
+  `OCTO_NOTIFY_INTERNAL_TOKEN` and `OCTO_WUKONGIM_MANAGER_TOKEN` are
+  HMAC-only and safe to rotate by restarting all dependent services
+  with the new value.
 - Set a real `OCTO_WUKONGIM_MANAGER_TOKEN`. WuKongIM's `tokenAuthOn`
   is `true` in `wk.yaml`, but the token is bound from the env var
   `WK_MANAGERTOKEN` (Viper auto-binds upper-case `WK_<KEY>` to the
