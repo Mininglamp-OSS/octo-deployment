@@ -162,22 +162,51 @@ services:
       - octo-net
 
   minio:
-    image: minio/minio:latest
+    # Pinned to a specific MinIO release rather than `:latest`. Two
+    # contracts in this stack break silently when the upstream image
+    # rolls forward:
+    #   1. `minio-init` runs `mc admin user add` / `mc admin policy
+    #      create` / `mc admin policy attach`. The CLI semantics across
+    #      these commands have flipped before — the `mc admin user add`
+    #      upsert behaviour we rely on (see the comment block in the
+    #      `minio-init` service) is a contract that has changed across
+    #      MinIO releases, so the `mc` image is pinned to a known-good
+    #      release and the server image must come from the same release
+    #      family to keep them in sync.
+    #   2. `MINIO_ROOT_PASSWORD` ≥8-char minimum-length check is the
+    #      first placeholder fail-fast layer (see .env.example: the
+    #      7-char `CHG_ME!` placeholder trips MinIO's own length check
+    #      at boot before `minio-init` even runs). If a future MinIO
+    #      release softens or removes that check, the `CHG_ME!` trap
+    #      stops working and an unrotated stack would reach `(healthy)`.
+    # Bump deliberately after validating the new server tag against the
+    # `mc` tag below (and re-running the placeholder fail-fast smoke
+    # test). Override via .env -> OCTO_MINIO_IMAGE, mirroring the
+    # OCTO_WK_IMAGE / OCTO_MINIO_MC_IMAGE pattern.
+    image: ${OCTO_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
     container_name: octo-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-octoadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      # Compose interpolates these once into the YAML below; we cannot rely
-      # on nested `${VAR}` inside .env values being expanded at runtime, so
-      # the composition lives here instead of in .env.
+      # MINIO_SERVER_URL is what MinIO uses to construct absolute URLs
+      # in multipart redirects, error responses with retry hints, and
+      # federated bucket discovery. It must point at the SAME endpoint
+      # octo-server tells browser clients to hit when handing out
+      # presigned URLs (TS_MINIO_DOWNLOADURL below) — otherwise MinIO-
+      # emitted absolute URLs route through nginx `/minio/` while
+      # presigned URLs hit `:29000` directly, and a SigV4 signature
+      # signed for one path will not validate on the other.
       #
-      # MINIO_SERVER_URL is the public S3 endpoint clients are told about
-      # in error responses / multipart redirects. The /minio path prefix
-      # works because nginx exposes /minio/ as a passthrough proxy to
-      # `minio:9000`.
-      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/minio}
+      # Host:port-only form is therefore the canonical default. The
+      # nginx /minio/ passthrough at nginx/conf.d/octo.conf.template:116
+      # stays exposed for in-cluster diagnostics (curl from a sidecar
+      # against the host's nginx is convenient), but it is NOT the URL
+      # MinIO advertises to clients. To override (e.g. when fronting
+      # with TLS at a different hostname), set MINIO_SERVER_URL to a
+      # literal value in .env.
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}}
       # MINIO_BROWSER_REDIRECT_URL is the canonical URL MinIO redirects
       # the console to after auth. The previous default pointed at the
       # nginx /minio-console/ route, but that route is no longer exposed
@@ -351,6 +380,22 @@ services:
       # without auth). The single .env value below feeds both this binding
       # and octo-server's TS_WUKONGIM_MANAGERTOKEN so they cannot drift.
       WK_MANAGERTOKEN: ${OCTO_WUKONGIM_MANAGER_TOKEN:-}
+    # Gate WuKongIM behind the preflight one-shot. Without this dependency
+    # compose starts wukongim in parallel with preflight: if preflight
+    # aborts on a placeholder OCTO_WUKONGIM_MANAGER_TOKEN, octo-server /
+    # matter / summary-api correctly stay down (their own depends_on:
+    # preflight blocks them), but wukongim has already bound the manager
+    # API / TCP / WS surfaces on 0.0.0.0 with `tokenAuthOn: true` and a
+    # known placeholder token. WuKongIM's manager-token comparison
+    # accepts the literal placeholder string, so anyone reading
+    # `.env.example` can hit the manager API from the network until the
+    # operator notices and tears the stack down. Compose does NOT
+    # auto-stop already-running services when a sibling's gate fails.
+    # `service_completed_successfully` here closes that window — wukongim
+    # cannot bind any port until preflight has returned exit 0.
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
     ports:
       - "${OCTO_WK_API_PORT:-25001}:5001"
       - "${OCTO_WK_TCP_PORT:-25100}:5100"
