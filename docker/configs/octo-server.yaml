@@ -6,11 +6,10 @@
 # docker-compose.yaml. Do not change those strings unless you also rename
 # the corresponding compose services.
 #
-# Credentials with CHANGE_ME_* placeholders are overridden at runtime from
-# the environment via the names listed in kustomize/base/octo-server-secret
-# (DM_MYSQL_DSN, DM_REDIS_ADDR, WUKONGIM_MANAGER_TOKEN, …) plus Viper's
-# AutomaticEnv mapping for the YAML keys (TS_MINIO_*). OSS users only need
-# to edit .env — not this file.
+# Credentials with CHANGE_ME_* placeholders are overridden at runtime via
+# Viper's AutomaticEnv (`SetEnvPrefix("TS")`, `.` -> `_`). The compose file
+# passes the matching `TS_*` env names — see the `octo-server` service
+# block in `docker-compose.yaml` for the full list.
 # -----------------------------------------------------------------------------
 
 # Runtime mode: debug | release
@@ -24,17 +23,26 @@ external:
 # Test-only SMS verification code. Ignored in release mode.
 smsCode: ""
 
+# First-admin bootstrap.
+# When non-empty AND no row exists for `account.adminUID` (default "admin"),
+# octo-server creates a superAdmin row on startup with username "superAdmin"
+# and password = bcrypt(adminPwd). Idempotent across restarts. Override via
+# .env -> TS_ADMINPWD on the octo-server service. Leave blank to skip the
+# bootstrap and seed the first admin manually (see docker/README.md).
+adminPwd: ""
+
 db:
-  # mysqlAddr / redisAddr are overridden by DM_MYSQL_DSN / DM_REDIS_ADDR
-  # set in docker-compose.yaml (which sources them from .env). Leave the
-  # placeholders below — they exist only so the YAML structure parses.
+  # mysqlAddr / redisAddr are overridden at runtime by TS_DB_MYSQLADDR /
+  # TS_DB_REDISADDR set in docker-compose.yaml (which sources them from
+  # .env). Leave the placeholders below — they exist only so the YAML
+  # structure parses.
   mysqlAddr: "root:CHANGE_ME_MYSQL_PASSWORD@tcp(mysql:3306)/octo?charset=utf8mb4&parseTime=true&loc=Local"
   redisAddr: "redis:6379"
   redisPass: ""
 
 wukongIM:
   apiURL: "http://wukongim:5001"
-  # managerToken is overridden via WUKONGIM_MANAGER_TOKEN env from .env;
+  # managerToken is overridden via TS_WUKONGIM_MANAGERTOKEN env from .env;
   # leaving this empty means tokenAuthOn-protected admin calls will fail.
   managerToken: ""
 
@@ -44,7 +52,15 @@ wukongIM:
 # fix, /api/v1/file/upload will 500 even with this stack healthy.
 fileService: "minio"
 minio:
+  # In-cluster API endpoint used by the server itself for uploads / GETs
+  # against MinIO. Stays as the Docker DNS name since that traffic never
+  # leaves octo-net.
   url: "http://minio:9000"
+  # Client-facing endpoint baked into the URLs returned by /api/v1/file/*.
+  # Empty here so the compose env (TS_MINIO_DOWNLOADURL) is the single
+  # source of truth — see the octo-server service block in
+  # docker-compose.yaml for the chosen value and the rationale.
+  downloadURL: ""
   accessKeyID: "octoadmin"
   secretAccessKey: "CHANGE_ME_MINIO_PASSWORD"
 
@@ -57,3 +73,4 @@ register:
   off: true
   onlyChina: false
   emailOn: false
+
