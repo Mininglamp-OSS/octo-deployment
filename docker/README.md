@@ -215,6 +215,43 @@ If you absolutely need every public port to live behind nginx, you'd
 need a SigV4-aware proxy (e.g. one that re-signs each request) — that
 is out of scope for this compose stack.
 
+### Reverse-proxying MinIO behind a host nginx (TLS termination)
+
+When a *host* nginx terminates TLS and proxies `https://your.host/`
+back to the compose stack on `OCTO_HTTP_PORT`, the SPA also needs
+`https://your.host/{bucket}/…` to reach MinIO. The in-compose nginx
+template ships with a bucket-name location that forwards those paths
+to `minio:9000` without rewriting the URI (SigV4 signs the canonical
+path):
+
+```nginx
+# in docker/nginx/conf.d/octo.conf.template, before `location /`
+location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
+    proxy_pass http://octo_minio_api;   # NO trailing slash — preserve SigV4 path
+    proxy_set_header Host $http_host;
+    ...
+}
+```
+
+In that topology, **both** `MINIO_SERVER_URL` (consumed by MinIO itself
+for absolute redirects, multipart hints, and federated bucket
+discovery) **and** `TS_MINIO_DOWNLOADURL` (consumed by octo-server when
+it hands presigned URLs to browser clients) must point at the same
+client-facing host:
+
+```
+MINIO_SERVER_URL=https://your.host
+TS_MINIO_DOWNLOADURL=https://your.host
+```
+
+Leaving either at the legacy `host:port` default while flipping the
+other will produce mixed-content failures (browser blocks HTTP redirect
+from HTTPS page) or SigV4 signature mismatches (signature signed for
+one host:scheme will not validate when MinIO re-emits the request
+against the other). The `docker-compose.yaml` defaults wire both to
+`http://${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}` so the single-host
+direct-MinIO mode keeps working without either override.
+
 ---
 
 ## MinIO bootstrap & credential scoping
@@ -236,6 +273,37 @@ runs after `minio` becomes healthy and:
 4. Pre-creates each whitelisted bucket so the first
    `/api/v1/file/upload` call does not depend on the app user holding
    bucket admin privileges.
+5. Sets `anonymous download` on the **content** buckets so the SPA can
+   render `<img src=…>` directly (uploads still use signed PUTs):
+
+   > ⚠️ **Security trade-off**: the content buckets below become
+   > **anonymously readable by URL**. This matches OCTO web's
+   > `<img src>` model (the SPA embeds the unsigned `downloadUrl`
+   > returned by `getUploadCredentials` directly — CDN-style, like
+   > most IM apps), but it means image URLs are world-readable
+   > forever once issued. `s3:ListBucket` stays denied and object
+   > keys are high-entropy UUIDs (no enumeration), but anyone who
+   > sees a chat-image URL can fetch it. Deleting a chat message
+   > does not GC the underlying MinIO object. See the PR#22
+   > description for the full threat model and the tracking issue
+   > for switching to signed GET once octo-web supports it.
+
+   | Bucket    | Anonymous policy | Why |
+   |-----------|------------------|-----|
+   | `chat`    | `download`       | image / file messages embedded in chat panes |
+   | `file`    | `download`       | generic file attachments |
+   | `moment`  | `download`       | moments feed media |
+   | `sticker` | `download`       | sticker thumbnails |
+   | `chatbg`  | `download`       | chat-background images |
+   | `common`  | `download`       | shared static assets |
+   | `avatar`  | `download`       | user / group avatars |
+   | `report`  | *private*        | audit reports — keep signed |
+   | `group`   | *private*        | group exports — keep signed |
+   | `download`| *private*        | server-staged downloads — keep signed |
+
+   Writes are still gated by the `octo-app` IAM policy; anonymous is
+   GET-only. The `mc anonymous set download` calls are idempotent, so
+   re-running `docker compose up -d` is safe.
 
 `octo-server` then runs with the app credentials only — root credentials
 live exclusively in the `minio-init` job, the `mc` CLI path, and the
