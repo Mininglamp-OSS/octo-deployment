@@ -226,8 +226,8 @@ path):
 
 ```nginx
 # in docker/nginx/conf.d/octo.conf.template, before `location /`
-location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)(/|$) {
-    proxy_pass http://minio:9000;   # NO trailing slash — preserve SigV4 path
+location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+    proxy_pass http://octo_minio_api;   # NO trailing slash — preserve SigV4 path
     proxy_set_header Host $http_host;
     ...
 }
@@ -268,6 +268,18 @@ runs after `minio` becomes healthy and:
    bucket admin privileges.
 5. Sets `anonymous download` on the **content** buckets so the SPA can
    render `<img src=…>` directly (uploads still use signed PUTs):
+
+   > ⚠️ **Security trade-off**: the content buckets below become
+   > **anonymously readable by URL**. This matches OCTO web's
+   > `<img src>` model (the SPA embeds the unsigned `downloadUrl`
+   > returned by `getUploadCredentials` directly — CDN-style, like
+   > most IM apps), but it means image URLs are world-readable
+   > forever once issued. `s3:ListBucket` stays denied and object
+   > keys are high-entropy UUIDs (no enumeration), but anyone who
+   > sees a chat-image URL can fetch it. Deleting a chat message
+   > does not GC the underlying MinIO object. See the PR#22
+   > description for the full threat model and the tracking issue
+   > for switching to signed GET once octo-web supports it.
 
    | Bucket    | Anonymous policy | Why |
    |-----------|------------------|-----|

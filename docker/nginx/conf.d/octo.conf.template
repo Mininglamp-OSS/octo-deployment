@@ -217,8 +217,14 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
     # `for b in …` in the `minio-init` service so any new bucket added
     # there has to be added here too. Placed BEFORE `location /` so
     # the regex wins over the SPA catch-all.
-    location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)(/|$) {
-        proxy_pass         http://minio:9000;
+    #
+    # Regex deliberately requires a trailing `/` after the bucket name
+    # (not `(/|$)`): presigned URLs are always `/{bucket}/{key}?X-Amz-…`
+    # so the `/` is guaranteed, while SPA history routes like `/chat`,
+    # `/group`, `/moment` (no trailing slash) must fall through to the
+    # `location /` SPA catch-all instead of being routed at MinIO.
+    location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+        proxy_pass         http://octo_minio_api;
         proxy_http_version 1.1;
         proxy_set_header   Host              $http_host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -227,7 +233,6 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
         proxy_set_header   Connection        "";
         proxy_request_buffering off;
         proxy_buffering off;
-        client_max_body_size 1000m;
         proxy_read_timeout 600s;
     }
 
@@ -362,10 +367,12 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     }
 #
 #     # MinIO S3 bucket-name routing — see the HTTP server block above
-#     # for the rationale. Whitelist must stay in sync with the
-#     # `minio-init` `for b in …` list. Must precede `location /`.
-#     location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)(/|$) {
-#         proxy_pass         http://minio:9000;
+#     # for the rationale (including why the regex ends at `/` instead
+#     # of `(/|$)`: SPA history routes like `/chat`, `/group`, `/moment`
+#     # must fall through to `location /`). Whitelist must stay in sync
+#     # with the `minio-init` `for b in …` list. Must precede `location /`.
+#     location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+#         proxy_pass         http://octo_minio_api;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $http_host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -374,7 +381,6 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #         proxy_set_header   Connection        "";
 #         proxy_request_buffering off;
 #         proxy_buffering off;
-#         client_max_body_size 1000m;
 #         proxy_read_timeout 600s;
 #     }
 #

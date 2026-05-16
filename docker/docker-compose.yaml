@@ -352,8 +352,11 @@ services:
         # Uploads still require PUT presigned URLs (octo-app IAM scope
         # remains the single write path), so this is a read-side relax
         # only. `mc anonymous set` is idempotent; reruns are safe.
+        # `|| true` swallows transient MinIO API blips during boot — the
+        # next `docker compose up -d` will retry, same shape as the
+        # `mc admin policy attach … || true` line above.
         for b in chat file moment sticker chatbg common avatar; do
-          mc anonymous set download "local/$$b" >/dev/null
+          mc anonymous set download "local/$$b" >/dev/null 2>&1 || true
         done
         echo "[minio-init] anonymous download set on content buckets"
 
