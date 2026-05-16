@@ -22,6 +22,17 @@ ENABLE_SUMMARY=false
 NON_INTERACTIVE=false
 FORCE_OVERWRITE=false
 
+# Track which configuration values were supplied explicitly via CLI flags
+# so the interactive prompts (when invoked without --non-interactive)
+# don't silently overwrite them. See README.md examples like:
+#   ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
+# When any of these "decision" flags are set we auto-switch to
+# non-interactive mode — the operator has already made the choice.
+DOMAIN_SET_VIA_CLI=false
+IP_SET_VIA_CLI=false
+HTTPS_SET_VIA_CLI=false
+SUMMARY_SET_VIA_CLI=false
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
 ENV_OUT="${SCRIPT_DIR}/docker/.env"
@@ -59,17 +70,54 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --non-interactive) NON_INTERACTIVE=true; shift ;;
     --force)   FORCE_OVERWRITE=true; shift ;;
-    --domain)   DOMAIN="${2:?--domain requires a value}";   shift 2 ;;
-    --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  shift 2 ;;
-    --https)    ENABLE_HTTPS=true;   shift ;;
-    --summary)  ENABLE_SUMMARY=true; shift ;;
+    --domain)   DOMAIN="${2:?--domain requires a value}";   DOMAIN_SET_VIA_CLI=true;  shift 2 ;;
+    --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
+    --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
+    --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
     -h|--help)
-      echo "Usage: $0 [--non-interactive] [--force] [--domain <d>] [--ip <ip>] [--https] [--summary]"
+      cat <<'USAGE'
+Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>] [--https] [--summary]
+
+  --non-interactive   Skip prompts; use defaults + auto-detect for anything
+                      not provided via flags.
+  --force             Overwrite an existing docker/.env without prompting.
+  --domain <d>        Set OCTO_DOMAIN (default: octo.local).
+  --ip <ip>           Set OCTO_EXTERNAL_IP (skip auto-detect).
+  --https             HTTPS preparation flag. Sets OCTO_TLS_ENABLED=true and
+                      prints HTTPS activation instructions. This does NOT
+                      fully enable HTTPS — you still need to install certs
+                      and edit nginx + docker-compose manually. See
+                      docker/certs/README.md for the full procedure.
+  --summary           Enable the optional LLM summary services
+                      (COMPOSE_PROFILES=summary).
+
+When any of --domain / --ip / --https / --summary is given without
+--non-interactive, setup.sh treats the flags as your decisions and runs
+non-interactively so the documented one-liner forms (see docker/README.md)
+work as written.
+USAGE
       exit 0
       ;;
     *) fatal "Unknown argument: $1" ;;
   esac
 done
+
+# If the operator supplied any "decision" flag (--domain / --ip / --https
+# / --summary) but did not pass --non-interactive, treat those flags as
+# the decision and skip the prompts. Otherwise the interactive section
+# would silently overwrite --ip with the auto-detected value, and would
+# reset --https / --summary to false unless the user re-entered "y" at
+# the prompt — exactly the breakage Jerry-Xin flagged in PR#18 R5.
+if [[ "${NON_INTERACTIVE}" == "false" ]]; then
+  if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
+     || "${IP_SET_VIA_CLI}" == "true" \
+     || "${HTTPS_SET_VIA_CLI}" == "true" \
+     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
+    info "CLI flags supplied; switching to non-interactive mode."
+    info "(Pass no flags, or only --force, to get the interactive prompts.)"
+    NON_INTERACTIVE=true
+  fi
+fi
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 info "Checking prerequisites…"
@@ -200,13 +248,21 @@ OCTO_ADMIN_PWD="$(openssl rand -base64 18)"
 # ── Build .env from template ────────────────────────────────────────────────
 info "Generating docker/.env from template…"
 
-cp "${ENV_EXAMPLE}" "${ENV_OUT}"
 # The .env file holds DB passwords, admin password, MinIO root credentials
-# and notify/manager tokens. `cp` honors the inherited umask (typically
-# 022 → 0644 = world-readable), which would let any local user on the
-# host read every secret in the stack. Lock the file down to the owner
-# only before we write the generated values into it.
-chmod 600 "${ENV_OUT}"
+# and notify/manager tokens. A naive `cp` honors the inherited umask
+# (typically 022 → 0644 = world-readable), and `cp` followed by a
+# separate `chmod 600` leaves a brief window during which any local user
+# can read every secret in the stack. Prefer `install -m 600` because it
+# creates the destination with the target mode in a single step. Fall
+# back to a `umask`-scoped `cp` for environments without GNU/BSD
+# coreutils (e.g. some Alpine/busybox base images) — that path is still
+# atomic with respect to the permissions race because the umask is
+# applied before the file is created.
+if command -v install &>/dev/null; then
+  install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
+else
+  ( umask 077 && cp "${ENV_EXAMPLE}" "${ENV_OUT}" )
+fi
 
 # Replace domain and IP
 sed_inplace "s|^OCTO_DOMAIN=.*|OCTO_DOMAIN=${DOMAIN}|" "${ENV_OUT}"
@@ -239,11 +295,9 @@ else
 fi
 
 # Summary setting
-# OCTO_ENABLE_SUMMARY itself is just an informational comment in
-# .env.example (Compose profiles are the real on/off switch), so we
-# only flip COMPOSE_PROFILES below — no sed against OCTO_ENABLE_SUMMARY
-# is needed (and any such sed would be a no-op against the commented
-# template line).
+# COMPOSE_PROFILES is the single source of truth for whether the summary
+# services run (see docker-compose.yaml — summary-api/summary-worker are
+# gated by the `summary` profile). --summary just flips that switch.
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   # Activate the summary Docker Compose profile so that
   # `docker compose up -d` (without --profile) starts summary services.
@@ -269,12 +323,19 @@ printf '  Admin password: %s%s%s\n' "${BOLD}" "${OCTO_ADMIN_PWD}" "${RESET}"
 echo ""
 
 if [[ "${ENABLE_HTTPS}" == "true" ]]; then
-  warn "HTTPS enabled. Place your certificates in docker/certs/:"
-  echo "  - docker/certs/fullchain.pem"
-  echo "  - docker/certs/privkey.pem"
+  warn "HTTPS preparation flag set (OCTO_TLS_ENABLED=true)."
+  warn "HTTPS is NOT yet active — --https only flips one env var. To actually"
+  warn "serve HTTPS you still need the following manual steps:"
+  echo "  1. Place certificates in docker/certs/:"
+  echo "       - docker/certs/fullchain.pem"
+  echo "       - docker/certs/privkey.pem"
+  echo "  2. Uncomment the HTTPS server block in"
+  echo "       docker/nginx/conf.d/octo.conf.template"
+  echo "  3. Uncomment the 443 port mapping + certs volume in"
+  echo "       docker/docker-compose.yaml"
+  echo "  4. Restart: cd docker && docker compose up -d"
   echo ""
-  warn "Then uncomment the HTTPS server block in docker/nginx/conf.d/octo.conf.template"
-  warn "and the 443 port + certs volume in docker/docker-compose.yaml."
+  warn "Full procedure: docker/certs/README.md"
   echo ""
 fi
 
