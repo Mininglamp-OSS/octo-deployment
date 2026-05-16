@@ -344,6 +344,19 @@ services:
           mc mb --ignore-existing "local/$$b" >/dev/null
         done
 
+        # OCTO IM semantics: chat/file/moment/sticker/chatbg/common/avatar
+        # are content buckets shared among group members. Anonymous GET
+        # (`download`) lets the SPA render <img src=...> without
+        # presigning every URL. report/group/download stay private —
+        # they hold sensitive payloads (audit reports, member exports).
+        # Uploads still require PUT presigned URLs (octo-app IAM scope
+        # remains the single write path), so this is a read-side relax
+        # only. `mc anonymous set` is idempotent; reruns are safe.
+        for b in chat file moment sticker chatbg common avatar; do
+          mc anonymous set download "local/$$b" >/dev/null
+        done
+        echo "[minio-init] anonymous download set on content buckets"
+
         echo "[minio-init] done"
     volumes:
       - ./configs/minio-octo-app-policy.json:/etc/minio/octo-app-policy.json:ro
@@ -501,7 +514,15 @@ services:
       # --- at startup. The MinIO API port is bound to 0.0.0.0 by
       # --- default (see the `minio` service block) so this URL is
       # --- reachable from the same hosts that hit the nginx vhost.
-      TS_MINIO_DOWNLOADURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}"
+      # --- TS_MINIO_DOWNLOADURL is overridable via .env so operators
+      # --- who terminate TLS on a host nginx (and proxy /chat,
+      # --- /file, /moment, ... back to the in-compose nginx) can
+      # --- point clients at the public https://host URL instead of
+      # --- the host:port direct-MinIO form. The default keeps the
+      # --- legacy direct-MinIO behaviour for the OOTB single-host
+      # --- profile. Either form must still be host-reachable and
+      # --- preserve the canonical SigV4 path (no path rewrite).
+      TS_MINIO_DOWNLOADURL: "${TS_MINIO_DOWNLOADURL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_MINIO_API_PORT:-29000}}"
       # --- octo-server's own external URL (the value it returns to
       # --- clients in places that need an absolute URL — e.g. login
       # --- redirects, OIDC callback hints, public asset links). The
