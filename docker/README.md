@@ -16,7 +16,114 @@ DB / cache / object store.
 
 ---
 
+## ⚠ Pre-flight: existing OCTO deployments on this host
+
+> **READ THIS BEFORE EVERY `docker compose up -d` / `docker compose down -v`
+> if there is any chance another OCTO stack already lives on this host.**
+
+`docker-compose.yaml` pins the Compose project name to `octo` (top-level
+`name: octo`). That stabilises the in-stack DNS names (`mysql`, `redis`,
+`octo-server`, …) so the rest of the config can reference them by literal
+hostname. The side effect is that **two independent clones of this repo
+on the same host default to the same project name** — meaning a
+`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase the
+named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
+message queues, etc.) belonging to a production clone in
+`/opt/octo-deployment`. That is exactly how `im-test` lost its entire
+user database on 2026-05-16 (INCIDENT-2026-05-16-001).
+
+To make this safe, the named volumes are now templated on
+`${COMPOSE_PROJECT_NAME:-octo}` (see the `volumes:` block in
+`docker-compose.yaml`). An operator who wants a second, isolated stack
+on a host that already runs OCTO only needs to override the project
+name before bringing it up:
+
+```bash
+# Before bringing up a SECOND stack on a host that already runs OCTO:
+export COMPOSE_PROJECT_NAME=octo-fz   # any unique suffix
+./setup.sh --non-interactive --domain octo-fz.local --ip 127.0.0.1
+cd docker
+docker compose up -d                  # volumes: octo-fz_mysql-data, …
+```
+
+The two stacks then have fully separate Docker volumes
+(`octo_mysql-data` vs `octo-fz_mysql-data`), networks
+(`octo_octo-net` vs `octo-fz_octo-net`), and container names
+(`octo-mysql-1` vs `octo-fz-mysql-1`). A `down -v` on either one only
+removes its own state.
+
+> ⚠️ **Running both stacks live at the same time also requires unique
+> host ports + subnet.** `COMPOSE_PROJECT_NAME` only isolates the
+> Docker objects (volumes, networks, container names); the compose
+> file still publishes the same host ports
+> (`OCTO_HTTP_PORT`, `OCTO_HTTPS_PORT`, `OCTO_MYSQL_PORT`,
+> `OCTO_REDIS_PORT`, `OCTO_MINIO_API_PORT`, `OCTO_MINIO_CONSOLE_PORT`,
+> `OCTO_WUKONGIM_PORT`, `OCTO_WUKONGIM_WS_PORT`,
+> `OCTO_WUKONGIM_TCP_PORT`, `OCTO_SUMMARY_PORT`) and uses the same
+> default bridge subnet (`OCTO_NETWORK_SUBNET=172.28.0.0/24`). Two
+> live stacks on one host will fail with port-bind / IPAM-overlap
+> errors unless the second stack's `.env` also overrides every
+> `*_PORT` it cares about and gives `OCTO_NETWORK_SUBNET` a non-
+> overlapping CIDR (for example `172.29.0.0/24`). If your use case
+> is "one stack live at a time, the second clone is just for a
+> from-zero verification run", that is fine — bring down stack #1
+> (`docker compose stop` — do NOT `down -v`) before bringing stack #2
+> up, and the isolated volumes keep each stack's data safe.
+
+### Before any `docker compose down -v` — verify what you are about to delete
+
+`down -v` is destructive and irreversible. Run these two probes first
+and confirm the output only references the stack you mean to wipe:
+
+```bash
+# 1. List Docker volumes that would be removed (must all belong to YOUR project)
+docker compose config --volumes        # the volume keys this file declares
+docker volume ls | grep -E '^octo([-_]|$)' # the actual on-disk volumes touched
+
+# 2. List containers in the OCTO namespace (must all belong to YOUR project)
+docker ps --filter 'name=octo' --format '{{.Names}}'
+
+# 3. If anything in (1) or (2) is NOT yours, STOP. Set
+#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check:
+#       COMPOSE_PROJECT_NAME=octo-fz docker compose config --volumes
+#       COMPOSE_PROJECT_NAME=octo-fz docker ps
+```
+
+`setup.sh` runs an equivalent check at the top of each invocation and
+warns when it finds existing OCTO containers / volumes on the host.
+The warning is informational, NOT a block — you still have to be the
+one who chooses the project name. Treat the prompt as the "did you
+mean to do this on this host?" gate.
+
+> 💡 **The 100% safe option for a clean from-zero E2E test is an
+> ephemeral VM or a host with no existing OCTO deployment.** Volume
+> isolation via `COMPOSE_PROJECT_NAME` protects against `down -v`
+> collisions, but a single typo (`COMPOSE_PROJECT_NAME=octo` instead of
+> `octo-fz`) is enough to break that protection. When in doubt, spin up
+> a throwaway machine.
+
+---
+
 ## Quick start
+
+### Prerequisites checklist
+
+- Linux or macOS host with `bash` ≥4, `openssl`, and either the Docker
+  Compose v2 plugin (`docker compose`) or the standalone `docker-compose`
+  binary on `$PATH`.
+- The Docker daemon is running and the invoking user can reach it
+  (`docker info` succeeds without `sudo`).
+- Ports `28080` (nginx HTTP) and `28083` (octo-web) free on the host,
+  plus `127.0.0.1:28081 / :28082 / :28086 / :23306 / :26379 / :29000 /
+  :29001` for the loopback-bound backing services. Override the port
+  numbers via `OCTO_*_PORT` in `docker/.env` if any of those clash.
+- ≥ 4 GiB RAM, ≥ 10 GiB free disk for the named volumes.
+- Outbound network access to `docker.io` (or a configured mirror) for
+  pulling the `mininglamposs/*`, `mysql:8`, `redis:7-alpine`,
+  `minio/minio`, `wukongim/wukongim`, and `nginx:1.27-alpine` images.
+- **If another OCTO stack already runs on this host:** read the
+  pre-flight section above and decide on a non-default
+  `COMPOSE_PROJECT_NAME` before continuing.
 
 Recommended (interactive setup):
 
@@ -52,6 +159,7 @@ Add an `/etc/hosts` entry for `octo.local` if you keep the default domain.
 Tear-down (drops the named volumes too — destructive):
 
 ```bash
+# ⚠ Read "Pre-flight: existing OCTO deployments on this host" above first.
 docker compose down -v
 ```
 
@@ -515,6 +623,34 @@ every public-facing port (`OCTO_HTTP_PORT`, `OCTO_SERVER_PORT`,
 `docker/nginx/empty-default.conf` is mounted on top of the image's
 `default.conf` so the OCTO vhost wins. If you have customised the
 nginx mount, make sure that override is preserved.
+
+### After recreating `octo-server` or `wukongim`, nginx returns 502 until reload
+
+The four core upstreams that ship with the stack
+(`octo_api`, `octo_ws`, `octo_minio_api` → `octo-server` /
+`wukongim`) intentionally keep their `upstream {}` blocks so the
+nginx keepalive pools stay intact for steady-state traffic. The
+trade-off is that nginx resolves those hostnames once at worker
+boot and caches the IP for the life of the worker — so a targeted
+`docker compose up -d --force-recreate octo-server` or
+`--force-recreate wukongim` (image bump, config edit, IM-server
+version pin, etc.) leaves nginx routing to the dead IP until the
+worker is bounced.
+
+The leaf upstreams (`admin`, `web`, `matter`, `summary-api`) use
+the variable + Docker DNS resolver pattern and recover on their
+own. For the four core upstreams, after recreating
+`octo-server` or `wukongim` run:
+
+```bash
+docker compose exec nginx nginx -s reload
+```
+
+Reload is online (no dropped connections) and takes <1s. This is
+not needed when the *full* stack is restarted via
+`docker compose up -d` without `--force-recreate` on a specific
+service, because nginx itself is recreated alongside the dependency
+and re-resolves at boot.
 
 ### Image upload returns 500 / "PresignedPutter is nil"
 

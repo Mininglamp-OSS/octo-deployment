@@ -27,13 +27,10 @@ upstream octo_minio_api {
 # To re-enable the public route (NOT recommended; only do this after
 # rotating MINIO_ROOT_PASSWORD and placing the proxy behind auth):
 #
-#     upstream octo_minio_console {
-#         server minio:9001;
-#         keepalive 8;
-#     }
 #     # add inside the server { } block:
 #     location /minio-console/ {
-#         proxy_pass         http://octo_minio_console/;
+#         set $upstream_minio_console minio;
+#         proxy_pass         http://$upstream_minio_console:9001/;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -45,6 +42,43 @@ server {
     listen       80 default_server;
     listen       [::]:80 default_server;
     server_name  ${OCTO_DOMAIN} localhost _;
+
+    # ----------------------------------------------------------------------
+    # Docker embedded DNS resolver — runtime upstream resolution.
+    # ----------------------------------------------------------------------
+    # Without `resolver` + a *variable* in `proxy_pass`, nginx resolves each
+    # upstream hostname (admin / matter / web / summary-api / wukongim /
+    # minio / octo-server) exactly once, at worker boot, and caches the
+    # IP forever. When `docker compose up -d` recreates one of those
+    # containers (different IP on octo-net), nginx keeps proxying to the
+    # dead IP and every request 502s until nginx itself is restarted.
+    # That is exactly the failure the 2026-05-16 from-zero E2E hit: a
+    # routine `docker compose up -d --force-recreate admin` made
+    # /admin/ return 502 until we bounced nginx.
+    #
+    # `resolver 127.0.0.11` points at Docker's internal DNS server (well-
+    # known fixed address on every user-defined bridge network like
+    # octo-net). `valid=10s` re-resolves every 10s so a recreated
+    # container is picked up within ~10s without nginx restart. `ipv6=off`
+    # avoids the spurious AAAA lookups against 127.0.0.11 that log noisy
+    # `no resolver defined to resolve …` warnings on hosts whose Docker
+    # daemon has no IPv6 stack.
+    #
+    # nginx only re-resolves hostnames that appear as VARIABLES in
+    # `proxy_pass` (e.g. `http://$upstream_admin/...`). A literal
+    # `proxy_pass http://admin/...` still gets the boot-time cached IP.
+    # Each location below therefore stages the upstream service name into
+    # a local `set $upstream_<name>` variable before `proxy_pass`.
+    #
+    # The /api/, ^~ /v1/, /ws and /minio/ locations intentionally keep
+    # their `upstream {}`-block targets (octo_api / octo_ws /
+    # octo_minio_api at the top of this file) because those services are
+    # part of the core stack that is never `--force-recreate`d in
+    # isolation; the upstream blocks also carry keepalive pools that the
+    # variable form cannot reuse. The locations that proxy to services
+    # commonly recreated by operators in-place (admin, web, matter,
+    # summary-api) are the ones that need the variable form.
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     client_max_body_size    1000m;
     client_body_buffer_size 8m;
@@ -132,7 +166,24 @@ server {
         return 301 /admin/;
     }
     location /admin/ {
-        proxy_pass         http://admin/admin/;
+        # Variable + resolver: see the `resolver` block at the top of this
+        # server {}. Required so a `docker compose up -d --force-recreate
+        # admin` does NOT leave nginx proxying to the dead IP for the
+        # lifetime of the worker. nginx re-resolves `$upstream_admin`
+        # against 127.0.0.11 within `valid=10s`.
+        #
+        # IMPORTANT: when `proxy_pass` contains a variable, nginx does NOT
+        # do the static-form prefix substitution (it would otherwise strip
+        # the matched location and prepend the directive's URI). With a
+        # variable target plus a URI component, nginx instead replaces the
+        # original request URI with the directive URI verbatim — so
+        # `/admin/foo/bar` would collapse to `/admin/` on the upstream.
+        # The admin backend already serves under `/admin/`, so we want an
+        # identity transform: drop the URI component from `proxy_pass` and
+        # let nginx forward the original request URI unchanged. This
+        # matches the pattern documented for `/summary/` below.
+        set $upstream_admin admin;
+        proxy_pass         http://$upstream_admin;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -150,8 +201,22 @@ server {
         # as one of the three reasons direct ports are loopback) was
         # not actually true on these two routes. burst=20 absorbs
         # short page-load spikes without 503ing legitimate clients.
+        #
+        # Variable + resolver: matter is one of the services operators
+        # most commonly recreate on its own (LLM key rotation, image
+        # bump). The variable form survives that recreate.
+        #
+        # URI handling: matter listens at the root (`/api/...`,
+        # `/health`, ...), not under `/matter/`, so we must strip the
+        # location prefix. Variable `proxy_pass` does not auto-strip,
+        # so we `rewrite ^/matter/(.*) /$1 break;` first, then use a
+        # `proxy_pass` target with NO URI component so the rewritten
+        # request URI (`/api/...`, `/health`) is forwarded as-is. This
+        # is the same pattern documented for `/summary/` below.
         limit_req zone=octo_api burst=20 nodelay;
-        proxy_pass         http://matter:8080/;
+        set $upstream_matter matter;
+        rewrite ^/matter/(.*) /$1 break;
+        proxy_pass         http://$upstream_matter:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -177,10 +242,9 @@ server {
         # and use a `proxy_pass` target that has NO URI component, so the
         # rewritten request URI (`/health`, `/foo`, …) is forwarded as-is.
         limit_req zone=octo_api burst=20 nodelay;
-        resolver 127.0.0.11 valid=10s ipv6=off;
-        set $summary_backend summary-api;
+        set $upstream_summary summary-api;
         rewrite ^/summary/(.*) /$1 break;
-        proxy_pass         http://$summary_backend:8080;
+        proxy_pass         http://$upstream_summary:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -241,7 +305,20 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
     }
 
     location / {
-        proxy_pass         http://web/;
+        # Variable + resolver: web image is the most frequently bumped
+        # of the SPA containers; a `docker compose up -d --force-recreate
+        # web` previously left every `/` (and therefore /chat, /group,
+        # /moment SPA routes) returning 502 until nginx was bounced.
+        #
+        # URI handling: web serves at the root, so this is an identity
+        # transform. Variable `proxy_pass` with a URI component (e.g.
+        # `http://$upstream_web/`) would replace the original request
+        # URI with the directive's URI verbatim — every request would
+        # collapse to `/` and the SPA's deep links + static assets
+        # under `/assets/...` would all return `index.html`. Drop the
+        # URI component so nginx forwards the original request URI.
+        set $upstream_web web;
+        proxy_pass         http://$upstream_web;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -261,6 +338,12 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     listen       443 ssl http2 default_server;
 #     listen       [::]:443 ssl http2 default_server;
 #     server_name  ${OCTO_DOMAIN} _;
+#
+#     # Docker embedded DNS resolver — required so variable-form
+#     # proxy_pass below re-resolves admin / web / matter / summary-api
+#     # on container recreate. See the equivalent comment block in the
+#     # HTTP server {} above for the full rationale.
+#     resolver 127.0.0.11 valid=10s ipv6=off;
 #
 #     ssl_certificate     /etc/nginx/certs/fullchain.pem;
 #     ssl_certificate_key /etc/nginx/certs/privkey.pem;
@@ -334,7 +417,8 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #         return 301 /admin/;
 #     }
 #     location /admin/ {
-#         proxy_pass         http://admin/admin/;
+#         set $upstream_admin admin;
+#         proxy_pass         http://$upstream_admin;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -344,7 +428,9 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #
 #     location /matter/ {
 #         limit_req zone=octo_api burst=20 nodelay;
-#         proxy_pass         http://matter:8080/;
+#         set $upstream_matter matter;
+#         rewrite ^/matter/(.*) /$1 break;
+#         proxy_pass         http://$upstream_matter:8080;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -354,10 +440,9 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #
 #     location /summary/ {
 #         limit_req zone=octo_api burst=20 nodelay;
-#         resolver 127.0.0.11 valid=10s ipv6=off;
-#         set $summary_backend summary-api;
+#         set $upstream_summary summary-api;
 #         rewrite ^/summary/(.*) /$1 break;
-#         proxy_pass         http://$summary_backend:8080;
+#         proxy_pass         http://$upstream_summary:8080;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -391,7 +476,8 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     }
 #
 #     location / {
-#         proxy_pass         http://web/;
+#         set $upstream_web web;
+#         proxy_pass         http://$upstream_web;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;

@@ -155,6 +155,82 @@ if [[ ! -f "${ENV_EXAMPLE}" ]]; then
   fatal "Cannot find ${ENV_EXAMPLE}. Run this script from the repository root."
 fi
 
+# ── Pre-flight: warn on overlapping OCTO deployments ───────────────────────
+# INCIDENT-2026-05-16-001 root cause: docker-compose.yaml pins `name: octo`,
+# so a fresh clone in (e.g.) /tmp shares the SAME named volumes / container
+# namespace as a production stack already running on the host. A routine
+# `docker compose down -v` from the new clone then wipes the production
+# volumes. We rotated all named volumes onto `${COMPOSE_PROJECT_NAME:-octo}-*`
+# in docker-compose.yaml so an explicit `COMPOSE_PROJECT_NAME=octo-<suffix>`
+# fully isolates a second stack — but operators only get that isolation if
+# they remember to set the env var. This check looks for existing OCTO
+# state on the host and (without blocking the run) tells the operator how
+# to isolate before they `up -d` and collide.
+preflight_existing_octo() {
+  command -v docker &>/dev/null || return 0
+  docker info >/dev/null 2>&1 || return 0
+
+  local existing_volumes existing_containers
+  # Match BOTH separator variants:
+  #   - underscore (`octo_mysql-data`): Compose v2 default for project-scoped
+  #     named volumes/networks under `name: octo` — this is what every existing
+  #     deployment on `main` has on disk.
+  #   - hyphen (`octo-mysql-data` etc.): used by some older / alternate naming
+  #     paths and by Compose-generated container names (`octo-mysql-1`).
+  # Compose project names always start at the beginning of the volume /
+  # container name, so anchoring on `^octo` plus a `[-_]` or end-of-string
+  # boundary catches the realistic shapes without false-positives on
+  # unrelated images like `octopus-deploy/...`.
+  existing_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null \
+                       | grep -E '^octo([-_]|$)' || true)"
+  existing_containers="$(docker ps -a --filter 'name=octo' --format '{{.Names}}' 2>/dev/null \
+                       | grep -E '^octo([-_]|$)' || true)"
+
+  if [[ -z "${existing_volumes}" && -z "${existing_containers}" ]]; then
+    return 0
+  fi
+
+  warn ""
+  warn "⚠  Detected EXISTING OCTO state on this host:"
+  if [[ -n "${existing_volumes}" ]]; then
+    warn "    Docker volumes:"
+    while IFS= read -r v; do warn "      - ${v}"; done <<< "${existing_volumes}"
+  fi
+  if [[ -n "${existing_containers}" ]]; then
+    warn "    Docker containers:"
+    while IFS= read -r c; do warn "      - ${c}"; done <<< "${existing_containers}"
+  fi
+  warn ""
+  warn "Bringing this stack up with the default project name (\"octo\")"
+  warn "will SHARE volumes with the deployment above. A later"
+  warn "\`docker compose down -v\` from EITHER clone will wipe ALL OCTO"
+  warn "data on this host — exactly the failure mode that destroyed"
+  warn "im-test on 2026-05-16."
+  warn ""
+  warn "To isolate this stack:"
+  warn "    export COMPOSE_PROJECT_NAME=octo-\$(your-suffix)"
+  warn "    ./setup.sh ...   # writes docker/.env"
+  warn "    cd docker && docker compose up -d"
+  warn ""
+  warn "The named volumes in docker-compose.yaml interpolate"
+  warn "COMPOSE_PROJECT_NAME so volumes / networks for the two stacks"
+  warn "will stay fully separate."
+  warn ""
+
+  if [[ "${NON_INTERACTIVE}" == "false" ]]; then
+    read -rp "Continue with project name \"${COMPOSE_PROJECT_NAME:-octo}\"? [y/N]: " confirm
+    case "${confirm}" in
+      [yY]|[yY][eE][sS]) info "Continuing — make sure you understand the implications above." ;;
+      *) info "Aborted. Re-run with COMPOSE_PROJECT_NAME=octo-<suffix> exported."; exit 0 ;;
+    esac
+  else
+    warn "(non-interactive mode: not prompting — proceeding with"
+    warn " COMPOSE_PROJECT_NAME=\"${COMPOSE_PROJECT_NAME:-octo}\")"
+  fi
+}
+
+preflight_existing_octo
+
 # ── Guard against overwriting an existing .env ─────────────────────────────
 # Re-running setup.sh regenerates ALL secrets (MySQL root password, MinIO
 # credentials, admin password, etc.). If the stack has already been started,
