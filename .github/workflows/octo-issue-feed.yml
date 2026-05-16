@@ -4,7 +4,8 @@ on:
   issues:
     types: [opened, closed, reopened, labeled]
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   notify:
