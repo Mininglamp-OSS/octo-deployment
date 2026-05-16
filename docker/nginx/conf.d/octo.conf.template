@@ -167,13 +167,20 @@ server {
         # default. A static `proxy_pass http://summary-api:8080` would make
         # nginx resolve the hostname at startup — when the container is absent
         # that resolution fails and nginx refuses to start (emerg: host not
-        # found). Using a variable (`$summary_upstream`) defers resolution to
-        # request time via the Docker embedded DNS resolver. When summary-api
-        # is down the client gets a 502 instead of a hard crash.
+        # found). Using a variable defers resolution to request time via the
+        # Docker embedded DNS resolver; when summary-api is down the client
+        # gets a 502 instead of a hard crash.
+        #
+        # IMPORTANT: when `proxy_pass` contains a variable, nginx does NOT
+        # perform the location-prefix replacement that strips `/summary/`
+        # from the URI. We must rewrite the URI explicitly with `rewrite`
+        # and use a `proxy_pass` target that has NO URI component, so the
+        # rewritten request URI (`/health`, `/foo`, …) is forwarded as-is.
         limit_req zone=octo_api burst=20 nodelay;
         resolver 127.0.0.11 valid=10s ipv6=off;
-        set $summary_upstream http://summary-api:8080;
-        proxy_pass         $summary_upstream/;
+        set $summary_backend summary-api;
+        rewrite ^/summary/(.*) /$1 break;
+        proxy_pass         http://$summary_backend:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -316,8 +323,9 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     location /summary/ {
 #         limit_req zone=octo_api burst=20 nodelay;
 #         resolver 127.0.0.11 valid=10s ipv6=off;
-#         set $summary_upstream http://summary-api:8080;
-#         proxy_pass         $summary_upstream/;
+#         set $summary_backend summary-api;
+#         rewrite ^/summary/(.*) /$1 break;
+#         proxy_pass         http://$summary_backend:8080;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;

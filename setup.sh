@@ -201,6 +201,12 @@ OCTO_ADMIN_PWD="$(openssl rand -base64 18)"
 info "Generating docker/.env from template…"
 
 cp "${ENV_EXAMPLE}" "${ENV_OUT}"
+# The .env file holds DB passwords, admin password, MinIO root credentials
+# and notify/manager tokens. `cp` honors the inherited umask (typically
+# 022 → 0644 = world-readable), which would let any local user on the
+# host read every secret in the stack. Lock the file down to the owner
+# only before we write the generated values into it.
+chmod 600 "${ENV_OUT}"
 
 # Replace domain and IP
 sed_inplace "s|^OCTO_DOMAIN=.*|OCTO_DOMAIN=${DOMAIN}|" "${ENV_OUT}"
@@ -233,8 +239,12 @@ else
 fi
 
 # Summary setting
+# OCTO_ENABLE_SUMMARY itself is just an informational comment in
+# .env.example (Compose profiles are the real on/off switch), so we
+# only flip COMPOSE_PROFILES below — no sed against OCTO_ENABLE_SUMMARY
+# is needed (and any such sed would be a no-op against the commented
+# template line).
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
-  sed_inplace "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=true|" "${ENV_OUT}"
   # Activate the summary Docker Compose profile so that
   # `docker compose up -d` (without --profile) starts summary services.
   if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
@@ -244,8 +254,6 @@ if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   else
     printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
   fi
-else
-  sed_inplace "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=false|" "${ENV_OUT}"
 fi
 
 # ── Print summary ───────────────────────────────────────────────────────────
