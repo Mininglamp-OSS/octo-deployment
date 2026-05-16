@@ -410,7 +410,14 @@ services:
       - wukongim-data:/root/wukongim
       - ./configs/wk.yaml:/root/wukongim/wk.yaml:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://localhost:5001/health >/dev/null 2>&1 || wget -q -O - http://localhost:5001/varz >/dev/null 2>&1"]
+      # WuKongIM has tokenAuthOn:true in wk.yaml; /health and /varz both
+      # require the manager token. Inject it via wget --header using the
+      # WK_MANAGERTOKEN env var already passed to this container above.
+      # `$$WK_MANAGERTOKEN` (double-dollar) defers expansion to the
+      # in-container shell so compose doesn't substitute it at parse time.
+      # The wukongim image bundles wget (busybox) so no extra deps needed.
+      # header name is lowercase `token` (WuKongIM accepts that form).
+      test: ["CMD-SHELL", "wget -q -O - --header=\"token: $$WK_MANAGERTOKEN\" http://localhost:5001/health >/dev/null 2>&1 || wget -q -O - --header=\"token: $$WK_MANAGERTOKEN\" http://localhost:5001/varz >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
