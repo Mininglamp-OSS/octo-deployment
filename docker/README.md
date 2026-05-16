@@ -18,22 +18,32 @@ DB / cache / object store.
 
 ## Quick start
 
+Recommended (interactive setup):
+
 ```bash
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
-
-cp docker/.env.example docker/.env
-# Edit docker/.env — at minimum change the placeholders flagged in the file:
-#   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MINIO_APP_PASSWORD,
-#   OCTO_MATTER_DB_PASSWORD, OCTO_SUMMARY_DB_PASSWORD,
-#   OCTO_SUMMARY_READER_PASSWORD,
-#   OCTO_MASTER_KEY, OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
-
-cd docker
-docker compose config            # validate before starting
-docker compose up -d
-docker compose ps                # all services should reach (healthy)
+./setup.sh                          # interactive prompts
+cd docker && docker compose up -d
 ```
+
+Or non-interactive:
+
+```bash
+./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
+cd docker && docker compose up -d
+```
+
+To enable the optional LLM summary services, add `--summary`:
+
+```bash
+./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
+cd docker && docker compose up -d
+```
+
+`setup.sh` writes `docker/.env` with rotated random secrets and a
+generated `OCTO_ADMIN_PWD`. It is the only path that gets a fresh
+checkout to a `(healthy)` stack without manual editing.
 
 Once healthy, the stack is reachable through nginx on
 `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (default `http://octo.local:28080`).
@@ -44,6 +54,29 @@ Tear-down (drops the named volumes too — destructive):
 ```bash
 docker compose down -v
 ```
+
+### Manual setup (advanced)
+
+Skip `setup.sh` only if you need to drive the env-file generation from
+your own tooling (Ansible, Vault, etc.):
+
+```bash
+cp docker/.env.example docker/.env
+# Edit docker/.env — rotate ALL placeholders flagged in the file:
+#   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MINIO_APP_PASSWORD,
+#   OCTO_MATTER_DB_PASSWORD, OCTO_SUMMARY_DB_PASSWORD,
+#   OCTO_SUMMARY_READER_PASSWORD,
+#   OCTO_MASTER_KEY, OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
+# Set OCTO_DOMAIN / OCTO_EXTERNAL_IP, and OCTO_ADMIN_PWD if you want
+# auto-bootstrap of the first superAdmin (see "First-admin bootstrap").
+
+cd docker
+docker compose config            # validate before starting
+docker compose up -d
+docker compose ps                # all services should reach (healthy)
+```
+
+See "Required environment variables" below for the full contract.
 
 ---
 
@@ -255,10 +288,11 @@ To use it:
 1. Pick a strong password (treat it as a deploy-time secret —
    octo-server hashes it before write, but the plaintext sits in your
    `.env`).
-2. Add to `docker/.env` and uncomment the matching env line in the
-   `octo-server` service in `docker-compose.yaml` (commented out by
-   default to keep the OOTB stack from auto-creating an admin in the
-   wrong environment):
+2. Add to `docker/.env`. `TS_ADMINPWD` is wired into the
+   `octo-server` service in `docker-compose.yaml` by default — when
+   `OCTO_ADMIN_PWD` is non-empty, octo-server seeds the row on first
+   start. Leave `OCTO_ADMIN_PWD` empty (or commented) to skip
+   auto-bootstrap and create the admin manually via Option B:
 
    ```bash
    # docker/.env
@@ -266,9 +300,12 @@ To use it:
    ```
 
    ```yaml
-   # docker/docker-compose.yaml — octo-server service environment:
+   # docker/docker-compose.yaml — octo-server service environment (already present):
    TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
    ```
+
+   `setup.sh` generates a random `OCTO_ADMIN_PWD` automatically and
+   prints it once at the end of the run.
 3. `docker compose up -d` (or `docker compose restart octo-server` if
    the stack is already up). On first start with an empty `user`
    table, octo-server seeds the row.
@@ -472,21 +509,32 @@ bottom of `scripts/init-extra-dbs.sh`.
 
 ### Health endpoints
 
-After the stack reports healthy, these should all return 200:
+After the stack reports healthy, these should all return 200 for the
+default (no-summary) deployment:
 
 | Path | Purpose |
 | --- | --- |
 | `/_nginx_up` | nginx reverse-proxy probe |
 | `/api/v1/health` | octo-server REST |
 | `/matter/health` | octo-matter |
-| `/summary/health` | smart-summary API |
 | `/` | octo-web SPA |
 
 ```bash
-for p in /_nginx_up /api/v1/health /matter/health /summary/health /; do
+for p in /_nginx_up /api/v1/health /matter/health /; do
   printf '%-22s %s\n' "$p" "$(curl -fsS -o /dev/null -w '%{http_code}' "http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}$p")"
 done
 ```
+
+If the summary profile is enabled (`./setup.sh --summary`, or
+`COMPOSE_PROFILES=summary` in `.env`), also probe `/summary/health`:
+
+```bash
+curl -fsS "http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/summary/health"
+```
+
+Without the summary profile the `summary-api` container is not
+started, so `/summary/health` will 502 through nginx — that is
+expected, not a failure.
 
 The `summary-worker` container has no public route — it serves
 `/internal/healthz` on port `8082` inside the `octo-net` network only.

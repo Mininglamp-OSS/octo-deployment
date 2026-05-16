@@ -38,6 +38,22 @@ warn()  { printf '%s[setup]%s %s\n' "${YELLOW}" "${RESET}" "$*"; }
 err()   { printf '%s[setup]%s %s\n' "${RED}" "${RESET}" "$*" >&2; }
 fatal() { err "$@"; exit 1; }
 
+# Portable in-place sed (GNU + BSD/macOS compatible).
+# GNU sed accepts `sed -i "..."`; BSD/macOS sed requires `-i ''` (an
+# explicit, possibly empty, backup-extension argument). Without this
+# shim, `sed -i "s|foo|bar|" file` on macOS errors out with
+# "extra characters at the end of p command" because BSD sed treats
+# the next argument as the backup suffix.
+sed_inplace() {
+  if sed --version >/dev/null 2>&1; then
+    # GNU sed
+    sed -i "$@"
+  else
+    # BSD/macOS sed needs an explicit (empty) backup extension
+    sed -i '' "$@"
+  fi
+}
+
 # ── Parse CLI arguments ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,6 +93,14 @@ fi
 
 if ! command -v openssl &>/dev/null; then
   fatal "openssl is not installed. Install it before running setup."
+fi
+
+# curl is used only for external-IP auto-detection. Missing curl is not
+# fatal — detect_ip falls back to 127.0.0.1 — but warn so the operator
+# knows why EXTERNAL_IP came out as loopback.
+if ! command -v curl &>/dev/null; then
+  warn "curl is not installed; external IP auto-detection will fall back to 127.0.0.1."
+  warn "Pass --ip <address> explicitly, or install curl, for a public IP."
 fi
 
 if [[ ! -f "${ENV_EXAMPLE}" ]]; then
@@ -179,49 +203,49 @@ info "Generating docker/.env from template…"
 cp "${ENV_EXAMPLE}" "${ENV_OUT}"
 
 # Replace domain and IP
-sed -i "s|^OCTO_DOMAIN=.*|OCTO_DOMAIN=${DOMAIN}|" "${ENV_OUT}"
-sed -i "s|^OCTO_EXTERNAL_IP=.*|OCTO_EXTERNAL_IP=${EXTERNAL_IP}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_DOMAIN=.*|OCTO_DOMAIN=${DOMAIN}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_EXTERNAL_IP=.*|OCTO_EXTERNAL_IP=${EXTERNAL_IP}|" "${ENV_OUT}"
 
 # Replace all CHANGE_ME / placeholder passwords
-sed -i "s|^MYSQL_ROOT_PASSWORD=.*|MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^MINIO_ROOT_PASSWORD=.*|MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^OCTO_MINIO_APP_PASSWORD=.*|OCTO_MINIO_APP_PASSWORD=${OCTO_MINIO_APP_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^OCTO_MATTER_DB_PASSWORD=.*|OCTO_MATTER_DB_PASSWORD=${OCTO_MATTER_DB_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^OCTO_SUMMARY_DB_PASSWORD=.*|OCTO_SUMMARY_DB_PASSWORD=${OCTO_SUMMARY_DB_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^OCTO_SUMMARY_READER_PASSWORD=.*|OCTO_SUMMARY_READER_PASSWORD=${OCTO_SUMMARY_READER_PASSWORD}|" "${ENV_OUT}"
-sed -i "s|^OCTO_MASTER_KEY=.*|OCTO_MASTER_KEY=${OCTO_MASTER_KEY}|" "${ENV_OUT}"
-sed -i "s|^OCTO_NOTIFY_INTERNAL_TOKEN=.*|OCTO_NOTIFY_INTERNAL_TOKEN=${OCTO_NOTIFY_INTERNAL_TOKEN}|" "${ENV_OUT}"
-sed -i "s|^OCTO_WUKONGIM_MANAGER_TOKEN=.*|OCTO_WUKONGIM_MANAGER_TOKEN=${OCTO_WUKONGIM_MANAGER_TOKEN}|" "${ENV_OUT}"
+sed_inplace "s|^MYSQL_ROOT_PASSWORD=.*|MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^MINIO_ROOT_PASSWORD=.*|MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_MINIO_APP_PASSWORD=.*|OCTO_MINIO_APP_PASSWORD=${OCTO_MINIO_APP_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_MATTER_DB_PASSWORD=.*|OCTO_MATTER_DB_PASSWORD=${OCTO_MATTER_DB_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_SUMMARY_DB_PASSWORD=.*|OCTO_SUMMARY_DB_PASSWORD=${OCTO_SUMMARY_DB_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_SUMMARY_READER_PASSWORD=.*|OCTO_SUMMARY_READER_PASSWORD=${OCTO_SUMMARY_READER_PASSWORD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_MASTER_KEY=.*|OCTO_MASTER_KEY=${OCTO_MASTER_KEY}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_NOTIFY_INTERNAL_TOKEN=.*|OCTO_NOTIFY_INTERNAL_TOKEN=${OCTO_NOTIFY_INTERNAL_TOKEN}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_WUKONGIM_MANAGER_TOKEN=.*|OCTO_WUKONGIM_MANAGER_TOKEN=${OCTO_WUKONGIM_MANAGER_TOKEN}|" "${ENV_OUT}"
 
 # Set WK_MODE to release
-sed -i "s|^WK_MODE=.*|WK_MODE=release|" "${ENV_OUT}"
+sed_inplace "s|^WK_MODE=.*|WK_MODE=release|" "${ENV_OUT}"
 
 # Replace admin password
-sed -i "s|^OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
+sed_inplace "s|^OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
 # If the line was commented, uncomment it
-sed -i "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
+sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
 
 # TLS setting
 if [[ "${ENABLE_HTTPS}" == "true" ]]; then
-  sed -i "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=true|" "${ENV_OUT}"
+  sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=true|" "${ENV_OUT}"
 else
-  sed -i "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=false|" "${ENV_OUT}"
+  sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=false|" "${ENV_OUT}"
 fi
 
 # Summary setting
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
-  sed -i "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=true|" "${ENV_OUT}"
+  sed_inplace "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=true|" "${ENV_OUT}"
   # Activate the summary Docker Compose profile so that
   # `docker compose up -d` (without --profile) starts summary services.
   if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+    sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
   elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed -i "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+    sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
   else
     printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
   fi
 else
-  sed -i "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=false|" "${ENV_OUT}"
+  sed_inplace "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=false|" "${ENV_OUT}"
 fi
 
 # ── Print summary ───────────────────────────────────────────────────────────
