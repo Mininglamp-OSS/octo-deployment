@@ -20,6 +20,7 @@ EXTERNAL_IP=""
 ENABLE_HTTPS=false
 ENABLE_SUMMARY=false
 NON_INTERACTIVE=false
+FORCE_OVERWRITE=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
@@ -41,12 +42,13 @@ fatal() { err "$@"; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --force)   FORCE_OVERWRITE=true; shift ;;
     --domain)   DOMAIN="${2:?--domain requires a value}";   shift 2 ;;
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  shift 2 ;;
     --https)    ENABLE_HTTPS=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; shift ;;
     -h|--help)
-      echo "Usage: $0 [--non-interactive] [--domain <d>] [--ip <ip>] [--https] [--summary]"
+      echo "Usage: $0 [--non-interactive] [--force] [--domain <d>] [--ip <ip>] [--https] [--summary]"
       exit 0
       ;;
     *) fatal "Unknown argument: $1" ;;
@@ -79,6 +81,26 @@ fi
 
 if [[ ! -f "${ENV_EXAMPLE}" ]]; then
   fatal "Cannot find ${ENV_EXAMPLE}. Run this script from the repository root."
+fi
+
+# ── Guard against overwriting an existing .env ─────────────────────────────
+# Re-running setup.sh regenerates ALL secrets (MySQL root password, MinIO
+# credentials, admin password, etc.). If the stack has already been started,
+# the MySQL volume keeps the ORIGINAL passwords from the first `docker compose
+# up`; overwriting .env makes every service fail to connect. The guard below
+# prevents accidental overwrites; use --force to bypass.
+if [[ -f "${ENV_OUT}" ]] && [[ "${FORCE_OVERWRITE}" != "true" ]]; then
+  if [[ "${NON_INTERACTIVE}" == "true" ]]; then
+    fatal "docker/.env already exists. Use --force to overwrite."
+  else
+    warn "docker/.env already exists. Overwriting will regenerate ALL secrets."
+    warn "If the stack has been started, this will break database connections."
+    read -rp "Overwrite? [y/N]: " confirm
+    case "${confirm}" in
+      [yY]|[yY][eE][sS]) info "Overwriting..." ;;
+      *) info "Aborted."; exit 0 ;;
+    esac
+  fi
 fi
 
 # ── Detect external IP ──────────────────────────────────────────────────────
@@ -189,6 +211,15 @@ fi
 # Summary setting
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   sed -i "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=true|" "${ENV_OUT}"
+  # Activate the summary Docker Compose profile so that
+  # `docker compose up -d` (without --profile) starts summary services.
+  if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
+    sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+  elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
+    sed -i "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+  else
+    printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
+  fi
 else
   sed -i "s|^OCTO_ENABLE_SUMMARY=.*|OCTO_ENABLE_SUMMARY=false|" "${ENV_OUT}"
 fi
@@ -217,7 +248,7 @@ fi
 
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
-  echo "  Start with: cd docker && docker compose --profile summary up -d"
+  echo "  Start with: cd docker && docker compose up -d"
 else
   info "Summary service disabled. Start without LLM:"
   echo "  cd docker && docker compose up -d"
@@ -226,12 +257,7 @@ fi
 echo ""
 info "Next steps:"
 echo "  1. Review docker/.env and adjust as needed"
-
-if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
-  echo "  2. cd docker && docker compose --profile summary up -d"
-else
-  echo "  2. cd docker && docker compose up -d"
-fi
+echo "  2. cd docker && docker compose up -d"
 
 echo "  3. Visit http://${DOMAIN}:28080"
 echo ""

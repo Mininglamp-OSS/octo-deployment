@@ -162,8 +162,18 @@ server {
     location /summary/ {
         # See /matter/ above — same octo_api zone applied for
         # consistency with the documented security model.
+        #
+        # summary-api lives in `profiles: [summary]` and is NOT started by
+        # default. A static `proxy_pass http://summary-api:8080` would make
+        # nginx resolve the hostname at startup — when the container is absent
+        # that resolution fails and nginx refuses to start (emerg: host not
+        # found). Using a variable (`$summary_upstream`) defers resolution to
+        # request time via the Docker embedded DNS resolver. When summary-api
+        # is down the client gets a 502 instead of a hard crash.
         limit_req zone=octo_api burst=20 nodelay;
-        proxy_pass         http://summary-api:8080/;
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $summary_upstream http://summary-api:8080;
+        proxy_pass         $summary_upstream/;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -305,7 +315,9 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #
 #     location /summary/ {
 #         limit_req zone=octo_api burst=20 nodelay;
-#         proxy_pass         http://summary-api:8080/;
+#         resolver 127.0.0.11 valid=10s ipv6=off;
+#         set $summary_upstream http://summary-api:8080;
+#         proxy_pass         $summary_upstream/;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
