@@ -218,12 +218,16 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
     # there has to be added here too. Placed BEFORE `location /` so
     # the regex wins over the SPA catch-all.
     #
-    # Regex deliberately requires a trailing `/` after the bucket name
-    # (not `(/|$)`): presigned URLs are always `/{bucket}/{key}?X-Amz-…`
-    # so the `/` is guaranteed, while SPA history routes like `/chat`,
-    # `/group`, `/moment` (no trailing slash) must fall through to the
-    # `location /` SPA catch-all instead of being routed at MinIO.
-    location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+    # Regex deliberately requires a trailing `/` plus at least one
+    # character (`.+`) after the bucket name (not `(/|$)` and not bare
+    # `/`): presigned URLs are always `/{bucket}/{key}?X-Amz-…` so the
+    # `/<key>` segment is guaranteed, while SPA history routes like
+    # `/chat`, `/group`, `/moment` (no trailing slash) AND bare
+    # `/chat/`, `/group/` (SPA history routes that happen to keep a
+    # trailing slash) must fall through to the `location /` SPA
+    # catch-all instead of being routed at MinIO — otherwise an SPA
+    # refresh on `/chat/` would render MinIO's 404 XML.
+    location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
         proxy_pass         http://octo_minio_api;
         proxy_http_version 1.1;
         proxy_set_header   Host              $http_host;
@@ -367,11 +371,13 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     }
 #
 #     # MinIO S3 bucket-name routing — see the HTTP server block above
-#     # for the rationale (including why the regex ends at `/` instead
-#     # of `(/|$)`: SPA history routes like `/chat`, `/group`, `/moment`
-#     # must fall through to `location /`). Whitelist must stay in sync
-#     # with the `minio-init` `for b in …` list. Must precede `location /`.
-#     location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+#     # for the rationale (including why the regex ends at `/.+` instead
+#     # of `(/|$)` or bare `/`: presigned URLs always carry a key, while
+#     # SPA history routes like `/chat`, `/group`, `/moment` and bare
+#     # `/chat/` must fall through to `location /`). Whitelist must stay
+#     # in sync with the `minio-init` `for b in …` list. Must precede
+#     # `location /`.
+#     location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
 #         proxy_pass         http://octo_minio_api;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $http_host;

@@ -352,13 +352,39 @@ services:
         # Uploads still require PUT presigned URLs (octo-app IAM scope
         # remains the single write path), so this is a read-side relax
         # only. `mc anonymous set` is idempotent; reruns are safe.
-        # `|| true` swallows transient MinIO API blips during boot — the
-        # next `docker compose up -d` will retry, same shape as the
-        # `mc admin policy attach … || true` line above.
+        #
+        # Fail-closed: we bounded-retry to absorb transient MinIO
+        # restart-storm flakes (3 attempts, 2s back-off), then verify
+        # the policy actually took with `mc anonymous get`. If either
+        # step fails we exit non-zero so the `service_completed_successfully`
+        # gate on octo-server / octo-web prevents the stack from coming
+        # up with a misconfigured MinIO that 403s every <img src=…>.
+        # Earlier `|| true` silently swallowed permission bugs and API
+        # drift — operator saw `minio-init` exit 0 but preview still 403.
+        echo "[minio-init] setting anonymous download on content buckets…"
         for b in chat file moment sticker chatbg common avatar; do
-          mc anonymous set download "local/$$b" >/dev/null 2>&1 || true
+          attempt=1
+          until mc anonymous set download "local/$$b" >/dev/null 2>&1; do
+            if [ "$$attempt" -ge 3 ]; then
+              echo "[minio-init] FATAL: mc anonymous set download local/$$b failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "[minio-init] mc anonymous set on $$b attempt $$attempt failed; retrying in 2s…" >&2
+            attempt=$$((attempt + 1))
+            sleep 2
+          done
+
+          # Verify the policy was actually applied. `mc anonymous get`
+          # prints e.g. "Access permission for `local/chat` is `download`".
+          # We grep for the exact mode to defend against the API silently
+          # no-op'ing (which is what motivated dropping `|| true` here).
+          actual=$$(mc anonymous get "local/$$b" 2>/dev/null | sed -n 's/.*is `\(.*\)`.*/\1/p')
+          if [ "$$actual" != "download" ]; then
+            echo "[minio-init] FATAL: anonymous policy on local/$$b is '$$actual', expected 'download'" >&2
+            exit 1
+          fi
         done
-        echo "[minio-init] anonymous download set on content buckets"
+        echo "[minio-init] anonymous download verified on content buckets"
 
         echo "[minio-init] done"
     volumes:

@@ -226,24 +226,31 @@ path):
 
 ```nginx
 # in docker/nginx/conf.d/octo.conf.template, before `location /`
-location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/ {
+location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
     proxy_pass http://octo_minio_api;   # NO trailing slash — preserve SigV4 path
     proxy_set_header Host $http_host;
     ...
 }
 ```
 
-In that topology, override `TS_MINIO_DOWNLOADURL` in `.env` so
-octo-server signs URLs against the user-visible host instead of
-`host:29000`:
+In that topology, **both** `MINIO_SERVER_URL` (consumed by MinIO itself
+for absolute redirects, multipart hints, and federated bucket
+discovery) **and** `TS_MINIO_DOWNLOADURL` (consumed by octo-server when
+it hands presigned URLs to browser clients) must point at the same
+client-facing host:
 
 ```
+MINIO_SERVER_URL=https://your.host
 TS_MINIO_DOWNLOADURL=https://your.host
 ```
 
-The variable is `${TS_MINIO_DOWNLOADURL:-http://${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}}`
-in `docker-compose.yaml`, so leaving it unset preserves the legacy
-single-host `host:29000` direct-MinIO mode.
+Leaving either at the legacy `host:port` default while flipping the
+other will produce mixed-content failures (browser blocks HTTP redirect
+from HTTPS page) or SigV4 signature mismatches (signature signed for
+one host:scheme will not validate when MinIO re-emits the request
+against the other). The `docker-compose.yaml` defaults wire both to
+`http://${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}` so the single-host
+direct-MinIO mode keeps working without either override.
 
 ---
 
