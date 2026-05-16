@@ -4,6 +4,8 @@ on:
   issues:
     types: [opened, closed, reopened, labeled]
 
+permissions: {}
+
 jobs:
   notify:
     uses: Mininglamp-OSS/.github/.github/workflows/octo-issue-feed.yml@v1
