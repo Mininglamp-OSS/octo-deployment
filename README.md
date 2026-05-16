@@ -1,6 +1,14 @@
 # OCTO Deployment
 
-Kubernetes deployment manifests for the [OCTO](https://github.com/Mininglamp-OSS) platform.
+**The official OOTB ("out of the box") deployment for OCTO** — both the
+single-node Docker Compose stack under [`docker/`](./docker/) and the
+multi-node Kubernetes manifests under [`kustomize/`](./kustomize/) for
+the [OCTO](https://github.com/Mininglamp-OSS) platform.
+
+This repository is the single source of truth for OCTO deployment. The
+deployment artefacts that previously lived inside `Mininglamp-OSS/octo-server`
+(`docker/octo/`, `docker/tsdd/`) are now retired; consume them from
+here instead.
 
 ---
 
@@ -97,6 +105,27 @@ kustomize/
 ```
 
 ## Quick Start
+
+> **For single-node Docker Compose evaluation, go to
+> [`docker/README.md`](./docker/README.md)** — it owns the prerequisites
+> checklist (Docker daemon, ports, RAM/disk, image-pull network access),
+> the `setup.sh` one-liner, and the pre-flight warning for hosts that
+> already run another OCTO stack.
+>
+> The walkthrough below is for the **Kubernetes / kustomize** path.
+
+### Prerequisites (Kubernetes path)
+
+- A Kubernetes cluster you can `kubectl apply` against (≥ 1 worker
+  node; production overlay assumes a multi-node cluster).
+- `kubectl` ≥ 1.27 on your shell with kubeconfig pointing at the
+  target cluster.
+- An Ingress controller (NGINX / Traefik / cloud-managed) — this repo
+  does NOT ship one; see the open item below.
+- External infrastructure already provisioned: MySQL 8 (three DBs:
+  `octo`, `octo_matter`, `octo_summary`), Redis 7, WuKongIM ≥ v2,
+  and an S3-compatible object store. The base manifests reference
+  these via Secrets / ConfigMaps and assume you bring them yourself.
 
 Namespace is **not** hardcoded — specify it on the CLI.
 

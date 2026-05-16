@@ -16,7 +16,96 @@ DB / cache / object store.
 
 ---
 
+## ⚠ Pre-flight: existing OCTO deployments on this host
+
+> **READ THIS BEFORE EVERY `docker compose up -d` / `docker compose down -v`
+> if there is any chance another OCTO stack already lives on this host.**
+
+`docker-compose.yaml` pins the Compose project name to `octo` (top-level
+`name: octo`). That stabilises the in-stack DNS names (`mysql`, `redis`,
+`octo-server`, …) so the rest of the config can reference them by literal
+hostname. The side effect is that **two independent clones of this repo
+on the same host default to the same project name** — meaning a
+`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase the
+named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
+message queues, etc.) belonging to a production clone in
+`/opt/octo-deployment`. That is exactly how `im-test` lost its entire
+user database on 2026-05-16 (INCIDENT-2026-05-16-001).
+
+To make this safe, the named volumes are now templated on
+`${COMPOSE_PROJECT_NAME:-octo}` (see the `volumes:` block in
+`docker-compose.yaml`). An operator who wants a second, isolated stack
+on a host that already runs OCTO only needs to override the project
+name before bringing it up:
+
+```bash
+# Before bringing up a SECOND stack on a host that already runs OCTO:
+export COMPOSE_PROJECT_NAME=octo-fz   # any unique suffix
+./setup.sh --non-interactive --domain octo-fz.local --ip 127.0.0.1
+cd docker
+docker compose up -d                  # volumes: octo-fz-mysql-data, …
+```
+
+The two stacks then have fully separate Docker volumes
+(`octo-mysql-data` vs `octo-fz-mysql-data`), networks
+(`octo_octo-net` vs `octo-fz_octo-net`), and container names
+(`octo-mysql-1` vs `octo-fz-mysql-1`). A `down -v` on either one only
+removes its own state.
+
+### Before any `docker compose down -v` — verify what you are about to delete
+
+`down -v` is destructive and irreversible. Run these two probes first
+and confirm the output only references the stack you mean to wipe:
+
+```bash
+# 1. List Docker volumes that would be removed (must all belong to YOUR project)
+docker compose config --volumes        # the volume keys this file declares
+docker volume ls | grep -E '(^|-)octo' # the actual on-disk volumes touched
+
+# 2. List containers in the OCTO namespace (must all belong to YOUR project)
+docker ps --filter 'name=octo' --format '{{.Names}}'
+
+# 3. If anything in (1) or (2) is NOT yours, STOP. Set
+#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check:
+#       COMPOSE_PROJECT_NAME=octo-fz docker compose config --volumes
+#       COMPOSE_PROJECT_NAME=octo-fz docker ps
+```
+
+`setup.sh` runs an equivalent check at the top of each invocation and
+warns when it finds existing OCTO containers / volumes on the host.
+The warning is informational, NOT a block — you still have to be the
+one who chooses the project name. Treat the prompt as the "did you
+mean to do this on this host?" gate.
+
+> 💡 **The 100% safe option for a clean from-zero E2E test is an
+> ephemeral VM or a host with no existing OCTO deployment.** Volume
+> isolation via `COMPOSE_PROJECT_NAME` protects against `down -v`
+> collisions, but a single typo (`COMPOSE_PROJECT_NAME=octo` instead of
+> `octo-fz`) is enough to break that protection. When in doubt, spin up
+> a throwaway machine.
+
+---
+
 ## Quick start
+
+### Prerequisites checklist
+
+- Linux or macOS host with `bash` ≥4, `openssl`, and either the Docker
+  Compose v2 plugin (`docker compose`) or the standalone `docker-compose`
+  binary on `$PATH`.
+- The Docker daemon is running and the invoking user can reach it
+  (`docker info` succeeds without `sudo`).
+- Ports `28080` (nginx HTTP) and `28083` (octo-web) free on the host,
+  plus `127.0.0.1:28081 / :28082 / :28086 / :23306 / :26379 / :29000 /
+  :29001` for the loopback-bound backing services. Override the port
+  numbers via `OCTO_*_PORT` in `docker/.env` if any of those clash.
+- ≥ 4 GiB RAM, ≥ 10 GiB free disk for the named volumes.
+- Outbound network access to `docker.io` (or a configured mirror) for
+  pulling the `mininglamposs/*`, `mysql:8`, `redis:7-alpine`,
+  `minio/minio`, `wukongim/wukongim`, and `nginx:1.27-alpine` images.
+- **If another OCTO stack already runs on this host:** read the
+  pre-flight section above and decide on a non-default
+  `COMPOSE_PROJECT_NAME` before continuing.
 
 Recommended (interactive setup):
 
@@ -52,6 +141,7 @@ Add an `/etc/hosts` entry for `octo.local` if you keep the default domain.
 Tear-down (drops the named volumes too — destructive):
 
 ```bash
+# ⚠ Read "Pre-flight: existing OCTO deployments on this host" above first.
 docker compose down -v
 ```
 

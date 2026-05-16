@@ -31,12 +31,49 @@ networks:
         - subnet: ${OCTO_NETWORK_SUBNET:-172.28.0.0/24}
 
 volumes:
+  # ---------------------------------------------------------------------------
+  # Named-volume isolation via COMPOSE_PROJECT_NAME (INCIDENT-2026-05-16-001).
+  # ---------------------------------------------------------------------------
+  # `name: octo` (above) pins the Compose project to `octo` so the network /
+  # service names stay stable, but it ALSO removes the directory-based prefix
+  # Compose would otherwise put on volume names. Without an explicit `name:`
+  # on each volume, every clone of this repo on the same host would share the
+  # SAME unprefixed volumes (`mysql-data`, `redis-data`, …) — meaning a
+  # `docker compose down -v` from a "fresh" clone at /tmp/foo wipes the
+  # production stack's MySQL data because both clones map to the same
+  # Docker volume objects. That is exactly how INCIDENT-2026-05-16-001
+  # erased im-test's entire user table during a routine from-zero test.
+  #
+  # Setting `name: ${COMPOSE_PROJECT_NAME:-octo}-<vol>` makes the volume name
+  # follow the COMPOSE_PROJECT_NAME env var:
+  #   - default (`COMPOSE_PROJECT_NAME` unset): `octo-mysql-data`, etc. —
+  #     preserves the existing on-disk volume names for users who already
+  #     have a running stack, so this change does NOT trigger a data
+  #     migration on upgrade.
+  #   - operator runs `COMPOSE_PROJECT_NAME=octo-fz docker compose up -d`
+  #     on a second clone: volumes become `octo-fz-mysql-data`, etc., fully
+  #     isolated from the original `octo-*` set. `down -v` on either stack
+  #     only touches its own volumes.
+  #
+  # IMPORTANT: changing `name: octo` at the top of this file to
+  # `name: ${COMPOSE_PROJECT_NAME:-octo}` would let project-name overrides
+  # also rename the network / containers, but it would BREAK existing
+  # deployments whose persistent state lives under the literal `octo` project.
+  # We deliberately keep the project hardcoded to `octo` and only allow the
+  # volume names to drift, so the existing on-disk volumes remain reachable
+  # for everyone on `main`.
   mysql-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-mysql-data
   redis-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-redis-data
   minio-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-minio-data
   wukongim-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-wukongim-data
   server-logs:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-server-logs
   nginx-logs:
+    name: ${COMPOSE_PROJECT_NAME:-octo}-nginx-logs
 
 services:
   # ---------------------------------------------------------------------------
@@ -69,7 +106,6 @@ services:
   # tokens that have no other guard.
   preflight:
     image: ${OCTO_PREFLIGHT_IMAGE:-busybox:1.36}
-    container_name: octo-preflight
     restart: "no"
     environment:
       OCTO_NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN:-}
@@ -105,7 +141,6 @@ services:
 
   mysql:
     image: mysql:8.0
-    container_name: octo-mysql
     restart: unless-stopped
     command:
       - --default-authentication-plugin=mysql_native_password
@@ -145,7 +180,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: octo-redis
     restart: unless-stopped
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     # Backing service: loopback-only by default. See OCTO_MYSQL_BIND comment.
@@ -184,7 +218,6 @@ services:
     # test). Override via .env -> OCTO_MINIO_IMAGE, mirroring the
     # OCTO_WK_IMAGE / OCTO_MINIO_MC_IMAGE pattern.
     image: ${OCTO_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
-    container_name: octo-minio
     restart: unless-stopped
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
@@ -254,7 +287,6 @@ services:
   # working across restarts of the stack.
   minio-init:
     image: ${OCTO_MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
-    container_name: octo-minio-init
     restart: "no"
     depends_on:
       minio:
@@ -410,7 +442,6 @@ services:
     # validating the new tag against `wk.yaml` (tokenAuthOn) and the
     # WK_MANAGERTOKEN binding below. Override via .env -> OCTO_WK_IMAGE.
     image: ${OCTO_WK_IMAGE:-wukongim/wukongim:v2.2.4-20260313}
-    container_name: octo-wukongim
     restart: unless-stopped
     environment:
       WK_MODE: ${WK_MODE:-debug}
@@ -473,14 +504,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 20s
+      # Bumped from 20s -> 40s after the 2026-05-16 from-zero E2E showed
+      # octo-server's `depends_on: wukongim service_healthy` could fire
+      # before WuKongIM finished its in-container init within the previous
+      # 20s window. WuKongIM's first boot writes the cluster metadata
+      # under /root/wukongim and binds the manager listener; on slower
+      # hosts (or under heavy concurrent first-boots like the MinIO +
+      # MySQL bootstrap that runs alongside) this can comfortably exceed
+      # 20s. The retries/interval budget already covers steady-state
+      # restarts; widening start_period only changes how long the first
+      # health probe waits before failures count toward `retries`.
+      start_period: 40s
     networks:
       - octo-net
 
   octo-server:
     image: ${OCTO_SERVER_IMAGE:-mininglamposs/octo-server:latest}
-    container_name: octo-server
-    restart: unless-stopped
+    # `on-failure:5` instead of `unless-stopped` so the first-boot
+    # dependency race (octo-server's `depends_on: wukongim service_healthy`
+    # firing inside wukongim's start_period window) self-heals with up to
+    # five quick restart attempts instead of leaving the stack with one
+    # service in `(unhealthy)`. Five attempts span ~30-60s of additional
+    # wall-clock — comfortably more than the wukongim start_period bump
+    # above — and the failure budget caps runaway restart loops for real
+    # configuration errors (a missing TS_DB_MYSQLADDR will still surface
+    # within seconds rather than hammering forever).
+    restart: on-failure:5
     command: ["api"]
     # -------------------------------------------------------------------
     # Why this env block carries TWO names for the same value
@@ -632,7 +681,6 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
-    container_name: octo-nginx
     restart: unless-stopped
     depends_on:
       octo-server:
@@ -667,7 +715,6 @@ services:
   # ---------------------------------------------------------------------------
   web:
     image: ${OCTO_WEB_IMAGE:-mininglamposs/octo-web:latest}
-    container_name: octo-web
     restart: unless-stopped
     depends_on:
       octo-server:
@@ -691,7 +738,6 @@ services:
   # ---------------------------------------------------------------------------
   admin:
     image: ${OCTO_ADMIN_IMAGE:-mininglamposs/octo-admin:latest}
-    container_name: octo-admin
     restart: unless-stopped
     depends_on:
       octo-server:
@@ -714,7 +760,6 @@ services:
   # ---------------------------------------------------------------------------
   matter:
     image: ${OCTO_MATTER_IMAGE:-mininglamposs/octo-matter:latest}
-    container_name: octo-matter
     restart: unless-stopped
     depends_on:
       preflight:
@@ -756,7 +801,6 @@ services:
   # ---------------------------------------------------------------------------
   summary-api:
     image: ${OCTO_SUMMARY_API_IMAGE:-mininglamposs/octo-smart-summary-api:latest}
-    container_name: octo-summary-api
     restart: unless-stopped
     profiles: ["summary"]
     depends_on:
@@ -813,7 +857,6 @@ services:
 
   summary-worker:
     image: ${OCTO_SUMMARY_WORKER_IMAGE:-mininglamposs/octo-smart-summary-worker:latest}
-    container_name: octo-summary-worker
     restart: unless-stopped
     profiles: ["summary"]
     depends_on:
