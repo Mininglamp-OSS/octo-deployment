@@ -374,15 +374,25 @@ services:
             sleep 2
           done
 
-          # Verify the policy was actually applied. `mc anonymous get`
-          # prints e.g. "Access permission for `local/chat` is `download`".
-          # We grep for the exact mode to defend against the API silently
-          # no-op'ing (which is what motivated dropping `|| true` here).
-          actual=$$(mc anonymous get "local/$$b" 2>/dev/null | sed -n 's/.*is `\(.*\)`.*/\1/p')
-          if [ "$$actual" != "download" ]; then
-            echo "[minio-init] FATAL: anonymous policy on local/$$b is '$$actual', expected 'download'" >&2
-            exit 1
-          fi
+          # Verify the policy was actually applied. The minio/mc image
+          # is distroless-style and ships **no text-processing tools** —
+          # no sed, no awk, no grep, no jq (R3 used sed → exit 127; an
+          # earlier version of this R4 hotfix tried grep → also 127).
+          # The shell is bash 5.x though, so we ask mc for one-line JSON
+          # via `--json` and use a bash `case` glob against the literal
+          # `"permission":"download"` substring. This defends against
+          # the API silently no-op'ing (the original motivation for
+          # dropping `|| true` in R3) without depending on any external
+          # binary outside the mc image itself.
+          json=$$(mc anonymous get --json "local/$$b" 2>/dev/null)
+          case "$$json" in
+            *'"permission":"download"'*)
+              ;;
+            *)
+              echo "[minio-init] FATAL: anonymous policy on local/$$b verify failed: $$json" >&2
+              exit 1
+              ;;
+          esac
         done
         echo "[minio-init] anonymous download verified on content buckets"
 
