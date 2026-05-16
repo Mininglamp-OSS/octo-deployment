@@ -171,10 +171,20 @@ preflight_existing_octo() {
   docker info >/dev/null 2>&1 || return 0
 
   local existing_volumes existing_containers
+  # Match BOTH separator variants:
+  #   - underscore (`octo_mysql-data`): Compose v2 default for project-scoped
+  #     named volumes/networks under `name: octo` — this is what every existing
+  #     deployment on `main` has on disk.
+  #   - hyphen (`octo-mysql-data` etc.): used by some older / alternate naming
+  #     paths and by Compose-generated container names (`octo-mysql-1`).
+  # Compose project names always start at the beginning of the volume /
+  # container name, so anchoring on `^octo` plus a `[-_]` or end-of-string
+  # boundary catches the realistic shapes without false-positives on
+  # unrelated images like `octopus-deploy/...`.
   existing_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null \
-                       | grep -E '(^|-)octo(-|$)' || true)"
+                       | grep -E '^octo([-_]|$)' || true)"
   existing_containers="$(docker ps -a --filter 'name=octo' --format '{{.Names}}' 2>/dev/null \
-                       | grep -E '(^|-)octo(-|$)' || true)"
+                       | grep -E '^octo([-_]|$)' || true)"
 
   if [[ -z "${existing_volumes}" && -z "${existing_containers}" ]]; then
     return 0

@@ -1,6 +1,6 @@
 # -----------------------------------------------------------------------------
 # WuKongIM configuration for the OCTO stack.
-# Mounted at /root/wukongim/wk.yaml inside the octo-wukongim container.
+# Mounted at /root/wukongim/wk.yaml inside the `wukongim` service container.
 # -----------------------------------------------------------------------------
 
 # debug | release | bench

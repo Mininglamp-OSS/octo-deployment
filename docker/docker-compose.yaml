@@ -44,15 +44,17 @@ volumes:
   # Docker volume objects. That is exactly how INCIDENT-2026-05-16-001
   # erased im-test's entire user table during a routine from-zero test.
   #
-  # Setting `name: ${COMPOSE_PROJECT_NAME:-octo}-<vol>` makes the volume name
-  # follow the COMPOSE_PROJECT_NAME env var:
-  #   - default (`COMPOSE_PROJECT_NAME` unset): `octo-mysql-data`, etc. —
-  #     preserves the existing on-disk volume names for users who already
-  #     have a running stack, so this change does NOT trigger a data
-  #     migration on upgrade.
+  # Setting `name: ${COMPOSE_PROJECT_NAME:-octo}_<vol>` (note the UNDERSCORE
+  # separator — see below) makes the volume name follow the
+  # COMPOSE_PROJECT_NAME env var:
+  #   - default (`COMPOSE_PROJECT_NAME` unset): `octo_mysql-data`, etc. —
+  #     BIT-FOR-BIT identical to the names Compose was already producing
+  #     for `name: octo` on `main`, so existing on-disk volumes remain
+  #     attached and this change does NOT trigger a data migration on
+  #     upgrade.
   #   - operator runs `COMPOSE_PROJECT_NAME=octo-fz docker compose up -d`
-  #     on a second clone: volumes become `octo-fz-mysql-data`, etc., fully
-  #     isolated from the original `octo-*` set. `down -v` on either stack
+  #     on a second clone: volumes become `octo-fz_mysql-data`, etc., fully
+  #     isolated from the original `octo_*` set. `down -v` on either stack
   #     only touches its own volumes.
   #
   # IMPORTANT: changing `name: octo` at the top of this file to
@@ -62,18 +64,26 @@ volumes:
   # We deliberately keep the project hardcoded to `octo` and only allow the
   # volume names to drift, so the existing on-disk volumes remain reachable
   # for everyone on `main`.
+  #
+  # SEPARATOR NOTE: Compose v2 names project-scoped volumes / networks with an
+  # UNDERSCORE between project and key (`<project>_<key>`) — that legacy
+  # behavior was kept from Compose v1, even though container names switched
+  # to `-`. We mirror the underscore here so the explicit `name:` matches
+  # exactly what Compose would have generated for the default project on
+  # `main`. Do NOT change `_` to `-` here; that would silently re-alias every
+  # named volume on disk on the next `up -d` and look like data loss.
   mysql-data:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-mysql-data
+    name: ${COMPOSE_PROJECT_NAME:-octo}_mysql-data
   redis-data:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-redis-data
+    name: ${COMPOSE_PROJECT_NAME:-octo}_redis-data
   minio-data:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-minio-data
+    name: ${COMPOSE_PROJECT_NAME:-octo}_minio-data
   wukongim-data:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-wukongim-data
+    name: ${COMPOSE_PROJECT_NAME:-octo}_wukongim-data
   server-logs:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-server-logs
+    name: ${COMPOSE_PROJECT_NAME:-octo}_server-logs
   nginx-logs:
-    name: ${COMPOSE_PROJECT_NAME:-octo}-nginx-logs
+    name: ${COMPOSE_PROJECT_NAME:-octo}_nginx-logs
 
 services:
   # ---------------------------------------------------------------------------
@@ -505,15 +515,23 @@ services:
       timeout: 5s
       retries: 12
       # Bumped from 20s -> 40s after the 2026-05-16 from-zero E2E showed
-      # octo-server's `depends_on: wukongim service_healthy` could fire
-      # before WuKongIM finished its in-container init within the previous
-      # 20s window. WuKongIM's first boot writes the cluster metadata
-      # under /root/wukongim and binds the manager listener; on slower
-      # hosts (or under heavy concurrent first-boots like the MinIO +
-      # MySQL bootstrap that runs alongside) this can comfortably exceed
-      # 20s. The retries/interval budget already covers steady-state
-      # restarts; widening start_period only changes how long the first
-      # health probe waits before failures count toward `retries`.
+      # WuKongIM could need more than 20s to finish its in-container init
+      # before the first health probe started counting failures. WuKongIM's
+      # first boot writes the cluster metadata under /root/wukongim and
+      # binds the manager listener; on slower hosts (or under heavy
+      # concurrent first-boots like the MinIO + MySQL bootstrap that runs
+      # alongside) this can comfortably exceed 20s. The retries/interval
+      # budget already covers steady-state restarts; widening start_period
+      # only changes how long the first health probe waits before failures
+      # count toward `retries`.
+      #
+      # NOTE: octo-server's `depends_on` on wukongim is `service_started`
+      # (see the octo-server block below at the `depends_on:` key), NOT
+      # `service_healthy`, so this start_period bump does NOT gate
+      # octo-server boot. It just gives WuKongIM itself a longer first-
+      # probe window before its OWN container is flagged unhealthy and
+      # restarted. The reason `service_started` was chosen on the
+      # octo-server side is documented next to that depends_on entry.
       start_period: 40s
     networks:
       - octo-net

@@ -171,8 +171,19 @@ server {
         # admin` does NOT leave nginx proxying to the dead IP for the
         # lifetime of the worker. nginx re-resolves `$upstream_admin`
         # against 127.0.0.11 within `valid=10s`.
+        #
+        # IMPORTANT: when `proxy_pass` contains a variable, nginx does NOT
+        # do the static-form prefix substitution (it would otherwise strip
+        # the matched location and prepend the directive's URI). With a
+        # variable target plus a URI component, nginx instead replaces the
+        # original request URI with the directive URI verbatim — so
+        # `/admin/foo/bar` would collapse to `/admin/` on the upstream.
+        # The admin backend already serves under `/admin/`, so we want an
+        # identity transform: drop the URI component from `proxy_pass` and
+        # let nginx forward the original request URI unchanged. This
+        # matches the pattern documented for `/summary/` below.
         set $upstream_admin admin;
-        proxy_pass         http://$upstream_admin/admin/;
+        proxy_pass         http://$upstream_admin;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -194,9 +205,18 @@ server {
         # Variable + resolver: matter is one of the services operators
         # most commonly recreate on its own (LLM key rotation, image
         # bump). The variable form survives that recreate.
+        #
+        # URI handling: matter listens at the root (`/api/...`,
+        # `/health`, ...), not under `/matter/`, so we must strip the
+        # location prefix. Variable `proxy_pass` does not auto-strip,
+        # so we `rewrite ^/matter/(.*) /$1 break;` first, then use a
+        # `proxy_pass` target with NO URI component so the rewritten
+        # request URI (`/api/...`, `/health`) is forwarded as-is. This
+        # is the same pattern documented for `/summary/` below.
         limit_req zone=octo_api burst=20 nodelay;
         set $upstream_matter matter;
-        proxy_pass         http://$upstream_matter:8080/;
+        rewrite ^/matter/(.*) /$1 break;
+        proxy_pass         http://$upstream_matter:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -289,8 +309,16 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
         # of the SPA containers; a `docker compose up -d --force-recreate
         # web` previously left every `/` (and therefore /chat, /group,
         # /moment SPA routes) returning 502 until nginx was bounced.
+        #
+        # URI handling: web serves at the root, so this is an identity
+        # transform. Variable `proxy_pass` with a URI component (e.g.
+        # `http://$upstream_web/`) would replace the original request
+        # URI with the directive's URI verbatim — every request would
+        # collapse to `/` and the SPA's deep links + static assets
+        # under `/assets/...` would all return `index.html`. Drop the
+        # URI component so nginx forwards the original request URI.
         set $upstream_web web;
-        proxy_pass         http://$upstream_web/;
+        proxy_pass         http://$upstream_web;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -390,7 +418,7 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     }
 #     location /admin/ {
 #         set $upstream_admin admin;
-#         proxy_pass         http://$upstream_admin/admin/;
+#         proxy_pass         http://$upstream_admin;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -401,7 +429,8 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     location /matter/ {
 #         limit_req zone=octo_api burst=20 nodelay;
 #         set $upstream_matter matter;
-#         proxy_pass         http://$upstream_matter:8080/;
+#         rewrite ^/matter/(.*) /$1 break;
+#         proxy_pass         http://$upstream_matter:8080;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
@@ -448,7 +477,7 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #
 #     location / {
 #         set $upstream_web web;
-#         proxy_pass         http://$upstream_web/;
+#         proxy_pass         http://$upstream_web;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
