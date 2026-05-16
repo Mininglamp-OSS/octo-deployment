@@ -4,7 +4,7 @@
 # -----------------------------------------------------------------------------
 
 # debug | release | bench
-mode: "debug"
+mode: "release"
 
 tokenAuthOn: true
 

@@ -19,3 +19,8 @@ kustomize/overlays/**
 # until an operator wires HTTPS, but the path is gitignored anyway so
 # `cp` / `mv` accidents do not commit a real cert.
 docker/nginx/certs/
+
+# TLS certificates in docker/certs/ — see docker/certs/README.md
+docker/certs/*.pem
+docker/certs/*.key
+docker/certs/*.crt

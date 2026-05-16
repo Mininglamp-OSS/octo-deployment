@@ -689,6 +689,7 @@ services:
     image: ${OCTO_SUMMARY_API_IMAGE:-mininglamposs/octo-smart-summary-api:latest}
     container_name: octo-summary-api
     restart: unless-stopped
+    profiles: ["summary"]
     depends_on:
       preflight:
         condition: service_completed_successfully
@@ -745,6 +746,7 @@ services:
     image: ${OCTO_SUMMARY_WORKER_IMAGE:-mininglamposs/octo-smart-summary-worker:latest}
     container_name: octo-summary-worker
     restart: unless-stopped
+    profiles: ["summary"]
     depends_on:
       mysql:
         condition: service_healthy
