@@ -515,11 +515,13 @@ services:
       # warns when this var is missing from .env. Two-name sync with
       # matter (line below) keeps the contract symmetric.
       NOTIFY_INTERNAL_TOKEN: ${OCTO_NOTIFY_INTERNAL_TOKEN}
-      # First-admin bootstrap. Uncomment to have octo-server seed a
-      # superAdmin row (username "superAdmin", password bcrypt(<value>))
-      # on first start when the user table is empty. See "First-admin
-      # bootstrap · Option A" in docker/README.md before enabling.
-      # TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
+      # First-admin bootstrap. octo-server seeds a superAdmin row
+      # (username "superAdmin", password bcrypt(<value>)) on first start
+      # when the user table is empty. setup.sh generates a random value
+      # for OCTO_ADMIN_PWD and prints it for the operator to save.
+      # Leave OCTO_ADMIN_PWD empty in .env to skip auto-bootstrap
+      # (create admin manually via API).
+      TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
     depends_on:
       preflight:
         condition: service_completed_successfully
@@ -583,7 +585,7 @@ services:
       # OOTB stack portable; redirect to a host path if your operator
       # tooling needs them on disk.
       - nginx-logs:/var/log/nginx
-      # - ./nginx/certs:/etc/nginx/certs:ro
+      # - ./certs:/etc/nginx/certs:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost/_nginx_up >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -689,6 +691,7 @@ services:
     image: ${OCTO_SUMMARY_API_IMAGE:-mininglamposs/octo-smart-summary-api:latest}
     container_name: octo-summary-api
     restart: unless-stopped
+    profiles: ["summary"]
     depends_on:
       preflight:
         condition: service_completed_successfully
@@ -745,6 +748,7 @@ services:
     image: ${OCTO_SUMMARY_WORKER_IMAGE:-mininglamposs/octo-smart-summary-worker:latest}
     container_name: octo-summary-worker
     restart: unless-stopped
+    profiles: ["summary"]
     depends_on:
       mysql:
         condition: service_healthy

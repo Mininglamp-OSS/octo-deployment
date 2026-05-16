@@ -162,8 +162,25 @@ server {
     location /summary/ {
         # See /matter/ above — same octo_api zone applied for
         # consistency with the documented security model.
+        #
+        # summary-api lives in `profiles: [summary]` and is NOT started by
+        # default. A static `proxy_pass http://summary-api:8080` would make
+        # nginx resolve the hostname at startup — when the container is absent
+        # that resolution fails and nginx refuses to start (emerg: host not
+        # found). Using a variable defers resolution to request time via the
+        # Docker embedded DNS resolver; when summary-api is down the client
+        # gets a 502 instead of a hard crash.
+        #
+        # IMPORTANT: when `proxy_pass` contains a variable, nginx does NOT
+        # perform the location-prefix replacement that strips `/summary/`
+        # from the URI. We must rewrite the URI explicitly with `rewrite`
+        # and use a `proxy_pass` target that has NO URI component, so the
+        # rewritten request URI (`/health`, `/foo`, …) is forwarded as-is.
         limit_req zone=octo_api burst=20 nodelay;
-        proxy_pass         http://summary-api:8080/;
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $summary_backend summary-api;
+        rewrite ^/summary/(.*) /$1 break;
+        proxy_pass         http://$summary_backend:8080;
         proxy_http_version 1.1;
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
@@ -204,15 +221,137 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 # -----------------------------------------------------------------------------
 # HTTPS listener (disabled by default).
 # Enable by: uncommenting the 443 port in docker-compose.yaml, placing certs
-# under ./nginx/certs/, and uncommenting the block below.
+# under docker/certs/, uncommenting the certs volume mount, and uncommenting
+# the block below. See docker/certs/README.md for cert placement details.
 # -----------------------------------------------------------------------------
+# --- Uncomment the block below to enable HTTPS (requires certs in docker/certs/) ---
 # server {
-#     listen       443 ssl http2;
-#     listen       [::]:443 ssl http2;
-#     server_name  ${OCTO_DOMAIN};
-#     ssl_certificate      /etc/nginx/certs/fullchain.pem;
-#     ssl_certificate_key  /etc/nginx/certs/privkey.pem;
-#     ssl_protocols        TLSv1.2 TLSv1.3;
-#     ssl_ciphers          HIGH:!aNULL:!MD5;
-#     # paste the same location blocks as the HTTP listener above
+#     listen       443 ssl http2 default_server;
+#     listen       [::]:443 ssl http2 default_server;
+#     server_name  ${OCTO_DOMAIN} _;
+#
+#     ssl_certificate     /etc/nginx/certs/fullchain.pem;
+#     ssl_certificate_key /etc/nginx/certs/privkey.pem;
+#     ssl_protocols       TLSv1.2 TLSv1.3;
+#     ssl_ciphers         HIGH:!aNULL:!MD5;
+#
+#     client_max_body_size    1000m;
+#     client_body_buffer_size 8m;
+#
+#     add_header X-Frame-Options          "SAMEORIGIN" always;
+#     add_header X-Content-Type-Options   "nosniff" always;
+#     add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
+#     add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+#
+#     location = /_nginx_up {
+#         access_log off;
+#         default_type text/plain;
+#         return 200 "ok\n";
+#     }
+#
+#     location /api/ {
+#         limit_req zone=octo_api burst=60 nodelay;
+#         proxy_pass         http://octo_api/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#         proxy_set_header   Connection        "";
+#         proxy_read_timeout 600s;
+#     }
+#
+#     location ^~ /v1/ {
+#         limit_req zone=octo_auth burst=20 nodelay;
+#         proxy_pass         http://octo_api/v1/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#         proxy_set_header   Connection        "";
+#         proxy_read_timeout 600s;
+#     }
+#
+#     location /ws {
+#         proxy_pass          http://octo_ws;
+#         proxy_http_version  1.1;
+#         proxy_set_header    Upgrade           $http_upgrade;
+#         proxy_set_header    Connection        "upgrade";
+#         proxy_set_header    Host              $host;
+#         proxy_set_header    X-Real-IP         $remote_addr;
+#         proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header    X-Forwarded-Proto $scheme;
+#         proxy_read_timeout  3600s;
+#         proxy_send_timeout  3600s;
+#     }
+#
+#     location /minio/ {
+#         proxy_pass         http://octo_minio_api/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#         proxy_set_header   Connection        "";
+#         proxy_read_timeout 600s;
+#         proxy_request_buffering off;
+#     }
+#
+#     location = /admin {
+#         return 301 /admin/;
+#     }
+#     location /admin/ {
+#         proxy_pass         http://admin/admin/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /matter/ {
+#         limit_req zone=octo_api burst=20 nodelay;
+#         proxy_pass         http://matter:8080/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /summary/ {
+#         limit_req zone=octo_api burst=20 nodelay;
+#         resolver 127.0.0.11 valid=10s ipv6=off;
+#         set $summary_backend summary-api;
+#         rewrite ^/summary/(.*) /$1 break;
+#         proxy_pass         http://$summary_backend:8080;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location = /_octo_up {
+#         default_type text/html;
+#         return 200 '<!doctype html><html><body><h1>OCTO Server (HTTPS)</h1></body></html>';
+#     }
+#
+#     location / {
+#         proxy_pass         http://web/;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+# }
+#
+# # HTTP → HTTPS redirect (replaces the HTTP server block above)
+# server {
+#     listen       80 default_server;
+#     listen       [::]:80 default_server;
+#     server_name  ${OCTO_DOMAIN} _;
+#     return 301 https://$host$request_uri;
 # }

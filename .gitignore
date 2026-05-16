@@ -15,7 +15,11 @@ kustomize/overlays/**
 !kustomize/overlays/prod/**
 
 # nginx TLS material — keep certificates / keys out of the repo. The
-# `docker/nginx/certs/` mount is commented out in docker-compose.yaml
-# until an operator wires HTTPS, but the path is gitignored anyway so
-# `cp` / `mv` accidents do not commit a real cert.
-docker/nginx/certs/
+# active TLS mount path is `docker/certs/` (see below); the older
+# `docker/nginx/certs/` layout is no longer referenced by any compose
+# file, so only the canonical path is ignored.
+
+# TLS certificates in docker/certs/ — see docker/certs/README.md
+docker/certs/*.pem
+docker/certs/*.key
+docker/certs/*.crt
