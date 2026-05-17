@@ -339,13 +339,16 @@ compose_up_and_wait() {
     # Extract concrete failing service names from
     # `ps --format '{{.Service}}\t{{.Status}}'`. We flag anything that
     # is (unhealthy), Restarting, Dead, or Exited(non-zero). One-shot
-    # services (preflight / minio-init) are excluded the same way
-    # `check_compose_running_states` excludes them, so we do not falsely
-    # tell the operator "look at minio-init logs" when minio-init
-    # correctly Exited (0). Codex review P2 #1.
+    # services (preflight / minio-init) are normally expected to be
+    # `Exited (0)` and so are NOT a fail in that state — but if they
+    # crash with `Exited (1)` / `Restarting` / `Dead` they MUST surface,
+    # because they gate the rest of the stack. So instead of stripping
+    # them by name, we strip the specific benign one-shot status
+    # (`Exited (0)`) and let everything else flow into the fail grep.
+    # Codex review P2 #1 (R2 follow-up).
     failing_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
-                      | grep -vE '^(preflight|minio-init)	' \
-                      | grep -E '	.*((unhealthy)|Restarting|Dead|Exited \([1-9])' \
+                      | grep -vE '^(preflight|minio-init)	Exited \(0\)' \
+                      | grep -E '	.*(\(unhealthy\)|Restarting|Dead|Exited \([1-9])' \
                       | awk -F'	' '{print $1}' | sort -u || true)"
     err ""
     if [[ -n "${failing_svcs}" ]]; then
