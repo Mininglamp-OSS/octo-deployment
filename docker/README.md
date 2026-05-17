@@ -618,6 +618,7 @@ through nginx bucket-name routing under TLS.
 > MINIO_SERVER_URL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
 > TS_MINIO_DOWNLOADURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
 > TS_EXTERNAL_BASEURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> OCTO_WK_WSS_ADDR=wss://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}/ws
 > ```
 >
 > Substitute the literal hostname and port (`.env` does not interpolate
@@ -678,7 +679,7 @@ the reverse proxy is the only public listener.
 > MINIO_SERVER_URL=https://octo.example.com
 > TS_MINIO_DOWNLOADURL=https://octo.example.com
 > TS_EXTERNAL_BASEURL=https://octo.example.com
-> OCTO_WK_WS_ADDR=wss://octo.example.com/ws        # browser WSS via reverse proxy
+> OCTO_WK_WSS_ADDR=wss://octo.example.com/ws       # browser WSS via reverse proxy (maps to WK_EXTERNAL_WSSADDR)
 > ```
 >
 > All three URL values must share scheme + host + port — SigV4 signs
@@ -709,18 +710,21 @@ cloudflared tunnel create octo
 cloudflared tunnel route dns octo octo.example.com
 
 # 5. Write /etc/cloudflared/config.yml (substitute the UUID from step 3 —
-#    `cloudflared tunnel list` prints it).
+#    `cloudflared tunnel list` prints it). Also copy the per-tunnel credentials
+#    JSON from your user ~/.cloudflared/ into a service-owned path so the
+#    root-owned systemd unit can read it (otherwise the service fails to start
+#    because /root/.cloudflared/<uuid>.json does not exist).
 sudo install -d -m 0755 /etc/cloudflared
+sudo cp ~/.cloudflared/*.json /etc/cloudflared/
 sudo tee /etc/cloudflared/config.yml >/dev/null <<'YML'
 tunnel: <TUNNEL-UUID>
-credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
 
 ingress:
   - hostname: octo.example.com
     service: http://localhost:28080
     originRequest:
       connectTimeout: 30s
-      noTLSVerify: false
   - service: http_status:404
 YML
 
@@ -844,9 +848,13 @@ patched.
 **WebSocket note**: the `proxy_set_header Upgrade` /
 `proxy_set_header Connection` pair plus the `map $http_upgrade
 $connection_upgrade` block is the standard nginx WebSocket recipe.
-Without the `map`, `Connection: $http_upgrade` evaluates to literally
-`"upgrade"` on every request including non-WS, which breaks keepalive
-on REST. Do not skip the map.
+`$http_upgrade` is empty on a normal REST request and equals
+`websocket` on a WS upgrade; the `map` translates that into the
+matching `Connection` value (`""` for REST, `upgrade` for WS). The
+trap to avoid is hardcoding `proxy_set_header Connection "upgrade"`
+on every request — that forces `Connection: upgrade` on non-WS
+requests too and breaks HTTP/1.1 keepalive on REST. Always drive
+`Connection` from the `map`, never a literal `"upgrade"`.
 
 **Body size note**: `client_max_body_size 100M` covers MinIO presign
 PUT for chat / file messages. Bump higher if your users upload bigger
@@ -954,30 +962,62 @@ When fronting the stack with a reverse proxy:
 | ---- | --------- | -------------------- | --- |
 | `443/tcp` | inbound | Path B/C reverse-proxy host (Path A: not needed) | client HTTPS |
 | `80/tcp`  | inbound | Path B/C reverse-proxy host (Path A: not needed) | LE HTTP-01 ACME challenge + HTTP→HTTPS redirect |
-| `28080/tcp` | **loopback only** | in-compose nginx | upstream — restrict to `127.0.0.1` so it is not reachable from the internet |
+| `28080/tcp` | **loopback only** | in-compose nginx | upstream — bind to `127.0.0.1` via `OCTO_NGINX_BIND` so it is not reachable from the internet |
 
 Path A (Cloudflare Tunnel) needs **no inbound ports at all** — the
 tunnel is outbound-only. The reverse-proxy host firewall stays
 completely closed inbound.
 
-For Paths B and C, restrict the in-compose nginx to the loopback
-interface so only the host-side reverse proxy can reach it. The
-simplest form is the host firewall (no `docker-compose.yaml` edit
-needed):
+#### Primary — restrict the in-compose nginx to loopback (the only reliable way)
+
+Edit `docker/.env` and set:
 
 ```bash
-# Debian/Ubuntu with ufw — Path B / C
-sudo ufw allow 443/tcp
-sudo ufw allow 80/tcp     # Path B/C only (Cloudflare Tunnel does not need this)
-sudo ufw deny 28080/tcp   # block external clients from hitting the in-compose nginx directly
-sudo ufw enable
+OCTO_NGINX_BIND=127.0.0.1
 ```
 
-Alternatively, edit the nginx port mapping in `docker/docker-compose.yaml`
-from `"${OCTO_HTTP_PORT:-28080}:80"` to
-`"127.0.0.1:${OCTO_HTTP_PORT:-28080}:80"` so Docker only binds to the
-loopback interface in the first place (defence in depth; survives a
-`ufw disable` mistake).
+then restart nginx:
+
+```bash
+sudo docker compose up -d nginx
+```
+
+This binds port `28080` to the loopback interface only — only your
+reverse proxy on the same host can reach it. External clients hitting
+`http://<public-IP>:28080/` get connection refused / timeout at the
+kernel level, before Docker or any container is involved.
+
+Verify (on the host running compose):
+
+```bash
+curl -fsS http://127.0.0.1:28080/_nginx_up   # → "ok" (200)
+curl --max-time 5 http://<public-IP>:28080/_nginx_up   # → connection refused / timeout
+```
+
+#### Secondary — defence-in-depth, NOT a replacement for OCTO_NGINX_BIND
+
+> ⚠️ **DO NOT rely on `ufw deny 28080/tcp` alone.** Docker publishes
+> ports via the iptables `DOCKER` chain, which is evaluated **before**
+> ufw's `INPUT` / `ufw-*` chains. External traffic still reaches
+> Docker-published ports regardless of ufw rules — `ufw deny 28080`
+> looks correct in `ufw status` but does not actually block the port.
+> See: https://github.com/docker/for-linux/issues/690
+>
+> `ufw deny 28080/tcp` can be added as defence-in-depth
+> (belt-and-suspenders), but `OCTO_NGINX_BIND=127.0.0.1` is the only
+> reliable restriction.
+
+The usual host-firewall rules for Paths B / C (these *do* work — they
+control `443` / `80` on the host nginx, which is not Docker-published):
+
+```bash
+# Debian/Ubuntu with ufw — Path B / C (the in-compose nginx is already
+# restricted via OCTO_NGINX_BIND=127.0.0.1 above; these open the reverse
+# proxy's own listeners).
+sudo ufw allow 443/tcp
+sudo ufw allow 80/tcp     # Path B/C only (Cloudflare Tunnel does not need this)
+sudo ufw enable
+```
 
 ### WebSocket via reverse proxy
 
@@ -994,10 +1034,12 @@ above handle both:
   `proxy_set_header Upgrade $http_upgrade` +
   `proxy_set_header Connection $connection_upgrade` pair PLUS the
   `map $http_upgrade $connection_upgrade` block at http{} scope is
-  the standard nginx WebSocket recipe. Without the `map`,
-  `Connection: $http_upgrade` evaluates to literally `"upgrade"` on
-  every request including non-WS, which breaks REST keepalive. The
-  config above ships the `map` in
+  the standard nginx WebSocket recipe. `$http_upgrade` is empty on
+  REST and `websocket` on WS upgrade; the `map` translates that into
+  the matching `Connection` value (`""` for REST, `upgrade` for WS).
+  The trap is hardcoding `proxy_set_header Connection "upgrade"` —
+  that forces `Connection: upgrade` on every request and breaks
+  HTTP/1.1 keepalive on REST. The config above ships the `map` in
   `/etc/nginx/conf.d/connection_upgrade.conf` so it loads at http{}
   scope before any vhost.
 - **Path C** (Caddy): the `reverse_proxy` directive forwards
@@ -1024,9 +1066,11 @@ The reverse proxy is the **only** public listener. Everything else
 stays on loopback exactly as documented in
 [Backing-service host bindings](#backing-service-host-bindings) and
 [Network surface](#network-surface). The OOTB default of binding
-`28080` to `0.0.0.0` is for laptop-only single-port deployments —
-flip it to loopback (firewall or compose-file edit, see above) the
-moment you put a reverse proxy in front.
+`28080` to `0.0.0.0` (`OCTO_NGINX_BIND=0.0.0.0`) is for laptop-only
+single-port deployments — set `OCTO_NGINX_BIND=127.0.0.1` in
+`docker/.env` and `docker compose up -d nginx` the moment you put a
+reverse proxy in front (see [Firewall rules for HTTPS](#firewall-rules-for-https)
+above for why a ufw rule alone is not enough).
 
 > 💡 **Why not bind the in-compose nginx directly to `:443`?** Two
 > reasons: (1) it forces every TLS knob (cert path, cipher suite,

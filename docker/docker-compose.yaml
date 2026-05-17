@@ -745,7 +745,7 @@ services:
     environment:
       OCTO_DOMAIN: ${OCTO_DOMAIN:-octo.local}
     ports:
-      - "${OCTO_HTTP_PORT:-28080}:80"
+      - "${OCTO_NGINX_BIND:-0.0.0.0}:${OCTO_HTTP_PORT:-28080}:80"
       # HTTPS placeholder — single-port plus TLS form (architecture only,
       # certbot / cert automation NOT in scope here). To enable: place
       # certs under docker/certs/, uncomment the certs volume mount
