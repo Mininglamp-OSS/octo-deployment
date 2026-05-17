@@ -160,9 +160,12 @@ mean to do this on this host?" gate.
   `OCTO_HTTP_PORT`). When you bring up HTTPS via the certs flow, the
   client port becomes `28443` (`OCTO_HTTPS_PORT`). All other ports
   (MinIO, MySQL, Redis, WuKongIM monitor, direct REST) default to
-  loopback. WuKongIM transport ports `25001 / 25100 / 25200` only need
-  to be reachable if you connect **native chat clients** directly to
-  WuKongIM; browser/SPA chat traffic flows through nginx `/ws`.
+  loopback. The WuKongIM native chat transports (`25100` TCP / `25200`
+  WS) only need to be reachable if you connect **native chat clients**
+  directly to WuKongIM; browser / SPA chat traffic flows through nginx
+  `/ws`. The WuKongIM manager API on `25001` is an admin / debug
+  surface (not a chat transport) and stays on loopback regardless of
+  client kind — see the network-surface table below.
 - ≥ 4 GiB RAM, ≥ 10 GiB free disk for the named volumes.
 - Outbound network access to `docker.io` (or a configured mirror) for
   pulling the `mininglamposs/*`, `mysql:8`, `redis:7-alpine`,
@@ -223,33 +226,45 @@ the smoke test to confirm the *external* surface actually works:
 
 The script probes (and prints PASS/FAIL for each):
 
-1. `docker compose ps` reports no `(unhealthy)` containers
+1. `docker compose ps` reports no `(unhealthy)` containers, no fatal
+   states (`Exited (1)` / `Restarting` / `Dead`), and no expected
+   service that is missing or cleanly stopped
 2. nginx vhost up (`GET /_nginx_up`)
 3. octo-server REST (`GET /api/v1/health`)
 4. octo-matter (`GET /matter/health`) — **counted** toward failures
 5. MinIO via nginx (`GET /minio/health/live`)
 6. admin SPA reachable (`GET /admin/`)
-7. **admin login** (`POST /api/v1/manager/login` as `superAdmin` with
+7. web SPA reachable (`GET /`) — confirms the user-facing SPA is
+   served end-to-end through the same nginx vhost as `/api/` and `/ws`
+8. WuKongIM `/ws` upgrade probe (`GET /ws` with a real RFC 6455
+   WebSocket-upgrade handshake via `python3` raw socket) — catches a
+   `docker stop wukongim` that leaves the container in `Exited (0)`
+   and slips past `(unhealthy)` and the fatal-state set; accepts
+   `101` / `400` / `426` as healthy and treats `502` / `503` / `504`
+   / `000` / other 4xx-5xx as failure
+9. **admin login** (`POST /api/v1/manager/login` as `superAdmin` with
    `OCTO_ADMIN_PWD` from `.env`) — exercises the octo-server + MySQL +
    bcrypt + Redis-cache chain
-8. **presigned PUT issuance** (`GET /api/v1/file/upload/credentials`) —
-   exercises octo-server's MinIO IAM credential path
-9. **1-byte PUT to the signed URL** — exercises nginx forwarding the
-   SigV4 path verbatim AND MinIO accepting the signature (this is the
-   exact code path that silently dropped image messages on the dual-port
-   form before single-port reverse-proxy landed; see
-   OOTB-BUG-2026-05-17-001).
+10. **presigned PUT issuance** (`GET /api/v1/file/upload/credentials`) —
+    exercises octo-server's MinIO IAM credential path
+11. **1-byte PUT to the signed URL** — exercises nginx forwarding the
+    SigV4 path verbatim AND MinIO accepting the signature (this is the
+    exact code path that silently dropped image messages on the dual-port
+    form before single-port reverse-proxy landed; see
+    OOTB-BUG-2026-05-17-001).
 
 Exit code is non-zero on any failure. `python3` is a **hard
-prerequisite** of `--verify` — steps 7-9 (admin login, presign issuance,
-SigV4 PUT) parse JSON via `python3 -c 'import json'`, and silently
-skipping them was the gap that hid OOTB-BUG-2026-05-17-001. Missing
-`python3` now fails fast with a non-zero exit; install it (every modern
-Linux distro ships it in the base image) and re-run. This is what to
-run on a new host to confirm "deployment actually works end-to-end" —
-separate from "containers booted".
+prerequisite** of `--verify` — step 8 (WuKongIM `/ws` upgrade probe)
+opens a raw socket from python3, and steps 9-11 (admin login, presign
+issuance, SigV4 PUT) parse JSON via `python3 -c 'import json'`.
+Silently skipping the JSON-parse steps was the gap that hid
+OOTB-BUG-2026-05-17-001. Missing `python3` now fails fast with a
+non-zero exit; install it (every modern Linux distro ships it in the
+base image) and re-run. This is what to run on a new host to confirm
+"deployment actually works end-to-end" — separate from "containers
+booted".
 
-Step 9 leaves a 1-byte sentinel object in the `file` bucket
+Step 11 leaves a 1-byte sentinel object in the `file` bucket
 (`octo-verify-<timestamp>-<pid>.txt`). It is intentionally left in
 place — the bundled `minio/minio` image does NOT ship the `mc` client
 (`mc` lives in the separate `minio/mc` image, which is only used by the
@@ -410,9 +425,15 @@ monitor port (`OCTO_WK_MONITOR_BIND`). The first three skip the
 `/api/`, `/v1/`, `/matter/`, and `/summary/`, so leaving them
 loopback-only keeps an operator-debug port from becoming a
 rate-limit-free production path. The WuKongIM monitor port is an
-admin surface, not a chat transport — chat clients reach WuKongIM via
-the user-facing API/TCP/WS ports, which stay on `0.0.0.0` (only
-required if native chat clients connect directly to WuKongIM).
+admin surface, not a chat transport. The user-facing WuKongIM ports
+(API `25001` / TCP `25100` / WS `25200`) **also default to
+`127.0.0.1`** — browser / SPA chat traffic reaches WuKongIM through
+nginx `/ws`, and the manager API on `25001` is reached via
+`docker exec` or an `ssh -L` tunnel against the loopback bind. Flip
+`OCTO_WK_TCP_BIND` / `OCTO_WK_WS_BIND` to `0.0.0.0` only if you run
+a native mobile / desktop IM client that dials WuKongIM directly
+(see [Advanced: direct WuKongIM transports](#advanced-direct-wukongim-transports)
+below); the manager-API bind should stay loopback in OOTB deploys.
 
 Override the loopback defaults only if you have rotated all
 credentials and placed the host behind a firewall. **Redis runs

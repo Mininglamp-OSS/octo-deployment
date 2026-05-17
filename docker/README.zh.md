@@ -88,7 +88,7 @@ docker ps --filter 'name=octo' --format '{{.Names}}'
 
 - Linux 或 macOS 主机，装好 `bash` ≥4、`openssl`，以及 Docker Compose v2 插件（`docker compose`）或 standalone `docker-compose` 二进制（在 `$PATH` 里）。
 - Docker daemon 在跑，调用用户能直接 `docker info`（不需要 `sudo`）。
-- **客户端流量只需要一个 TCP 端口对外开**：`28080`（nginx HTTP，`OCTO_HTTP_PORT`）。启用 HTTPS 后客户端端口变成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST，以及 web/admin/WuKongIM API·TCP·WS）默认 loopback。WuKongIM 传输端口 `25001 / 25100 / 25200` 只在**原生 chat 客户端直连 WuKongIM** 时才需外露（覆盖 `OCTO_WK_TCP_BIND` / `OCTO_WK_WS_BIND`）；浏览器/SPA 的 chat 流量走 nginx `/ws`。
+- **客户端流量只需要一个 TCP 端口对外开**：`28080`（nginx HTTP，`OCTO_HTTP_PORT`）。启用 HTTPS 后客户端端口变成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST，以及 web/admin/WuKongIM API·TCP·WS）默认 loopback。WuKongIM 原生 chat 传输端口 `25100`（TCP）/ `25200`（WS）只在**原生 chat 客户端直连 WuKongIM** 时才需外露（覆盖 `OCTO_WK_TCP_BIND` / `OCTO_WK_WS_BIND`）；浏览器/SPA 的 chat 流量走 nginx `/ws`。WuKongIM 管理 API `25001` 是 admin / debug 接口（不是 chat 传输），任何客户端形态下都建议保持 loopback——见下面的网络端面表。
 - ≥ 4 GiB RAM，≥ 10 GiB 空闲磁盘给 named volume。
 - 出口网络能到 `docker.io`（或配置好的 mirror）拉镜像：`mininglamposs/*`、`mysql:8`、`redis:7-alpine`、`minio/minio`、`wukongim/wukongim`、`nginx:1.27-alpine`。
 - **本机已经跑着另一份 OCTO 栈：** 先看上面那段前置警告，决定一个非默认的 `COMPOSE_PROJECT_NAME` 再继续。
@@ -134,29 +134,32 @@ cd octo-deployment
 
 脚本会探测（每步打印 PASS/FAIL）：
 
-1. `docker compose ps` 没有 `(unhealthy)` 容器
+1. `docker compose ps` 没有 `(unhealthy)` 容器，也没有致命状态（`Exited (1)` / `Restarting` / `Dead`），且没有任何 expected service 缺失或已被 cleanly stop
 2. nginx vhost up（`GET /_nginx_up`）
 3. octo-server REST（`GET /api/v1/health`）
 4. octo-matter（`GET /matter/health`）——**计入** 失败
 5. 经 nginx 访问 MinIO（`GET /minio/health/live`）
 6. admin SPA 可达（`GET /admin/`）
-7. **admin 登录**（`POST /api/v1/manager/login`，用 `.env` 里的
+7. web SPA 可达（`GET /`）——确认用户侧 SPA 经同一 nginx vhost 端到端可达，与 `/api/`、`/ws` 同口承诺一致
+8. WuKongIM `/ws` upgrade probe（`GET /ws`，用 `python3` raw socket 发一次真实的 RFC 6455 WebSocket-upgrade 握手）——专门捕获 `docker stop wukongim` 后容器残留为 `Exited (0)`、绕过 `(unhealthy)` 和致命状态集的场景；`101` / `400` / `426` 视为 healthy，`502` / `503` / `504` / `000` 以及其它 4xx-5xx 视为失败
+9. **admin 登录**（`POST /api/v1/manager/login`，用 `.env` 里的
    `OCTO_ADMIN_PWD` 以 `superAdmin` 身份）——验证 octo-server + MySQL +
    bcrypt + Redis 缓存这条链
-8. **预签名 PUT 凭据签发**（`GET /api/v1/file/upload/credentials`）——
-   验证 octo-server 的 MinIO IAM 凭据路径
-9. **1 字节 PUT 到预签名 URL**——验证 nginx 原样转发 SigV4 路径以及
-   MinIO 接受签名（双端口形态下 29000 被防火墙挡时图片消息静默丢失走
-   的就是这条路径，见 OOTB-BUG-2026-05-17-001）。
+10. **预签名 PUT 凭据签发**（`GET /api/v1/file/upload/credentials`）——
+    验证 octo-server 的 MinIO IAM 凭据路径
+11. **1 字节 PUT 到预签名 URL**——验证 nginx 原样转发 SigV4 路径以及
+    MinIO 接受签名（双端口形态下 29000 被防火墙挡时图片消息静默丢失走
+    的就是这条路径，见 OOTB-BUG-2026-05-17-001）。
 
 任何步骤失败 exit code 非 0。`python3` 是 `--verify` 的**硬前置依赖**——
-第 7-9 步（admin 登录、presign 签发、SigV4 PUT）用 `python3 -c 'import json'`
-解析 JSON，过去 silently skip 它们正是 OOTB-BUG-2026-05-17-001 被掩盖的口子。
-现在缺失 `python3` 会 fail-fast 非 0 退出；装上（所有 modern Linux 发行版
-base image 都自带）再重跑。这是用来在新机器上确认「端到端真的能用」的
-命令——区别于「容器起来了」。
+第 8 步（WuKongIM `/ws` 探测）用 python3 打 raw socket，第 9-11 步
+（admin 登录、presign 签发、SigV4 PUT）用 `python3 -c 'import json'`
+解析 JSON，过去 silently skip 这些 JSON 步骤正是 OOTB-BUG-2026-05-17-001
+被掩盖的口子。现在缺失 `python3` 会 fail-fast 非 0 退出；装上
+（所有 modern Linux 发行版 base image 都自带）再重跑。这是用来在新机器
+上确认「端到端真的能用」的命令——区别于「容器起来了」。
 
-第 9 步会在 `file` bucket 留下一个 1 字节哨兵对象
+第 11 步会在 `file` bucket 留下一个 1 字节哨兵对象
 （`octo-verify-<timestamp>-<pid>.txt`）。这是故意留下的——本仓库使用
 的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的 `minio/mc`
 镜像里，只被一次性的 `minio-init` 容器用到），所以
