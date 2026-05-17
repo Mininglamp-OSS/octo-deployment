@@ -54,7 +54,7 @@ cd octo-deployment
 ./setup.sh --verify                         # admin login + presign PUT 端到端检查
 ```
 
-`setup.sh` 在最后打印 admin URL + superAdmin 密码——保存好，不会再存别处。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。
+`setup.sh` 在最后打印 admin URL + superAdmin 密码。密码同时已写入 `docker/.env`（mode 600）——请把这个文件当成密钥对待，首次登录后从 admin UI 轮换密码（见 `docker/README.zh.md`「首位管理员引导」一节）。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。
 
 卸载 / 重置走交互式：
 

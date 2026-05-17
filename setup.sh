@@ -137,6 +137,12 @@ compose_up_and_wait() {
 
 # Read a value from docker/.env (defaults if missing). Used by --verify
 # / --uninstall / post-deploy admin-credentials echo.
+#
+# Strips one balanced pair of surrounding single/double quotes off the
+# value so an operator who hand-edits docker/.env and writes
+# `OCTO_HOST="my.host"` (or single-quoted) does not poison downstream
+# URL composition. setup.sh itself never writes quoted values, so this
+# is purely a hardening for human edits.
 env_get() {
   local key="$1" default="${2:-}"
   if [[ ! -f "${ENV_OUT}" ]]; then
@@ -144,6 +150,13 @@ env_get() {
   fi
   local v
   v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
+  # Strip one matched pair of surrounding "" or '' (no nesting / no escape
+  # handling — `.env` semantics, not shell semantics).
+  if [[ "${v}" == \"*\" && "${v}" == *\" ]]; then
+    v="${v#\"}"; v="${v%\"}"
+  elif [[ "${v}" == \'*\' && "${v}" == *\' ]]; then
+    v="${v#\'}"; v="${v%\'}"
+  fi
   echo "${v:-${default}}"
 }
 
@@ -159,6 +172,31 @@ project_name() {
     echo "${COMPOSE_PROJECT_NAME}"
     return 0
   fi
+  local from_env
+  from_env="$(env_get COMPOSE_PROJECT_NAME "")"
+  if [[ -n "${from_env}" ]]; then
+    echo "${from_env}"
+    return 0
+  fi
+  echo "octo"
+}
+
+# Resolve the project name for the destructive `--uninstall` path ONLY.
+# Unlike `project_name()`, this deliberately IGNORES the calling shell's
+# COMPOSE_PROJECT_NAME and reads strictly from docker/.env (with literal
+# "octo" as the final fallback). Rationale:
+#
+#   uninstall is a single-direction destructive op. If an operator has a
+#   stale `export COMPOSE_PROJECT_NAME=octo-fz` left over in their shell
+#   from testing stack-B and then runs `./setup.sh --uninstall` from
+#   stack-A's directory (whose `docker/.env` says `octo-prod`), Compose
+#   precedence would silently target stack-B's volumes — the wrong stack
+#   gets nuked and stack-A is still there pretending to be deleted.
+#
+# `.env` is the source-of-truth written at setup time. For uninstall the
+# narrower scoping rule wins: trust the on-disk artifact, never the
+# transient shell context. See PR#30 R3 / YUJ-988 P0 B1.
+project_name_for_uninstall() {
   local from_env
   from_env="$(env_get COMPOSE_PROJECT_NAME "")"
   if [[ -n "${from_env}" ]]; then
@@ -323,19 +361,43 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
       ((fails++)) || true
     else
       step "admin login (POST /api/v1/manager/login as ${ADMIN_USER})"
-      LOGIN_BODY="$(printf '{"username":"%s","password":"%s"}' "${ADMIN_USER}" "${ADMIN_PWD}")"
+      # Build the JSON body via python3 (json.dumps) instead of printf
+      # so a password containing `"` `\` or other JSON-meta chars cannot
+      # break the request body. The default `openssl rand -base64 18`
+      # alphabet is safe, but operators who rotate the password by hand
+      # may pick characters that printf would mangle.
+      LOGIN_BODY="$(ADMIN_USER="${ADMIN_USER}" ADMIN_PWD="${ADMIN_PWD}" \
+                    python3 -c 'import json, os; print(json.dumps({"username": os.environ["ADMIN_USER"], "password": os.environ["ADMIN_PWD"]}))' \
+                    2>/dev/null || true)"
+      if [[ -z "${LOGIN_BODY}" ]]; then
+        fail "failed to encode login body via python3"
+        ((fails++)) || true
+        LOGIN_BODY='{}'
+      fi
       LOGIN_RESP="$(curl -sS --max-time 10 -X POST \
                     "${BASE_URL}/api/v1/manager/login" \
                     -H 'Content-Type: application/json' \
                     --data-raw "${LOGIN_BODY}" 2>/dev/null || true)"
+      # Accept BOTH common octo-server response shapes:
+      #   1. `{"token": "<jwt>"}`                       (flat)
+      #   2. `{"code": 0, "data": {"token": "<jwt>"}}` (envelope)
+      # plus a defensive `data.access_token` fallback. Falling through
+      # to "no token in login response" with a body head is still the
+      # correct behavior for any other shape — we just stop misreporting
+      # an envelope response as a token-less one.
       TOKEN="$(printf '%s' "${LOGIN_RESP}" | python3 -c '
 import json, sys
 try:
     d = json.loads(sys.stdin.read() or "{}")
 except Exception:
     sys.exit(0)
-if isinstance(d, dict):
-    print(d.get("token") or "")
+if not isinstance(d, dict):
+    sys.exit(0)
+tok = d.get("token")
+if not tok:
+    inner = d.get("data") if isinstance(d.get("data"), dict) else {}
+    tok = inner.get("token") or inner.get("access_token")
+print(tok or "")
 ' 2>/dev/null || true)"
       if [[ -z "${TOKEN}" ]]; then
         fail "no token in login response (body head: ${LOGIN_RESP:0:200})"
@@ -390,11 +452,15 @@ print("UPLOAD_CD="  + shlex.quote(d.get("contentDisposition") or ""))
             ((fails++)) || true
             ;;
         esac
-        # NOTE: the test object (1 byte) is intentionally left on disk —
-        # cleanup would require either an octo-server delete endpoint or
-        # an `mc rm` exec, and the leftover is negligible. Operators can
-        # `docker exec <project>-minio-1 mc rm local/file/${TEST_FILE}` if
-        # they want a perfectly clean state after smoke-testing.
+        # NOTE: the test object (1 byte) is intentionally left on disk.
+        # Cleanup would require either an octo-server delete endpoint or
+        # an `mc` invocation — but the bundled `minio/minio` image does
+        # NOT ship `mc` (mc lives in the separate `minio/mc` image used
+        # only by the `minio-init` one-shot), so the obvious
+        # `docker exec <project>-minio-1 mc rm ...` hint would always
+        # fail with "mc: executable file not found". A 1-byte sentinel
+        # per `--verify` run is well below noise; do not document a
+        # broken cleanup command here.
       fi
     fi
   fi
@@ -416,20 +482,54 @@ fi
 
 if [[ "${RUN_UNINSTALL}" == "true" ]]; then
   CC="$(compose_cmd)"
-  # Prefer the project name persisted in docker/.env over the calling
-  # shell's COMPOSE_PROJECT_NAME — the setup-time choice is the source
-  # of truth, so an operator who later runs `./setup.sh --uninstall` in
-  # a fresh shell still scopes teardown to the right stack instead of
-  # accidentally falling back to the literal "octo" default.
-  project="$(project_name)"
+  # Uninstall MUST read the project name strictly from docker/.env —
+  # NEVER from the calling shell's COMPOSE_PROJECT_NAME. See
+  # `project_name_for_uninstall()` above for the full rationale. In one
+  # line: a stale `export COMPOSE_PROJECT_NAME=octo-fz` in the operator's
+  # shell must not redirect destructive ops away from the stack whose
+  # directory they're actually standing in.
+  project="$(project_name_for_uninstall)"
   # Volume name format is `<project>_<vol>` (underscore separator — see
   # docker-compose.yaml `volumes:` block). Match strictly on `^<project>_`
   # so a stack named `octo` does NOT chew through volumes belonging to
   # `octo-fz` / `octo-prod` / `octo-staging` on the same host.
   vol_regex="^${project}_"
+  # Compute a human-friendly preview of volumes about to be deleted
+  # (for option 1 / option 2 confirmation gates). Includes size when
+  # `docker system df -v` is available; otherwise prints names only.
+  list_target_volumes() {
+    docker volume ls --format '{{.Name}}' 2>/dev/null \
+      | grep -E "${vol_regex}" || true
+  }
+  print_volume_preview() {
+    local names size_table
+    names="$(list_target_volumes)"
+    if [[ -z "${names}" ]]; then
+      echo "  (none — no volumes match ${vol_regex})"
+      return 0
+    fi
+    # `docker system df -v` table is the cheapest way to get per-volume
+    # size without sudo / du; some compose versions omit it, so we degrade
+    # gracefully to a names-only listing.
+    size_table="$(docker system df -v 2>/dev/null | awk '/^VOLUME NAME/{flag=1; next} flag && NF==0{flag=0} flag{print $1"\t"$NF}' || true)"
+    while IFS= read -r v; do
+      [[ -z "${v}" ]] && continue
+      local sz
+      sz="$(printf '%s\n' "${size_table}" | awk -v n="${v}" '$1==n{print $2; exit}')"
+      if [[ -n "${sz}" ]]; then
+        printf '  - %s (%s)\n' "${v}" "${sz}"
+      else
+        printf '  - %s\n' "${v}"
+      fi
+    done <<< "${names}"
+  }
   echo ""
   printf '%sOCTO Uninstall%s\n' "${BOLD}" "${RESET}"
   echo "Project: ${project}"
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" && "${COMPOSE_PROJECT_NAME}" != "${project}" ]]; then
+    warn "Your shell has COMPOSE_PROJECT_NAME='${COMPOSE_PROJECT_NAME}' — ignored."
+    warn "Uninstall trusts docker/.env (project='${project}') as the source of truth."
+  fi
   echo ""
   echo "Pick teardown granularity:"
   echo "  1) Full uninstall — stop containers AND remove named volumes (DATA LOSS)"
@@ -446,18 +546,32 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
   case "${choice}" in
     1)
       warn "About to: cd docker && ${CC} down -v   (removes ALL named volumes for project '${project}')"
+      echo ""
+      echo "The following volumes will be DELETED:"
+      print_volume_preview
+      echo ""
       read -rp "Type 'YES' to confirm: " confirm
       [[ "${confirm}" == "YES" ]] || { info "Aborted."; exit 0; }
       ( cd "${DOCKER_DIR}" && ${CC} down -v --remove-orphans )
       info "Full uninstall done. docker/.env preserved on disk; remove manually if desired."
       ;;
     2)
+      # Option 2 also destroys data — must gate the same way as option 1.
+      # Show the exact volume list first so the operator can eyeball that
+      # `.env`-derived project name matches the stack they meant to wipe.
+      warn "About to remove named volumes for project '${project}' (containers will be recreated on next up)."
+      echo ""
+      echo "The following volumes will be DELETED:"
+      print_volume_preview
+      echo ""
+      read -rp "Type 'YES' to confirm: " confirm
+      [[ "${confirm}" == "YES" ]] || { info "Aborted."; exit 0; }
       ( cd "${DOCKER_DIR}" && ${CC} down )
       while IFS= read -r v; do
         [[ -z "${v}" ]] && continue
         info "removing volume ${v}"
         docker volume rm "${v}" >/dev/null 2>&1 || warn "could not remove ${v}"
-      done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "${vol_regex}" || true)
+      done < <(list_target_volumes)
       info "Data reset complete. Run \`docker compose up -d\` to start fresh."
       ;;
     3)
@@ -870,5 +984,5 @@ else
   echo "  ./setup.sh --verify    # admin login + presign PUT end-to-end check"
 fi
 echo ""
-printf '%s  ⚠  Save the admin password above — it is NOT stored elsewhere.%s\n' "${YELLOW}" "${RESET}"
+printf '%s  ⚠  Admin password is saved in docker/.env (mode 600). Treat that file as a secret and rotate from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 echo ""

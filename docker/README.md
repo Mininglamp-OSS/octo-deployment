@@ -238,12 +238,16 @@ warns and skips those three steps (HTTP reachability still runs). This
 is what to run on a new host to confirm "deployment actually works
 end-to-end" — separate from "containers booted".
 
-Step 9 leaves a 1-byte sentinel object in the `file` bucket. Remove it
-manually if you want a perfectly clean state:
-
-```bash
-docker exec ${COMPOSE_PROJECT_NAME:-octo}-minio-1 mc rm local/file/octo-verify-<timestamp>-<pid>.txt
-```
+Step 9 leaves a 1-byte sentinel object in the `file` bucket
+(`octo-verify-<timestamp>-<pid>.txt`). It is intentionally left in
+place — the bundled `minio/minio` image does NOT ship the `mc` client
+(`mc` lives in the separate `minio/mc` image, which is only used by the
+one-shot `minio-init` container), so the obvious
+`docker exec <project>-minio-1 mc rm ...` command would always fail. A
+single byte per `--verify` run is well below noise; if you absolutely
+need a clean bucket, run `mc` from its own image against the bucket via
+the project's docker network, or hit MinIO's S3 DELETE API with the
+admin credentials in `docker/.env`.
 
 ### Uninstall / reset
 

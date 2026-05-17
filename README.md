@@ -67,7 +67,10 @@ cd octo-deployment
 ```
 
 `setup.sh` prints the admin URL + superAdmin password at the end of
-the run — save them, they are not stored elsewhere. The OOTB stack is
+the run. The password is also persisted to `docker/.env` (mode 600) —
+treat that file as a secret and rotate the password from the admin UI
+after first login (see `docker/README.md` "First-admin bootstrap").
+The OOTB stack is
 single-port for clients: only **TCP 28080** (`OCTO_HTTP_PORT`, the
 nginx HTTP vhost) needs to be open. With HTTPS the client port becomes
 `28443` (`OCTO_HTTPS_PORT`). All other ports (MinIO, MySQL, Redis,

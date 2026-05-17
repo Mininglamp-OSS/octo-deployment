@@ -146,11 +146,14 @@ cd octo-deployment
 没有的话脚本会 warn 并跳过这三步（HTTP reachability 仍会跑）。这是用来
 在新机器上确认「端到端真的能用」的命令——区别于「容器起来了」。
 
-第 9 步会在 `file` bucket 留下一个 1 字节哨兵对象。想要完全干净的状态可以手动删：
-
-```bash
-docker exec ${COMPOSE_PROJECT_NAME:-octo}-minio-1 mc rm local/file/octo-verify-<timestamp>-<pid>.txt
-```
+第 9 步会在 `file` bucket 留下一个 1 字节哨兵对象
+（`octo-verify-<timestamp>-<pid>.txt`）。这是故意留下的——本仓库使用
+的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的 `minio/mc`
+镜像里，只被一次性的 `minio-init` 容器用到），所以
+`docker exec <project>-minio-1 mc rm ...` 这种命令必然报
+`mc: executable file not found`。每次 `--verify` 多 1 字节远低于噪声；
+真要清干净请单独跑 `minio/mc` 镜像接入项目的 docker 网络，或者拿
+`docker/.env` 里的管理员凭据直接调 MinIO S3 DELETE API。
 
 ### 卸载 / 重置
 
