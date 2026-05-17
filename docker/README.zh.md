@@ -113,6 +113,15 @@ cd octo-deployment
 ./setup.sh --verify
 ```
 
+或者，在全新机器上想一条命令搞定 `.env` 生成 + 起栈，用 `--up`（GH#32 引入）——`setup.sh` 会写完 `.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1：
+
+```bash
+./setup.sh --non-interactive --ip 1.2.3.4 --up
+./setup.sh --verify
+```
+
+`--up` 底层调 `docker compose up -d --wait --wait-timeout 120`（Compose < v2.20 上自动 fallback 到手动 health poll）。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
+
 启用可选的 LLM summary 服务加 `--summary`：
 
 ```bash

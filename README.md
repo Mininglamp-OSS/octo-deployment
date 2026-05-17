@@ -66,6 +66,19 @@ cd octo-deployment
 ./setup.sh --verify                         # admin login + presign PUT end-to-end
 ```
 
+Or, on a fresh host, fold the two steps into one with `--up` (GH#32) —
+`setup.sh` writes `docker/.env` AND brings the stack up, blocking
+until every long-running service reports `(healthy)` and every
+one-shot init job (`preflight`, `minio-init`) exits 0. On timeout or
+startup failure it prints `compose ps`, the specific failing service
+names, and a `logs <svc>` hint for each, then exits 1. It prints a
+`.` every 5 seconds while waiting so you can see the run is alive:
+
+```bash
+./setup.sh --non-interactive --ip <PUBLIC_IP> --up   # writes .env + starts + waits-for-healthy
+./setup.sh --verify
+```
+
 `setup.sh` prints the admin URL + superAdmin password at the end of
 the run. The password is also persisted to `docker/.env` (mode 600) —
 treat that file as a secret and rotate the password from the admin UI

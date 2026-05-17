@@ -54,6 +54,13 @@ cd octo-deployment
 ./setup.sh --verify                         # admin login + presign PUT 端到端检查
 ```
 
+在全新机器上想一条命令搞定，用 `--up`（GH#32）—— `setup.sh` 写完 `docker/.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。等待期间每 5 秒打一个 `.`，方便看到脚本还活着：
+
+```bash
+./setup.sh --non-interactive --ip <PUBLIC_IP> --up   # 写 .env + 起栈 + 等齐 healthy
+./setup.sh --verify
+```
+
 `setup.sh` 在最后打印 admin URL + superAdmin 密码。密码同时已写入 `docker/.env`（mode 600）——请把这个文件当成密钥对待，首次登录后从 admin UI 轮换密码（见 `docker/README.zh.md`「首位管理员引导」一节）。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。
 
 卸载 / 重置走交互式：
