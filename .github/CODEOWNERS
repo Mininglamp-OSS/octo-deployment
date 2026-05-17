@@ -1,0 +1,26 @@
+# octo-deployment · ownership
+# Format reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Default owners — everything not matched below.
+*                       @yujiawei
+
+# Bilingual doc pairs: any change to one side should land with the
+# other in the same PR. The PR template (see PULL_REQUEST_TEMPLATE.md)
+# carries the explicit checklist; CODEOWNERS makes the human review
+# pair explicit on the GitHub side.
+*.md                    @yujiawei
+*.zh.md                 @yujiawei
+README.md               @yujiawei
+README.zh.md            @yujiawei
+docker/README.md        @yujiawei
+docker/README.zh.md     @yujiawei
+kustomize/README.md     @yujiawei
+kustomize/README.zh.md  @yujiawei
+
+# Deploy surface — review every touch.
+setup.sh                @yujiawei
+docker/docker-compose.yaml @yujiawei
+docker/.env.example     @yujiawei
+docker/nginx/           @yujiawei
+docker/scripts/         @yujiawei
+docker/configs/         @yujiawei

@@ -1,6 +1,8 @@
 # OCTO Deployment
 
-[OCTO](https://github.com/Mininglamp-OSS) 平台的 Kubernetes 部署清单。
+**OCTO 官方 OOTB（开箱即用）部署仓库**——既包含 [`docker/`](./docker/) 下的单机 Docker Compose 栈，也包含 [`kustomize/`](./kustomize/) 下用于 [OCTO](https://github.com/Mininglamp-OSS) 平台的多节点 Kubernetes 清单。
+
+本仓库是 OCTO 部署的 single source of truth。曾经放在 `Mininglamp-OSS/octo-server` 里的部署 artefact（`docker/octo/`、`docker/tsdd/`）已经退役；从这里消费。
 
 ---
 
@@ -40,9 +42,30 @@ OCTO 按**"原样"**提供，不附带任何形式的明示或默示担保。OCT
 
 > English: [README.md](./README.md)
 >
-> 单机 Docker Compose 试用请使用 [`Mininglamp-OSS/octo-server`](https://github.com/Mininglamp-OSS/octo-server) 仓库内的 `docker/octo/`（上游维护，自包含）。本仓库专注多节点 Kubernetes 部署。
+> **单机 Docker Compose 试用**用本仓库的 [`docker/`](./docker/) ——一条 `docker compose up -d` 起完整 OCTO 栈（server + admin + web + matter + smart-summary + WuKongIM + MySQL + Redis + MinIO + nginx）。中文步骤见 [`docker/README.zh.md`](./docker/README.zh.md)。本 `kustomize/` 树作为多节点 Kubernetes 部署的标准参考保留。
 
-## 组件
+## 单机 Docker Compose 试用（最短路径）
+
+```bash
+git clone https://github.com/Mininglamp-OSS/octo-deployment.git
+cd octo-deployment
+./setup.sh                                  # 交互式向导（自动探测公网 IP，生成所有密钥）
+cd docker && docker compose up -d --wait    # 等所有服务 healthy
+cd .. && ./setup.sh --verify                # 端到端自检
+```
+
+`setup.sh` 在最后打印 admin URL + superAdmin 密码——保存好，不会再存别处。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。
+
+卸载 / 重置走交互式：
+
+```bash
+./setup.sh --uninstall
+# 三档：1) 完全卸载（数据全丢）  2) 仅重置数据  3) 仅重启容器
+```
+
+完整文档：[`docker/README.zh.md`](./docker/README.zh.md)（含 `Uninstall / Reset`、`Network surface`、`MinIO bootstrap`、`Hardening checklist`、故障排查等章节）。
+
+## Kubernetes 部署组件
 
 | 服务 | 镜像 | 容器端口 |
 |---|---|---|
@@ -79,7 +102,12 @@ OCTO 不内置 IM 引擎，通过 HTTP API + webhook gRPC 调用 [WuKongIM](http
 ## 目录结构
 
 ```
-kustomize/
+docker/                         单机 Docker Compose 栈
+├── docker-compose.yaml
+├── .env.example
+├── README.md / README.zh.md
+└── ...
+kustomize/                      多节点 K8s 部署
 ├── base/                       通用 OSS 模板（参考实现）
 │   ├── kustomization.yaml      汇总所有资源 + image transformer
 │   ├── octo-*.yaml             Deployment + Service
@@ -91,7 +119,7 @@ kustomize/
     └── prod/                   多副本生产 overlay
 ```
 
-## 快速开始
+## 快速开始（Kubernetes 路径）
 
 namespace **不写死**，由命令行指定。
 

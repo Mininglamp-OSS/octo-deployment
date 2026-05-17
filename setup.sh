@@ -3,12 +3,16 @@
 # OCTO Deployment · Interactive Setup Script
 # -----------------------------------------------------------------------------
 # Generates docker/.env from docker/.env.example with rotated secrets,
-# user-chosen domain/IP, and optional TLS / LLM summary toggles.
+# user-chosen domain/IP, and optional TLS / LLM summary toggles. Also
+# offers post-deploy smoke test (`--verify`) and clean uninstall
+# (`--uninstall`) subcommands.
 #
 # Usage:
 #   ./setup.sh                        # interactive mode
 #   ./setup.sh --non-interactive      # all defaults + auto-detect
 #   ./setup.sh --domain octo.example.com --ip 1.2.3.4 --https --summary
+#   ./setup.sh --verify               # smoke-test an already-up stack
+#   ./setup.sh --uninstall            # tear down the stack (interactive)
 #
 # Requires: bash ≥4, openssl, docker, docker compose
 # -----------------------------------------------------------------------------
@@ -21,13 +25,13 @@ ENABLE_HTTPS=false
 ENABLE_SUMMARY=false
 NON_INTERACTIVE=false
 FORCE_OVERWRITE=false
+RUN_UP=false
+RUN_VERIFY=false
+RUN_UNINSTALL=false
 
 # Track which configuration values were supplied explicitly via CLI flags
 # so the interactive prompts (when invoked without --non-interactive)
-# don't silently overwrite them. See README.md examples like:
-#   ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-# When any of these "decision" flags are set we auto-switch to
-# non-interactive mode — the operator has already made the choice.
+# don't silently overwrite them.
 DOMAIN_SET_VIA_CLI=false
 IP_SET_VIA_CLI=false
 HTTPS_SET_VIA_CLI=false
@@ -36,33 +40,54 @@ SUMMARY_SET_VIA_CLI=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
 ENV_OUT="${SCRIPT_DIR}/docker/.env"
+DOCKER_DIR="${SCRIPT_DIR}/docker"
 
 # ── Colours / helpers ────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
-  GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; RESET='\033[0m'
+  GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; CYAN='\033[0;36m'; RESET='\033[0m'
 else
-  GREEN=''; YELLOW=''; RED=''; BOLD=''; RESET=''
+  GREEN=''; YELLOW=''; RED=''; BOLD=''; CYAN=''; RESET=''
 fi
 
 info()  { printf '%s[setup]%s %s\n' "${GREEN}" "${RESET}" "$*"; }
 warn()  { printf '%s[setup]%s %s\n' "${YELLOW}" "${RESET}" "$*"; }
 err()   { printf '%s[setup]%s %s\n' "${RED}" "${RESET}" "$*" >&2; }
 fatal() { err "$@"; exit 1; }
+step()  { printf '%s[verify]%s %s ... ' "${CYAN}" "${RESET}" "$*"; }
+ok()    { printf '%sPASS%s\n' "${GREEN}" "${RESET}"; }
+fail()  { printf '%sFAIL%s — %s\n' "${RED}" "${RESET}" "${1:-}"; }
 
 # Portable in-place sed (GNU + BSD/macOS compatible).
-# GNU sed accepts `sed -i "..."`; BSD/macOS sed requires `-i ''` (an
-# explicit, possibly empty, backup-extension argument). Without this
-# shim, `sed -i "s|foo|bar|" file` on macOS errors out with
-# "extra characters at the end of p command" because BSD sed treats
-# the next argument as the backup suffix.
 sed_inplace() {
   if sed --version >/dev/null 2>&1; then
-    # GNU sed
     sed -i "$@"
   else
-    # BSD/macOS sed needs an explicit (empty) backup extension
     sed -i '' "$@"
   fi
+}
+
+# Pick `docker compose` v2 or fall back to standalone `docker-compose`.
+# Echoes the command tokens; callers wrap in `$(...)` and pass as a list.
+compose_cmd() {
+  if docker compose version >/dev/null 2>&1; then
+    echo "docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    echo "docker-compose"
+  else
+    fatal "docker compose is not available."
+  fi
+}
+
+# Read a value from docker/.env (defaults if missing). Used by --verify
+# / --uninstall / post-deploy admin-credentials echo.
+env_get() {
+  local key="$1" default="${2:-}"
+  if [[ ! -f "${ENV_OUT}" ]]; then
+    echo "${default}"; return 0
+  fi
+  local v
+  v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
+  echo "${v:-${default}}"
 }
 
 # ── Parse CLI arguments ─────────────────────────────────────────────────────
@@ -74,10 +99,17 @@ while [[ $# -gt 0 ]]; do
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
     --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
+    --up)        RUN_UP=true; shift ;;
+    --verify)    RUN_VERIFY=true; shift ;;
+    --uninstall) RUN_UNINSTALL=true; shift ;;
     -h|--help)
       cat <<'USAGE'
-Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>] [--https] [--summary]
+Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>]
+                [--https] [--summary] [--up]
+       setup.sh --verify
+       setup.sh --uninstall
 
+Generation:
   --non-interactive   Skip prompts; use defaults + auto-detect for anything
                       not provided via flags.
   --force             Overwrite an existing docker/.env without prompting.
@@ -90,8 +122,16 @@ Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>] [--http
                       docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
+  --up                After writing .env, run `docker compose up -d --wait`
+                      and print healthy/unhealthy status for every service.
 
-When any of --domain / --ip / --https / --summary is given without
+Smoke test / tear-down (work against an already-existing docker/.env):
+  --verify            Probe nginx / octo-server / matter / object-store
+                      paths end-to-end. Exits non-zero on any failure.
+  --uninstall         Tear down the stack. Interactively offers three
+                      granularity levels (full / data-only / containers-only).
+
+When any of --domain / --ip / --https / --summary / --up is given without
 --non-interactive, setup.sh treats the flags as your decisions and runs
 non-interactively so the documented one-liner forms (see docker/README.md)
 work as written.
@@ -102,17 +142,135 @@ USAGE
   esac
 done
 
+# Subcommand short-circuits — run and exit before the generation path.
+if [[ "${RUN_VERIFY}" == "true" ]]; then
+  if [[ ! -f "${ENV_OUT}" ]]; then
+    fatal "docker/.env not found. Run setup.sh first to generate it."
+  fi
+  CC="$(compose_cmd)"
+  DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
+  HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
+  BASE_URL="http://${DOMAIN}:${HTTP_PORT}"
+  fails=0
+
+  step "container health (${CC} ps)"
+  if ! ( cd "${DOCKER_DIR}" && ${CC} ps --status running >/dev/null 2>&1 ); then
+    fail "docker compose ps failed — is the stack up?"; ((fails++)) || true
+  else
+    unhealthy=$(cd "${DOCKER_DIR}" && ${CC} ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null \
+                | grep -E '\(unhealthy\)' || true)
+    if [[ -n "${unhealthy}" ]]; then
+      fail "unhealthy service(s):"; printf '%s\n' "${unhealthy}" | sed 's/^/    /'; ((fails++)) || true
+    else
+      ok
+    fi
+  fi
+
+  step "nginx vhost up (GET ${BASE_URL}/_nginx_up)"
+  if curl -fsS --max-time 5 "${BASE_URL}/_nginx_up" >/dev/null 2>&1; then
+    ok
+  else
+    fail "no 200 from nginx"; ((fails++)) || true
+  fi
+
+  step "octo-server REST (GET ${BASE_URL}/api/v1/health)"
+  if curl -fsS --max-time 5 "${BASE_URL}/api/v1/health" >/dev/null 2>&1; then
+    ok
+  else
+    fail "no 200 from octo-server /api/v1/health"; ((fails++)) || true
+  fi
+
+  step "octo-matter (GET ${BASE_URL}/matter/health)"
+  if curl -fsS --max-time 5 "${BASE_URL}/matter/health" >/dev/null 2>&1; then
+    ok
+  else
+    fail "no 200 from matter (non-fatal if matter is disabled)"; # not counted
+  fi
+
+  step "MinIO via nginx (GET ${BASE_URL}/minio/minio/health/live)"
+  # `/minio/` location is a diagnostics passthrough — the path
+  # `/minio/health/live` is MinIO's built-in health probe.
+  if curl -fsS --max-time 5 "${BASE_URL}/minio/minio/health/live" >/dev/null 2>&1; then
+    ok
+  else
+    fail "MinIO health probe through nginx failed — bucket-name routing may still work; check nginx logs"
+    ((fails++)) || true
+  fi
+
+  step "admin SPA reachable (GET ${BASE_URL}/admin/)"
+  if curl -fsS --max-time 5 -o /dev/null -w '%{http_code}' "${BASE_URL}/admin/" 2>/dev/null | grep -qE '^(200|301|302)$'; then
+    ok
+  else
+    fail "admin SPA not reachable"; ((fails++)) || true
+  fi
+
+  echo ""
+  if [[ "${fails}" -eq 0 ]]; then
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  setup.sh --verify: end-to-end smoke test PASSED ✅%s\n' "${GREEN}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    exit 0
+  else
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  setup.sh --verify: %d step(s) failed ❌%s\n' "${RED}" "${fails}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    err "Tail logs with: cd docker && ${CC} logs --tail 100"
+    exit 1
+  fi
+fi
+
+if [[ "${RUN_UNINSTALL}" == "true" ]]; then
+  CC="$(compose_cmd)"
+  project="${COMPOSE_PROJECT_NAME:-octo}"
+  echo ""
+  printf '%sOCTO Uninstall%s\n' "${BOLD}" "${RESET}"
+  echo "Project: ${project}"
+  echo ""
+  echo "Pick teardown granularity:"
+  echo "  1) Full uninstall — stop containers AND remove named volumes (DATA LOSS)"
+  echo "  2) Data-only reset — remove named volumes only (containers will be recreated next up)"
+  echo "  3) Containers only — stop + remove containers, keep volumes (safe restart prep)"
+  echo "  q) Quit"
+  echo ""
+  warn "Before option 1 or 2, confirm the volumes about to be removed are YOURS:"
+  echo "    docker volume ls | grep -E '^${project}([-_]|\$)'"
+  read -rp "Choice [1/2/3/q]: " choice
+  case "${choice}" in
+    1)
+      warn "About to: cd docker && ${CC} down -v   (removes ALL named volumes for project '${project}')"
+      read -rp "Type 'YES' to confirm: " confirm
+      [[ "${confirm}" == "YES" ]] || { info "Aborted."; exit 0; }
+      ( cd "${DOCKER_DIR}" && ${CC} down -v --remove-orphans )
+      info "Full uninstall done. docker/.env preserved on disk; remove manually if desired."
+      ;;
+    2)
+      ( cd "${DOCKER_DIR}" && ${CC} down )
+      while IFS= read -r v; do
+        [[ -z "${v}" ]] && continue
+        info "removing volume ${v}"
+        docker volume rm "${v}" >/dev/null 2>&1 || warn "could not remove ${v}"
+      done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${project}([-_]|\$)" || true)
+      info "Data reset complete. Run \`docker compose up -d\` to start fresh."
+      ;;
+    3)
+      ( cd "${DOCKER_DIR}" && ${CC} down --remove-orphans )
+      info "Containers stopped. Volumes preserved."
+      ;;
+    q|Q) info "Aborted."; exit 0 ;;
+    *)   fatal "Unknown choice: ${choice}" ;;
+  esac
+  exit 0
+fi
+
 # If the operator supplied any "decision" flag (--domain / --ip / --https
-# / --summary) but did not pass --non-interactive, treat those flags as
-# the decision and skip the prompts. Otherwise the interactive section
-# would silently overwrite --ip with the auto-detected value, and would
-# reset --https / --summary to false unless the user re-entered "y" at
-# the prompt — exactly the breakage Jerry-Xin flagged in PR#18 R5.
+# / --summary / --up) but did not pass --non-interactive, treat those
+# flags as the decision and skip the prompts.
 if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
      || "${IP_SET_VIA_CLI}" == "true" \
      || "${HTTPS_SET_VIA_CLI}" == "true" \
-     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
+     || "${SUMMARY_SET_VIA_CLI}" == "true" \
+     || "${RUN_UP}" == "true" ]]; then
     info "CLI flags supplied; switching to non-interactive mode."
     info "(Pass no flags, or only --force, to get the interactive prompts.)"
     NON_INTERACTIVE=true
@@ -143,9 +301,6 @@ if ! command -v openssl &>/dev/null; then
   fatal "openssl is not installed. Install it before running setup."
 fi
 
-# curl is used only for external-IP auto-detection. Missing curl is not
-# fatal — detect_ip falls back to 127.0.0.1 — but warn so the operator
-# knows why EXTERNAL_IP came out as loopback.
 if ! command -v curl &>/dev/null; then
   warn "curl is not installed; external IP auto-detection will fall back to 127.0.0.1."
   warn "Pass --ip <address> explicitly, or install curl, for a public IP."
@@ -155,32 +310,17 @@ if [[ ! -f "${ENV_EXAMPLE}" ]]; then
   fatal "Cannot find ${ENV_EXAMPLE}. Run this script from the repository root."
 fi
 
-# ── Pre-flight: warn on overlapping OCTO deployments ───────────────────────
-# INCIDENT-2026-05-16-001 root cause: docker-compose.yaml pins `name: octo`,
-# so a fresh clone in (e.g.) /tmp shares the SAME named volumes / container
-# namespace as a production stack already running on the host. A routine
-# `docker compose down -v` from the new clone then wipes the production
-# volumes. We rotated all named volumes onto `${COMPOSE_PROJECT_NAME:-octo}-*`
-# in docker-compose.yaml so an explicit `COMPOSE_PROJECT_NAME=octo-<suffix>`
-# fully isolates a second stack — but operators only get that isolation if
-# they remember to set the env var. This check looks for existing OCTO
-# state on the host and (without blocking the run) tells the operator how
-# to isolate before they `up -d` and collide.
+# ── Pre-flight: COMPOSE_PROJECT_NAME against existing OCTO state ────────────
+# INCIDENT-2026-05-16-001 root cause + safeguard. If existing OCTO state
+# is on the host AND COMPOSE_PROJECT_NAME is left at the default `octo`,
+# force the operator to either confirm explicitly or pick a unique
+# project name. Non-interactive mode now requires the env var to be set
+# explicitly when collision risk is detected.
 preflight_existing_octo() {
   command -v docker &>/dev/null || return 0
   docker info >/dev/null 2>&1 || return 0
 
   local existing_volumes existing_containers
-  # Match BOTH separator variants:
-  #   - underscore (`octo_mysql-data`): Compose v2 default for project-scoped
-  #     named volumes/networks under `name: octo` — this is what every existing
-  #     deployment on `main` has on disk.
-  #   - hyphen (`octo-mysql-data` etc.): used by some older / alternate naming
-  #     paths and by Compose-generated container names (`octo-mysql-1`).
-  # Compose project names always start at the beginning of the volume /
-  # container name, so anchoring on `^octo` plus a `[-_]` or end-of-string
-  # boundary catches the realistic shapes without false-positives on
-  # unrelated images like `octopus-deploy/...`.
   existing_volumes="$(docker volume ls --format '{{.Name}}' 2>/dev/null \
                        | grep -E '^octo([-_]|$)' || true)"
   existing_containers="$(docker ps -a --filter 'name=octo' --format '{{.Names}}' 2>/dev/null \
@@ -190,6 +330,7 @@ preflight_existing_octo() {
     return 0
   fi
 
+  local project="${COMPOSE_PROJECT_NAME:-octo}"
   warn ""
   warn "⚠  Detected EXISTING OCTO state on this host:"
   if [[ -n "${existing_volumes}" ]]; then
@@ -212,31 +353,44 @@ preflight_existing_octo() {
   warn "    ./setup.sh ...   # writes docker/.env"
   warn "    cd docker && docker compose up -d"
   warn ""
-  warn "The named volumes in docker-compose.yaml interpolate"
-  warn "COMPOSE_PROJECT_NAME so volumes / networks for the two stacks"
-  warn "will stay fully separate."
-  warn ""
 
   if [[ "${NON_INTERACTIVE}" == "false" ]]; then
-    read -rp "Continue with project name \"${COMPOSE_PROJECT_NAME:-octo}\"? [y/N]: " confirm
-    case "${confirm}" in
-      [yY]|[yY][eE][sS]) info "Continuing — make sure you understand the implications above." ;;
-      *) info "Aborted. Re-run with COMPOSE_PROJECT_NAME=octo-<suffix> exported."; exit 0 ;;
-    esac
+    if [[ "${project}" == "octo" ]]; then
+      # Forced prompt — operator MUST either pick a unique project name
+      # or confirm the default "octo" with eyes-open.
+      read -rp "Set a custom COMPOSE_PROJECT_NAME now? (recommended) [y/N]: " want_project
+      case "${want_project}" in
+        [yY]|[yY][eE][sS])
+          read -rp "  New COMPOSE_PROJECT_NAME (e.g. octo-fz): " new_project
+          if [[ -z "${new_project}" || "${new_project}" == "octo" ]]; then
+            warn "Project name unchanged. Re-run with an exported COMPOSE_PROJECT_NAME if you change your mind."
+          else
+            export COMPOSE_PROJECT_NAME="${new_project}"
+            info "COMPOSE_PROJECT_NAME exported as '${new_project}' for this run."
+          fi
+          ;;
+        *)
+          read -rp "Confirm: continue with project name \"octo\" (RISK of volume collision)? Type 'YES' to proceed: " confirm
+          [[ "${confirm}" == "YES" ]] || { info "Aborted. Re-run with COMPOSE_PROJECT_NAME=octo-<suffix> exported."; exit 0; }
+          info "Continuing — make sure you understand the implications above."
+          ;;
+      esac
+    else
+      info "COMPOSE_PROJECT_NAME='${project}' set; volumes will be ${project}_* (isolated from existing octo_* state)."
+    fi
   else
-    warn "(non-interactive mode: not prompting — proceeding with"
-    warn " COMPOSE_PROJECT_NAME=\"${COMPOSE_PROJECT_NAME:-octo}\")"
+    if [[ "${project}" == "octo" ]]; then
+      fatal "Existing OCTO state detected and COMPOSE_PROJECT_NAME is unset (defaults to 'octo'). \
+Refusing to silently share volumes in non-interactive mode. \
+Export COMPOSE_PROJECT_NAME=octo-<suffix> before re-running, or run interactively."
+    fi
+    warn "(non-interactive mode: proceeding with COMPOSE_PROJECT_NAME=\"${project}\")"
   fi
 }
 
 preflight_existing_octo
 
 # ── Guard against overwriting an existing .env ─────────────────────────────
-# Re-running setup.sh regenerates ALL secrets (MySQL root password, MinIO
-# credentials, admin password, etc.). If the stack has already been started,
-# the MySQL volume keeps the ORIGINAL passwords from the first `docker compose
-# up`; overwriting .env makes every service fail to connect. The guard below
-# prevents accidental overwrites; use --force to bypass.
 if [[ -f "${ENV_OUT}" ]] && [[ "${FORCE_OVERWRITE}" != "true" ]]; then
   if [[ "${NON_INTERACTIVE}" == "true" ]]; then
     fatal "docker/.env already exists. Use --force to overwrite."
@@ -272,17 +426,25 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   echo ""
 
   # Domain
-  read -rp "Domain name [${DOMAIN}]: " user_domain
-  DOMAIN="${user_domain:-${DOMAIN}}"
+  detected_ip="$(detect_ip)"
+  if [[ "${DOMAIN}" == "octo.local" || -z "${DOMAIN}" ]] \
+     && [[ "${detected_ip}" != "127.0.0.1" ]]; then
+    info "Detected public IP: ${detected_ip}"
+    info "For a deployment reachable from outside this host, set OCTO_DOMAIN to a name"
+    info "your clients can resolve (or use the detected IP directly)."
+    read -rp "Domain name [${detected_ip}] (Enter to use detected IP, type 'octo.local' for local-only): " user_domain
+    DOMAIN="${user_domain:-${detected_ip}}"
+  else
+    read -rp "Domain name [${DOMAIN}]: " user_domain
+    DOMAIN="${user_domain:-${DOMAIN}}"
+  fi
 
   # External IP
-  info "Detecting external IP…"
-  detected_ip="$(detect_ip)"
   read -rp "External IP [${detected_ip}]: " user_ip
   EXTERNAL_IP="${user_ip:-${detected_ip}}"
 
   # HTTPS
-  read -rp "Enable HTTPS? [y/N]: " user_https
+  read -rp "Enable HTTPS preparation flag? [y/N]: " user_https
   case "${user_https}" in
     [yY]|[yY][eE][sS]) ENABLE_HTTPS=true ;;
     *) ENABLE_HTTPS=false ;;
@@ -324,16 +486,6 @@ OCTO_ADMIN_PWD="$(openssl rand -base64 18)"
 # ── Build .env from template ────────────────────────────────────────────────
 info "Generating docker/.env from template…"
 
-# The .env file holds DB passwords, admin password, MinIO root credentials
-# and notify/manager tokens. A naive `cp` honors the inherited umask
-# (typically 022 → 0644 = world-readable), and `cp` followed by a
-# separate `chmod 600` leaves a brief window during which any local user
-# can read every secret in the stack. Prefer `install -m 600` because it
-# creates the destination with the target mode in a single step. Fall
-# back to a `umask`-scoped `cp` for environments without GNU/BSD
-# coreutils (e.g. some Alpine/busybox base images) — that path is still
-# atomic with respect to the permissions race because the umask is
-# applied before the file is created.
 if command -v install &>/dev/null; then
   install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
 else
@@ -360,7 +512,6 @@ sed_inplace "s|^WK_MODE=.*|WK_MODE=release|" "${ENV_OUT}"
 
 # Replace admin password
 sed_inplace "s|^OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
-# If the line was commented, uncomment it
 sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
 
 # TLS setting
@@ -371,18 +522,31 @@ else
 fi
 
 # Summary setting
-# COMPOSE_PROFILES is the single source of truth for whether the summary
-# services run (see docker-compose.yaml — summary-api/summary-worker are
-# gated by the `summary` profile). --summary just flips that switch.
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
-  # Activate the summary Docker Compose profile so that
-  # `docker compose up -d` (without --profile) starts summary services.
   if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
     sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
   elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
     sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
   else
     printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
+  fi
+fi
+
+# ── Optional: bring the stack up + wait for healthy ────────────────────────
+HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
+ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+
+if [[ "${RUN_UP}" == "true" ]]; then
+  CC="$(compose_cmd)"
+  echo ""
+  info "Starting stack with --wait (this can take 60-120s on first boot)…"
+  if ( cd "${DOCKER_DIR}" && ${CC} up -d --wait ); then
+    info "All services reached healthy."
+  else
+    warn "${CC} up --wait reported failures. Run:"
+    warn "    cd docker && ${CC} ps"
+    warn "    cd docker && ${CC} logs --tail 100"
+    warn "or rerun the script with --verify after fixing the root cause."
   fi
 fi
 
@@ -394,9 +558,21 @@ printf '%s═══════════════════════�
 echo ""
 printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
 printf '  External IP:    %s%s%s\n' "${BOLD}" "${EXTERNAL_IP}" "${RESET}"
+printf '  HTTP port:      %s%s%s\n' "${BOLD}" "${HTTP_PORT}" "${RESET}"
+printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
 printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
 printf '  Admin password: %s%s%s\n' "${BOLD}" "${OCTO_ADMIN_PWD}" "${RESET}"
 echo ""
+
+# Firewall guidance — single-port deployment only needs OCTO_HTTP_PORT.
+if [[ "${EXTERNAL_IP}" != "127.0.0.1" ]] || [[ "${DOMAIN}" != "octo.local" ]]; then
+  printf '%s  Firewall:%s\n' "${BOLD}" "${RESET}"
+  printf '    The OOTB stack is single-port — only open TCP %s%s%s to clients.\n' "${BOLD}" "${HTTP_PORT}" "${RESET}"
+  printf '    All other services (MinIO API/console, MySQL, Redis, WuKongIM monitor,\n'
+  printf '    octo-server / matter / summary direct ports) default to loopback.\n'
+  printf '    Example (ufw):  sudo ufw allow %s/tcp\n' "${HTTP_PORT}"
+  echo ""
+fi
 
 if [[ "${ENABLE_HTTPS}" == "true" ]]; then
   warn "HTTPS preparation flag set (OCTO_TLS_ENABLED=true)."
@@ -417,18 +593,20 @@ fi
 
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
-  echo "  Start with: cd docker && docker compose up -d"
-else
-  info "Summary service disabled. Start without LLM:"
-  echo "  cd docker && docker compose up -d"
 fi
 
-echo ""
-info "Next steps:"
-echo "  1. Review docker/.env and adjust as needed"
-echo "  2. cd docker && docker compose up -d"
-
-echo "  3. Visit http://${DOMAIN}:28080"
+if [[ "${RUN_UP}" != "true" ]]; then
+  echo ""
+  info "Next steps:"
+  echo "  1. Review docker/.env and adjust as needed"
+  echo "  2. cd docker && docker compose up -d --wait"
+  echo "  3. ./setup.sh --verify    # smoke test"
+  echo "  4. Visit ${ADMIN_URL}"
+else
+  echo ""
+  info "Smoke test:"
+  echo "  ./setup.sh --verify"
+fi
 echo ""
 printf '%s  ⚠  Save the admin password above — it is NOT stored elsewhere.%s\n' "${YELLOW}" "${RESET}"
 echo ""
