@@ -1,26 +1,24 @@
-# octo-deployment · ownership
-# Format reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
-#
+# CODEOWNERS — unified team ownership
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
 # Default owners — everything not matched below.
-*                       @yujiawei
+*                       @Mininglamp-OSS/maintainers
 
 # Bilingual doc pairs: any change to one side should land with the
-# other in the same PR. The PR template (see PULL_REQUEST_TEMPLATE.md)
-# carries the explicit checklist; CODEOWNERS makes the human review
-# pair explicit on the GitHub side.
-*.md                    @yujiawei
-*.zh.md                 @yujiawei
-README.md               @yujiawei
-README.zh.md            @yujiawei
-docker/README.md        @yujiawei
-docker/README.zh.md     @yujiawei
-kustomize/README.md     @yujiawei
-kustomize/README.zh.md  @yujiawei
+# other in the same PR.
+*.md                    @Mininglamp-OSS/maintainers
+*.zh.md                 @Mininglamp-OSS/maintainers
+README.md               @Mininglamp-OSS/maintainers
+README.zh.md            @Mininglamp-OSS/maintainers
+docker/README.md        @Mininglamp-OSS/maintainers
+docker/README.zh.md     @Mininglamp-OSS/maintainers
+kustomize/README.md     @Mininglamp-OSS/maintainers
+kustomize/README.zh.md  @Mininglamp-OSS/maintainers
 
 # Deploy surface — review every touch.
-setup.sh                @yujiawei
-docker/docker-compose.yaml @yujiawei
-docker/.env.example     @yujiawei
-docker/nginx/           @yujiawei
-docker/scripts/         @yujiawei
-docker/configs/         @yujiawei
+setup.sh                @Mininglamp-OSS/maintainers
+docker/docker-compose.yaml @Mininglamp-OSS/maintainers
+docker/.env.example     @Mininglamp-OSS/maintainers
+docker/nginx/           @Mininglamp-OSS/maintainers
+docker/scripts/         @Mininglamp-OSS/maintainers
+docker/configs/         @Mininglamp-OSS/maintainers
