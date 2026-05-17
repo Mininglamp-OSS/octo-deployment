@@ -200,19 +200,33 @@ sudo ./setup.sh --smoke-test
 
 Or, on a fresh host where you want the same three steps without
 prompts, do step 1 non-interactively and chain into the start-only
-`--up` (R6 / GH#33). `--up` brings the stack up itself, blocking
-until every long-running service reports `(healthy)` and every
-one-shot init job (`preflight`, `minio-init`) exits 0. On timeout
-or startup failure it prints `compose ps`, lists the specific
-failing service names, and emits a `logs <svc>` hint for each
-before exiting 1. `--up` never touches the `.env` step 1 wrote —
-it is a start-only subcommand:
+`--up` (R6 / GH#33, R8 / GH#43). `--up` brings the stack up itself,
+blocking until every long-running service reports `(healthy)` and
+every one-shot init job (`preflight`, `minio-init`) exits 0. On
+timeout or startup failure it prints `compose ps`, lists the
+specific failing service names, and emits a `logs <svc>` hint for
+each before exiting 1. `--up` never touches the `.env` step 1 wrote
+— it is a start-only subcommand and, if `docker/.env` is missing,
+exits 1 with a concrete remediation pointer instead of silently
+regenerating secrets:
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4         # step 1: gen .env, no prompts (no sudo)
 sudo ./setup.sh --up                              # step 2: start the stack (start-only)
 sudo ./setup.sh --smoke-test                      # step 3: end-to-end verify
 ```
+
+If you really want to bootstrap + start in a single command (this
+WILL generate fresh secrets — never use on a host whose `.env` is
+already in production), pass `--up --force` explicitly:
+
+```bash
+sudo ./setup.sh --non-interactive --ip 1.2.3.4 --up --force   # explicit one-shot bootstrap
+```
+
+Without `--force`, a missing `docker/.env` is a fatal error — that
+is the R8 (PR#36 Jerry-Xin CR) fix: "--up never regenerates secrets"
+is now enforced by code, not just promised by docs.
 
 `--up` uses `docker compose up -d --wait --wait-timeout 120` under
 the hood (with a manual health-poll fallback on Compose < v2.20). It

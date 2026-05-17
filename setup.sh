@@ -721,7 +721,11 @@ Generation:
                       minio-init) exited 0. On a cold-boot soft timeout
                       the wait retries ONCE on the warm mysql / image
                       cache (typically <10s). NEVER regenerates secrets
-                      — run `./setup.sh` first to create docker/.env.
+                      — run `./setup.sh` first to create docker/.env, or
+                      pass `--up --force` to explicitly bootstrap +
+                      start in one shot (the only path that generates
+                      fresh secrets from a `--up` invocation; see
+                      `--force` below).
                       On a second-attempt failure: print `compose ps`,
                       list the specific failing service names, and emit
                       one `logs <svc>` hint for each before exit 1. A
@@ -731,6 +735,17 @@ Generation:
                       daemon socket needs root, and --up chowns
                       docker/.env back to root:root 600 once the stack
                       is healthy so --smoke-test can read it.
+  --up --force        EXPLICIT bootstrap + start in one command. Only
+                      meaningful when docker/.env is missing: generate
+                      all secrets, then start the stack and wait for
+                      healthy. Equivalent to running step 1 + step 2
+                      back-to-back. Will refuse to overwrite an
+                      existing docker/.env on the generation path (the
+                      .env-overwrite prompt / non-interactive guard
+                      still applies — see `--force` below). This is the
+                      ONLY way `--up` is allowed to write secrets;
+                      without --force, a missing docker/.env is a fatal
+                      error with concrete remediation.
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --smoke-test        Probe nginx / octo-server / matter / object-store
@@ -1561,17 +1576,41 @@ if [[ "${RUN_UP}" == "true" ]]; then
   if [[ ${EUID} -ne 0 ]]; then
     fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
   fi
-  # R7 (YUJ-1020) Test-A path: existing .env → start-only (R6 semantics:
-  # never touch a provisioned .env). Missing .env → fall through to the
-  # generation block below; after generation completes the end-of-script
-  # R7 hook (search for "R7 RUN_UP post-generation hook") will run
-  # compose_up_and_wait + chown so a single
-  #   `sudo bash setup.sh --non-interactive --ip <IP> --up`
+  # R8 (YUJ-1066, Jerry-Xin CR on PR#36 R7): make the --up contract
+  # honest. Help text + README have always promised "--up requires an
+  # existing docker/.env" + "NEVER regenerates secrets", so the R7
+  # Test-A fall-through (missing .env → silently generate fresh secrets
+  # → start the stack) was a doc-reality mismatch and a production
+  # footgun: a single typo in deploy automation could regenerate every
+  # MySQL/MinIO/admin secret on a live host. R8 makes the start-only
+  # semantics the default and gates auto-bootstrap behind explicit
+  # `--force` (same flag that already gates "overwrite existing .env"
+  # on the generation path, so the security framing is consistent: any
+  # --force invocation acknowledges secret writes).
+  #
+  # Existing .env → start-only (R6 semantics, unchanged).
+  # Missing .env + no --force → fatal with concrete remediation.
+  # Missing .env + --force → fall through to the generation block; the
+  # end-of-script R8 hook (search for "R8 RUN_UP post-generation hook")
+  # then runs compose_up_and_wait + chown so a single
+  #   `sudo bash setup.sh --non-interactive --ip <IP> --up --force`
   # invocation provisions AND starts the stack in one shot. The R6
   # anti-bug (--up silently re-running secret generation on an existing
   # .env) is still prevented because that branch short-circuits here.
   if [[ ! -f "${ENV_OUT}" ]]; then
-    info "docker/.env not present — will generate it first, then start the stack (single-command --up bootstrap)."
+    if [[ "${FORCE_OVERWRITE}" != "true" ]]; then
+      err "docker/.env not found — --up is start-only and refuses to generate secrets implicitly."
+      err ""
+      err "First-time setup (recommended — generate, review, then start):"
+      err "  ./setup.sh                                       # interactive prompts (no sudo)"
+      err "  ./setup.sh --non-interactive --ip <PUBLIC_IP>    # unattended (no sudo)"
+      err "  sudo ./setup.sh --up                             # then start the stack"
+      err ""
+      err "Or bootstrap + start in one command (WILL generate fresh secrets):"
+      err "  sudo ./setup.sh --non-interactive --ip <PUBLIC_IP> --up --force"
+      exit 1
+    fi
+    info "docker/.env not present and --force given — will generate it first, then start the stack (single-command --up --force bootstrap)."
   else
 
   CC="$(compose_cmd)"
@@ -1979,16 +2018,20 @@ else
 fi
 echo ""
 
-# R7 RUN_UP post-generation hook (YUJ-1020 Test-A): when --up was
-# supplied alongside --non-interactive / --ip on a fresh host (no
-# pre-existing docker/.env), the start-only short-circuit at the top of
-# this script intentionally fell through here so the generation block
-# above could write the .env. Now we close the loop: do the same
-# compose_up_and_wait + chown + summary the existing-.env --up branch
-# does, so the single command
-#   `sudo bash setup.sh --non-interactive --ip <IP> --up`
+# R8 RUN_UP post-generation hook (YUJ-1066, supersedes the R7 hook):
+# only reachable when the operator passed `--up --force` AND no
+# pre-existing docker/.env was present. The start-only short-circuit
+# at the top of this script (search for "R8 (YUJ-1066") intentionally
+# fell through here so the generation block above could write the
+# .env. We close the loop here: do the same compose_up_and_wait +
+# chown + summary the existing-.env --up branch does, so the single
+# command
+#   `sudo bash setup.sh --non-interactive --ip <IP> --up --force`
 # provisions and starts the stack in one invocation. The S4 EUID guard
-# at the top of `--up` already enforced that we are root here.
+# at the top of `--up` already enforced that we are root here. Without
+# `--force` we never get here because the start-only block fataled
+# with concrete remediation — that is the R8 doc-reality fix for the
+# Jerry-Xin CR on PR#36 R7.
 if [[ "${RUN_UP}" == "true" ]]; then
   CC="$(compose_cmd)"
   PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"

@@ -113,13 +113,21 @@ sudo ./setup.sh --up
 sudo ./setup.sh --smoke-test
 ```
 
-或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会动步骤 1 写出的 `.env`，它只是 start-only 子命令：
+或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入，R8 / GH#43 加固契约）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会动步骤 1 写出的 `.env`，它是 start-only 子命令；如果 `docker/.env` 不存在，`--up` 会直接 exit 1 并给出具体的补救命令，**绝不会**默默重新生成密钥：
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4         # 步骤 1：gen .env，不提示，无需 sudo
 sudo ./setup.sh --up                              # 步骤 2：启栈（start-only）
 sudo ./setup.sh --smoke-test                      # 步骤 3：端到端 verify
 ```
+
+如果确实想用单条命令同时完成 bootstrap + 启栈（**会生成新密钥**——绝对不要在已经在生产里跑的 `.env` 主机上用），必须显式传 `--up --force`：
+
+```bash
+sudo ./setup.sh --non-interactive --ip 1.2.3.4 --up --force   # 显式 one-shot bootstrap
+```
+
+不带 `--force` 时，`docker/.env` 缺失就是 fatal——这是 R8（PR#36 Jerry-Xin CR）修的契约一致性问题：「`--up` 永远不会重新生成密钥」从「文档承诺」升级为「代码强制」。
 
 `--up` 底层调 `docker compose up -d --wait --wait-timeout 120`（Compose < v2.20 上自动 fallback 到手动 health poll）。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
 
