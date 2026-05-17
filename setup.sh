@@ -98,13 +98,48 @@ compose_supports_wait() {
   return 1
 }
 
-# Poll `docker compose ps` until no container is `(unhealthy)` or
-# `(health: starting)`. Used on Compose < 2.20 where `up --wait` is a no-op.
+# Poll `docker compose ps` until no container is `(unhealthy)`,
+# `(health: starting)`, or in a hard-fail state (Exited(non-zero) /
+# Restarting / Dead). Used on Compose < 2.20 where `up --wait` is a
+# no-op.
+#
+# R5 hardening (YUJ-991): the original check only looked for
+# `(unhealthy)` and `(health: starting)`, so a crash-looping service
+# stuck in `Restarting (1)` or a flat-out `Exited (1)` slipped through
+# the gate and the caller printed "All services healthy" while the
+# stack was actually down. Now we also fail-fast on any container in a
+# non-zero Exited / Restarting / Dead state.
+#
+# One-shot services (preflight, minio-init) intentionally finish as
+# `Exited (0)` once they have done their job — those exits are
+# expected, NOT failures. They are excluded from the failure-state
+# match via the service-name filter below (default compose container
+# naming is `<project>-<service>-<replica>`, e.g.
+# `octo-preflight-1` / `octo-minio-init-1`, so we anchor on
+# `-(preflight|minio-init)-`). Note also that `Exited (0)` from a
+# long-running service is *still* a failure here, because none of the
+# non-one-shot services should ever exit voluntarily — that case is
+# caught by the broader `Exited \([1-9]` clause (a service that exits
+# 0 mid-run is a packaging bug, not OOTB; we accept the residual gap
+# in exchange for not false-positive-ing the one-shots).
 compose_poll_healthy() {
-  local cc="$1" timeout="${2:-180}" elapsed=0 statuses=""
+  local cc="$1" timeout="${2:-180}" elapsed=0 statuses="" failed=""
   while (( elapsed < timeout )); do
-    statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Status}}' 2>/dev/null || true)"
+    # `--format '{{.Name}} {{.Status}}'` gives us both the container name
+    # (to filter one-shots) and the status string in one shot. Sticking
+    # to a single `compose ps` call per iteration keeps the poll cheap.
+    statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Name}} {{.Status}}' 2>/dev/null || true)"
     if [[ -n "${statuses}" ]]; then
+      # Hard-fail states: Exited with non-zero code, Restarting, or
+      # Dead. Skip the one-shot services whose Exited(0) is expected.
+      failed="$(echo "${statuses}" \
+                  | grep -vE -- '-(preflight|minio-init)-' \
+                  | grep -E 'Exited \([1-9]|Restarting|Dead' || true)"
+      if [[ -n "${failed}" ]]; then
+        echo "FATAL: service(s) in failed state:" >&2
+        printf '%s\n' "${failed}" | sed 's/^/    /' >&2
+        return 1
+      fi
       if echo "${statuses}" | grep -q '(unhealthy)'; then
         return 1
       fi
@@ -262,6 +297,20 @@ done
 if [[ "${RUN_VERIFY}" == "true" ]]; then
   if [[ ! -f "${ENV_OUT}" ]]; then
     fatal "docker/.env not found. Run setup.sh first to generate it."
+  fi
+  # R5 hardening (YUJ-991): curl is a HARD prerequisite for --verify.
+  # Every probe below uses `curl -fsS ...` (nginx vhost, octo-server
+  # /health, matter, MinIO health, admin SPA, login POST, presign GET,
+  # signed PUT). Without curl those probes all fail with "no 200 from
+  # ..." messages that send the operator down the wrong rabbit hole
+  # (suspecting the stack) when the real problem is a missing binary on
+  # the host. Mirror the python3 prereq pattern: explicit fatal with a
+  # clear remediation line, before any probe runs. Note that the outer
+  # prereq block above only emits a soft `warn` for curl because IP
+  # auto-detection has a 127.0.0.1 fallback; --verify has no such
+  # fallback.
+  if ! command -v curl >/dev/null 2>&1; then
+    fatal "curl is required for --verify (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --verify\`."
   fi
   CC="$(compose_cmd)"
   DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
@@ -425,6 +474,17 @@ print(tok or "")
       # Parse uploadUrl / contentType / contentDisposition out of the JSON.
       # Use a single python3 invocation so we can shell-eval the three
       # assignments without re-parsing.
+      #
+      # R5 hardening (YUJ-991): accept BOTH common octo-server response
+      # shapes the same way the login parser above does:
+      #   1. `{"uploadUrl": "...", "contentType": "...", ...}` (flat)
+      #   2. `{"code": 0, "data": {"uploadUrl": "...", ...}}`  (envelope)
+      # The flat form is what older octo-server builds return; the
+      # envelope form matches the wider `{code,data,...}` convention that
+      # the login endpoint already uses on current builds. Without this
+      # fallback, an envelope-shape credentials response false-fails step
+      # 8 with "no uploadUrl in credentials response" even though the
+      # presign issuance actually succeeded.
       CRED_ENV="$(printf '%s' "${CRED_RESP}" | python3 -c '
 import json, shlex, sys
 try:
@@ -433,9 +493,15 @@ except Exception:
     sys.exit(0)
 if not isinstance(d, dict):
     sys.exit(0)
-print("UPLOAD_URL=" + shlex.quote(d.get("uploadUrl") or ""))
-print("UPLOAD_CT="  + shlex.quote(d.get("contentType") or ""))
-print("UPLOAD_CD="  + shlex.quote(d.get("contentDisposition") or ""))
+def unwrap(obj, key):
+    v = obj.get(key)
+    if v:
+        return v
+    inner = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+    return inner.get(key) or ""
+print("UPLOAD_URL=" + shlex.quote(unwrap(d, "uploadUrl") or ""))
+print("UPLOAD_CT="  + shlex.quote(unwrap(d, "contentType") or ""))
+print("UPLOAD_CD="  + shlex.quote(unwrap(d, "contentDisposition") or ""))
 ' 2>/dev/null || true)"
       UPLOAD_URL=""; UPLOAD_CT=""; UPLOAD_CD=""
       # shellcheck disable=SC2086

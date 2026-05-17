@@ -406,7 +406,7 @@ TCP port (28080) in their firewall.**
 | nginx (HTTPS) | `28443` (placeholder) | `0.0.0.0` | HTTPS form; disabled by default — see "HTTPS" section below |
 | octo-admin | `28082` | `127.0.0.1` | admin SPA — reached via nginx `/admin/` on `28080`. Direct port stays loopback so the admin UI is never on the public IP. Override `OCTO_ADMIN_BIND` only for short-lived diagnostics behind a private network / VPN. |
 | octo-web | `28083` | `127.0.0.1` | user SPA — reached via nginx `/` on `28080`. Direct port stays loopback. Override `OCTO_WEB_BIND` only for diagnostics. |
-| WuKongIM API | `25001` | `127.0.0.1` | manager API — reached via nginx (`/api/wukongim/*`) on `28080`. Override `OCTO_WK_API_BIND` only if you need the unproxied form. |
+| WuKongIM API | `25001` | `127.0.0.1` | **internal manager / debug API — NOT exposed through nginx**. There is no manager-API location in `docker/nginx/conf.d/octo.conf.template`; OOTB the API is reachable only from the host loopback. Reach it via `docker exec -it <wukongim-container> sh` for diagnostics, or — for short-lived remote access — `ssh -L 5001:127.0.0.1:25001 user@host` and hit `http://localhost:5001/`. Flip `OCTO_WK_API_BIND=0.0.0.0` only on a private network / VPN AFTER you have an auth proxy in front; the manager API has no built-in token gateway. |
 | WuKongIM TCP | `25100` | `127.0.0.1` | **native IM transport** — required ONLY if you run a mobile / desktop app that dials WuKongIM over native TCP (browser / SPA traffic uses `/ws` via nginx). To enable: set `OCTO_WK_TCP_BIND=0.0.0.0` in `.env` AND open TCP `25100` on your firewall — see [Advanced: direct WuKongIM transports](#advanced-direct-wukongim-transports). |
 | WuKongIM WS | `25200` | `127.0.0.1` | direct WebSocket port — same story as TCP above; browsers go through nginx `/ws`. Override `OCTO_WK_WS_BIND=0.0.0.0` only for native clients that bypass the nginx ingress. |
 | octo-server REST | `28081` | `127.0.0.1` | direct REST port for operator smoke tests; production traffic uses nginx `/api/` + `/v1/` (rate-limited via `octo_api`/`octo_auth` zones in `nginx.conf`). Override `OCTO_SERVER_BIND` to widen. |
@@ -506,7 +506,7 @@ those transports directly. In that case:
 # in docker/.env
 OCTO_WK_TCP_BIND=0.0.0.0   # native TCP transport
 OCTO_WK_WS_BIND=0.0.0.0    # raw WebSocket without nginx in the middle
-# OCTO_WK_API_BIND=0.0.0.0 # only if the client also bypasses nginx for /api/wukongim/*
+# OCTO_WK_API_BIND=0.0.0.0 # debug / manager surface only — see note in "Network surface" above before opening this on a public IP (no nginx auth gateway in front).
 ```
 
 Then open the matching host ports on your firewall **in addition to
