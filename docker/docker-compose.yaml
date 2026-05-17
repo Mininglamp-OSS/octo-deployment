@@ -501,14 +501,23 @@ services:
       preflight:
         condition: service_completed_successfully
     ports:
-      - "${OCTO_WK_API_PORT:-25001}:5001"
-      - "${OCTO_WK_TCP_PORT:-25100}:5100"
-      - "${OCTO_WK_WS_PORT:-25200}:5200"
+      # WuKongIM API / TCP / WS are loopback-bound by default so that an
+      # OOTB deployment honours the "open only OCTO_HTTP_PORT (28080) on
+      # the firewall" promise: chat traffic flows through nginx's `/ws`
+      # location (proxied to wukongim:5200) and the manager API is reached
+      # via the same nginx ingress. If you run a native IM client that
+      # must dial WuKongIM TCP (5100) or WS (5200) directly — typically a
+      # mobile or desktop app that does not speak the nginx-proxied form —
+      # override OCTO_WK_TCP_BIND / OCTO_WK_WS_BIND to `0.0.0.0` in
+      # `.env` AND open the matching host ports on your firewall. See
+      # docker/README.md "Advanced: direct WuKongIM transports".
+      - "${OCTO_WK_API_BIND:-127.0.0.1}:${OCTO_WK_API_PORT:-25001}:5001"
+      - "${OCTO_WK_TCP_BIND:-127.0.0.1}:${OCTO_WK_TCP_PORT:-25100}:5100"
+      - "${OCTO_WK_WS_BIND:-127.0.0.1}:${OCTO_WK_WS_PORT:-25200}:5200"
       # Monitor port is an internal observability surface (varz / metrics
       # / `/route` admin), not a chat transport — bind to loopback by
       # default. Override via OCTO_WK_MONITOR_BIND for operators who want
-      # to reach it from a jumphost. The user-facing surfaces above
-      # (API/TCP/WS) stay on 0.0.0.0 because clients connect to them.
+      # to reach it from a jumphost.
       - "${OCTO_WK_MONITOR_BIND:-127.0.0.1}:${OCTO_WK_MONITOR_PORT:-25300}:5300"
     volumes:
       - wukongim-data:/root/wukongim
@@ -758,7 +767,14 @@ services:
       API_URL: http://octo-server:8090
       SUMMARY_API_URL: ${OCTO_SUMMARY_API_URL:-http://summary-api:8080}
     ports:
-      - "${OCTO_WEB_PORT:-28083}:80"
+      # Web SPA is reached through nginx (`/`, see octo.conf.template) by
+      # default — keep the direct host port loopback-only so an operator
+      # who follows the firewall guidance (open only OCTO_HTTP_PORT
+      # 28080) does not accidentally expose this container's nginx-less
+      # entrypoint to the public IP. Flip OCTO_WEB_BIND to `0.0.0.0` only
+      # for diagnostics (e.g. comparing direct vs proxied response) and
+      # restore the default afterwards.
+      - "${OCTO_WEB_BIND:-127.0.0.1}:${OCTO_WEB_PORT:-28083}:80"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/"]
       interval: 30s
@@ -780,7 +796,12 @@ services:
     environment:
       API_BACKEND: octo-server:8090
     ports:
-      - "${OCTO_ADMIN_PORT:-28082}:80"
+      # Admin console is reached through nginx (`/admin/`, see
+      # octo.conf.template) by default — keep the direct host port
+      # loopback-only so the admin UI is never exposed on the public IP
+      # of an OOTB deployment. Flip OCTO_ADMIN_BIND to `0.0.0.0` only
+      # behind a private network / VPN.
+      - "${OCTO_ADMIN_BIND:-127.0.0.1}:${OCTO_ADMIN_PORT:-28082}:80"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/admin/"]
       interval: 30s

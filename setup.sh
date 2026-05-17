@@ -349,8 +349,18 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # All three must pass for `--verify` to exit 0.
   # -------------------------------------------------------------------------
   if ! command -v python3 >/dev/null 2>&1; then
-    warn "python3 not available — skipping admin login + presign PUT end-to-end checks."
-    warn "(install python3 for full --verify coverage)"
+    # python3 is a hard prerequisite for `--verify`: the admin login
+    # JSON body and the presign-response shell-eval both depend on
+    # `python3 -c 'import json'`. Silently skipping those checks made
+    # `--verify` print "PASSED ✅" for a stack that had never proven
+    # the end-to-end SigV4 contract — the exact gap that hid
+    # OOTB-BUG-2026-05-17-001 (dual-port image-upload regression).
+    # Treat the missing interpreter as a deployment failure so the
+    # caller cannot mistake reachability-only coverage for the full
+    # contract test.
+    step "python3 prerequisite (admin login + presign PUT)"
+    fail "python3 is required for --verify (admin login JSON encoding + presign response parsing). Install python3 — every modern Linux distro ships it in the base image — and re-run \`setup.sh --verify\`."
+    ((fails++)) || true
   else
     ADMIN_USER="$(env_get OCTO_ADMIN_NAME superAdmin)"
     ADMIN_PWD="$(env_get OCTO_ADMIN_PWD '')"

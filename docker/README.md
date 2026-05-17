@@ -232,11 +232,14 @@ The script probes (and prints PASS/FAIL for each):
    form before single-port reverse-proxy landed; see
    OOTB-BUG-2026-05-17-001).
 
-Exit code is non-zero on any failure. Steps 7-9 require `python3` on the
-host running `--verify` for JSON parsing; if it is absent the script
-warns and skips those three steps (HTTP reachability still runs). This
-is what to run on a new host to confirm "deployment actually works
-end-to-end" — separate from "containers booted".
+Exit code is non-zero on any failure. `python3` is a **hard
+prerequisite** of `--verify` — steps 7-9 (admin login, presign issuance,
+SigV4 PUT) parse JSON via `python3 -c 'import json'`, and silently
+skipping them was the gap that hid OOTB-BUG-2026-05-17-001. Missing
+`python3` now fails fast with a non-zero exit; install it (every modern
+Linux distro ships it in the base image) and re-run. This is what to
+run on a new host to confirm "deployment actually works end-to-end" —
+separate from "containers booted".
 
 Step 9 leaves a 1-byte sentinel object in the `file` bucket
 (`octo-verify-<timestamp>-<pid>.txt`). It is intentionally left in
@@ -401,9 +404,11 @@ TCP port (28080) in their firewall.**
 | --- | --- | --- | --- |
 | **nginx (HTTP)** | **`28080`** | **`0.0.0.0`** | **user-facing entrypoint — the single open port** |
 | nginx (HTTPS) | `28443` (placeholder) | `0.0.0.0` | HTTPS form; disabled by default — see "HTTPS" section below |
-| octo-admin | `28082` | `0.0.0.0` | admin SPA (also reachable via `/admin/`) |
-| octo-web | `28083` | `0.0.0.0` | user SPA (also reachable via `/`) |
-| WuKongIM API / TCP / WS | `25001` / `25100` / `25200` | `0.0.0.0` | chat client transports (only required if you connect native chat clients directly to WuKongIM — browser/SPA traffic uses `/ws` through nginx) |
+| octo-admin | `28082` | `127.0.0.1` | admin SPA — reached via nginx `/admin/` on `28080`. Direct port stays loopback so the admin UI is never on the public IP. Override `OCTO_ADMIN_BIND` only for short-lived diagnostics behind a private network / VPN. |
+| octo-web | `28083` | `127.0.0.1` | user SPA — reached via nginx `/` on `28080`. Direct port stays loopback. Override `OCTO_WEB_BIND` only for diagnostics. |
+| WuKongIM API | `25001` | `127.0.0.1` | manager API — reached via nginx (`/api/wukongim/*`) on `28080`. Override `OCTO_WK_API_BIND` only if you need the unproxied form. |
+| WuKongIM TCP | `25100` | `127.0.0.1` | **native IM transport** — required ONLY if you run a mobile / desktop app that dials WuKongIM over native TCP (browser / SPA traffic uses `/ws` via nginx). To enable: set `OCTO_WK_TCP_BIND=0.0.0.0` in `.env` AND open TCP `25100` on your firewall — see [Advanced: direct WuKongIM transports](#advanced-direct-wukongim-transports). |
+| WuKongIM WS | `25200` | `127.0.0.1` | direct WebSocket port — same story as TCP above; browsers go through nginx `/ws`. Override `OCTO_WK_WS_BIND=0.0.0.0` only for native clients that bypass the nginx ingress. |
 | octo-server REST | `28081` | `127.0.0.1` | direct REST port for operator smoke tests; production traffic uses nginx `/api/` + `/v1/` (rate-limited via `octo_api`/`octo_auth` zones in `nginx.conf`). Override `OCTO_SERVER_BIND` to widen. |
 | octo-matter | `28086` | `127.0.0.1` | direct matter port; production traffic via nginx `/matter/`. Override `OCTO_MATTER_BIND`. |
 | smart-summary API | `28087` | `127.0.0.1` | direct summary-api port; production traffic via nginx `/summary/`. Override `OCTO_SUMMARY_API_BIND`. |
@@ -485,6 +490,35 @@ MINIO_SERVER_URL=http://<your-host>:29000
 …and open TCP `29000` in your firewall in addition to `28080`. There
 is no architectural reason to do this on a single-host deployment;
 the single-port default is the recommended path.
+
+### Advanced: direct WuKongIM transports
+
+The OOTB stack keeps WuKongIM's TCP (`25100`) and WebSocket (`25200`)
+ports bound to `127.0.0.1`. Browser / SPA chat traffic reaches
+WuKongIM through nginx's `/ws` location on `OCTO_HTTP_PORT` (`28080`)
+— that single open port covers the default user experience.
+
+A **native IM client** (mobile or desktop app that speaks WuKongIM's
+own framing instead of the nginx-proxied WebSocket) needs to dial
+those transports directly. In that case:
+
+```bash
+# in docker/.env
+OCTO_WK_TCP_BIND=0.0.0.0   # native TCP transport
+OCTO_WK_WS_BIND=0.0.0.0    # raw WebSocket without nginx in the middle
+# OCTO_WK_API_BIND=0.0.0.0 # only if the client also bypasses nginx for /api/wukongim/*
+```
+
+Then open the matching host ports on your firewall **in addition to
+`28080`**:
+
+```bash
+sudo ufw allow 25100/tcp     # WuKongIM native TCP (only if needed)
+sudo ufw allow 25200/tcp     # WuKongIM direct WebSocket (only if needed)
+```
+
+Pure browser / web deployments do not need this and should keep the
+loopback defaults.
 
 ### HTTPS form (TLS termination)
 
