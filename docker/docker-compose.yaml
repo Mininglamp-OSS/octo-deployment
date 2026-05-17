@@ -504,12 +504,24 @@ services:
       # WuKongIM API / TCP / WS are loopback-bound by default so that an
       # OOTB deployment honours the "open only OCTO_HTTP_PORT (28080) on
       # the firewall" promise: chat traffic flows through nginx's `/ws`
-      # location (proxied to wukongim:5200) and the manager API is reached
-      # via the same nginx ingress. If you run a native IM client that
-      # must dial WuKongIM TCP (5100) or WS (5200) directly — typically a
-      # mobile or desktop app that does not speak the nginx-proxied form —
-      # override OCTO_WK_TCP_BIND / OCTO_WK_WS_BIND to `0.0.0.0` in
-      # `.env` AND open the matching host ports on your firewall. See
+      # location (proxied to wukongim:5200).
+      #
+      # The WuKongIM admin / debug API (port 5001 inside the container,
+      # mapped to host `${OCTO_WK_API_PORT}` — default 25001 — on
+      # loopback) is intentionally LOOPBACK-ONLY and is NOT proxied by
+      # the ingress. There is no admin-API server block in
+      # `docker/nginx/conf.d/octo.conf.template`. Operators reach it via
+      # `docker exec -it <wukongim-container> sh` for in-container
+      # diagnostics, or for short-lived remote access:
+      #   ssh -L 5001:127.0.0.1:25001 user@host
+      # then hit `http://localhost:5001/`. See
+      # `docker/README.md` → "Network surface" for the full rationale.
+      #
+      # If you run a native IM client that must dial WuKongIM TCP (5100)
+      # or WS (5200) directly — typically a mobile or desktop app that
+      # does not speak the proxied form — override
+      # OCTO_WK_TCP_BIND / OCTO_WK_WS_BIND to `0.0.0.0` in `.env` AND
+      # open the matching host ports on your firewall. See
       # docker/README.md "Advanced: direct WuKongIM transports".
       - "${OCTO_WK_API_BIND:-127.0.0.1}:${OCTO_WK_API_PORT:-25001}:5001"
       - "${OCTO_WK_TCP_BIND:-127.0.0.1}:${OCTO_WK_TCP_PORT:-25100}:5100"

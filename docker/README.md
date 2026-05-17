@@ -532,6 +532,33 @@ volume mount, and the HTTPS server block in
 clients only need `OCTO_HTTPS_PORT` open; MinIO traffic still flows
 through nginx bucket-name routing under TLS.
 
+> ⚠️ **HTTPS env override required** — the compose defaults for
+> `MINIO_SERVER_URL`, `TS_MINIO_DOWNLOADURL`, and `TS_EXTERNAL_BASEURL`
+> all expand to `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`. The HTTPS
+> server block in nginx terminates TLS, but octo-server still hands
+> clients absolute URLs (presigned MinIO PUT/GET, base URLs in admin
+> responses) built from these three env vars. If you leave them at the
+> defaults, clients receive `http://…:28080` URLs and either get mixed
+> content errors or fall back through the HTTP listener. Until
+> [YUJ-984](https://github.com/Mininglamp-OSS/octo-deployment/issues) (`OCTO_PUBLIC_SCHEME` auto-derivation) lands, set the three
+> values explicitly in `docker/.env`:
+>
+> ```bash
+> # docker/.env — required when HTTPS server block is enabled
+> MINIO_SERVER_URL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_MINIO_DOWNLOADURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_EXTERNAL_BASEURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> ```
+>
+> Substitute the literal hostname and port (`.env` does not interpolate
+> `${...}` inside values: each value above must be the resolved string,
+> e.g. `https://octo.example.com:28443`). All three must agree on
+> scheme + host + port — SigV4 signs against this exact URL and
+> octo-server validates `TS_MINIO_DOWNLOADURL` as host:port-only on
+> startup (no path prefix). Also point `OCTO_WK_WSS_ADDR` at
+> `wss://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}/ws` if your clients should
+> open the WebSocket over TLS.
+
 ### Reverse-proxying behind a host nginx (TLS termination at a different hostname)
 
 When a *host* nginx (different from the in-compose one) terminates TLS

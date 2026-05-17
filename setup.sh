@@ -98,17 +98,23 @@ compose_supports_wait() {
   return 1
 }
 
-# Poll `docker compose ps` until no container is `(unhealthy)`,
-# `(health: starting)`, or in a hard-fail state (Exited(non-zero) /
-# Restarting / Dead). Used on Compose < 2.20 where `up --wait` is a
-# no-op.
+# R6 hardening (YUJ-997): shared "fatal state" detector for
+# `compose ps` output. Extracted from `compose_poll_healthy` so that
+# `--verify` step 1 (container health) can reuse the same logic that
+# the manual health poll already runs at `up` time. Previously
+# `--verify` only grep-ed for `(unhealthy)`, so a service that had
+# crash-looped after `up` (`Restarting (1)` / `Exited (1)` / `Dead`)
+# slipped through and `--verify` printed PASS for a half-dead stack.
 #
-# R5 hardening (YUJ-991): the original check only looked for
-# `(unhealthy)` and `(health: starting)`, so a crash-looping service
-# stuck in `Restarting (1)` or a flat-out `Exited (1)` slipped through
-# the gate and the caller printed "All services healthy" while the
-# stack was actually down. Now we also fail-fast on any container in a
-# non-zero Exited / Restarting / Dead state.
+# Input  : stdin = `{{.Name}} {{.Status}}` lines (one per container)
+#          $1    = (optional) failed-container output sink (declared by
+#                   caller with `local`); when set, the names of
+#                   services in fatal states are written to it for the
+#                   caller's diagnostic output.
+# Output : prints failing lines to the named sink if non-empty.
+# Returns: 0 if no fatal state, 1 if at least one container is in
+#          Exited(non-zero) / Restarting / Dead (one-shot services
+#          preflight / minio-init are exempted — see below).
 #
 # One-shot services (preflight, minio-init) intentionally finish as
 # `Exited (0)` once they have done their job — those exits are
@@ -122,6 +128,34 @@ compose_supports_wait() {
 # caught by the broader `Exited \([1-9]` clause (a service that exits
 # 0 mid-run is a packaging bug, not OOTB; we accept the residual gap
 # in exchange for not false-positive-ing the one-shots).
+check_compose_running_states() {
+  local statuses="$1" failed=""
+  failed="$(printf '%s\n' "${statuses}" \
+              | grep -vE -- '-(preflight|minio-init)-' \
+              | grep -E 'Exited \([1-9]|Restarting|Dead' || true)"
+  if [[ -n "${failed}" ]]; then
+    printf '%s\n' "${failed}"
+    return 1
+  fi
+  return 0
+}
+
+# Poll `docker compose ps` until no container is `(unhealthy)`,
+# `(health: starting)`, or in a hard-fail state (Exited(non-zero) /
+# Restarting / Dead). Used on Compose < 2.20 where `up --wait` is a
+# no-op.
+#
+# R5 hardening (YUJ-991): the original check only looked for
+# `(unhealthy)` and `(health: starting)`, so a crash-looping service
+# stuck in `Restarting (1)` or a flat-out `Exited (1)` slipped through
+# the gate and the caller printed "All services healthy" while the
+# stack was actually down. Now we also fail-fast on any container in a
+# non-zero Exited / Restarting / Dead state.
+#
+# R6 (YUJ-997): the fatal-state detection now lives in
+# `check_compose_running_states()` so `--verify` step 1 can reuse it
+# (Jerry-Xin P1 W1: step 1 grep `(unhealthy)`-only let a crash-looped
+# container slip through `--verify`).
 compose_poll_healthy() {
   local cc="$1" timeout="${2:-180}" elapsed=0 statuses="" failed=""
   while (( elapsed < timeout )); do
@@ -130,12 +164,7 @@ compose_poll_healthy() {
     # to a single `compose ps` call per iteration keeps the poll cheap.
     statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Name}} {{.Status}}' 2>/dev/null || true)"
     if [[ -n "${statuses}" ]]; then
-      # Hard-fail states: Exited with non-zero code, Restarting, or
-      # Dead. Skip the one-shot services whose Exited(0) is expected.
-      failed="$(echo "${statuses}" \
-                  | grep -vE -- '-(preflight|minio-init)-' \
-                  | grep -E 'Exited \([1-9]|Restarting|Dead' || true)"
-      if [[ -n "${failed}" ]]; then
+      if ! failed="$(check_compose_running_states "${statuses}")"; then
         echo "FATAL: service(s) in failed state:" >&2
         printf '%s\n' "${failed}" | sed 's/^/    /' >&2
         return 1
@@ -151,6 +180,34 @@ compose_poll_healthy() {
     elapsed=$(( elapsed + 5 ))
   done
   return 1
+}
+
+# R6 (YUJ-997): shared Compose project-name validator. Compose's own
+# naming rule is `^[a-z0-9][a-z0-9_-]*$` (lowercase ASCII, digits, `_`,
+# `-`; must not start with `_` / `-`). setup.sh itself only ever
+# generates names that satisfy this, but a hand-edited `.env` can put
+# regex metacharacters (`. * + ? [ ] ( ) | ^ $ \`) into
+# COMPOSE_PROJECT_NAME — which historically poisoned the uninstall
+# volume scan because it used `grep -E "^\${project}_"` as a regex. We
+# now reject any non-conforming value up front so destructive paths
+# never see metacharacters in the first place. Jerry-Xin P1 W2 +
+# defense-in-depth pair with literal-prefix matching below.
+#
+# Returns 0 if the name is OK, 1 (with an `err`) if it is rejected.
+validate_compose_project_name() {
+  local name="$1"
+  if [[ -z "${name}" ]]; then
+    err "COMPOSE_PROJECT_NAME is empty — refusing to proceed."
+    return 1
+  fi
+  if [[ ! "${name}" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    err "COMPOSE_PROJECT_NAME='${name}' is invalid."
+    err "Compose project names must match ^[a-z0-9][a-z0-9_-]*$"
+    err "(lowercase letters, digits, _ and -; cannot start with _ or -)."
+    err "Edit docker/.env (or unset/re-export your shell var) and re-run."
+    return 1
+  fi
+  return 0
 }
 
 # Run `up -d`, preferring `--wait` on Compose ≥ 2.20 and falling back to a
@@ -322,12 +379,27 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   if ! ( cd "${DOCKER_DIR}" && ${CC} ps --status running >/dev/null 2>&1 ); then
     fail "docker compose ps failed — is the stack up?"; ((fails++)) || true
   else
-    unhealthy=$(cd "${DOCKER_DIR}" && ${CC} ps --format '{{.Name}}\t{{.Status}}' 2>/dev/null \
-                | grep -E '\(unhealthy\)' || true)
-    if [[ -n "${unhealthy}" ]]; then
-      fail "unhealthy service(s):"; printf '%s\n' "${unhealthy}" | sed 's/^/    /'; ((fails++)) || true
+    # Pull `{{.Name}} {{.Status}}` once, then run BOTH checks against
+    # it: the original `(unhealthy)` grep AND the R6 fatal-state
+    # detector (`check_compose_running_states`, shared with the
+    # `up` health poll). Without the second check, a service that
+    # crash-looped after `up` (`Restarting (1)` / `Exited (1)` /
+    # `Dead`) slipped through step 1 and `--verify` printed PASS for
+    # a half-dead stack — exactly the gap Jerry-Xin flagged in PR#30
+    # R5 (P1 W1).
+    statuses="$(cd "${DOCKER_DIR}" && ${CC} ps --format '{{.Name}}	{{.Status}}' 2>/dev/null || true)"
+    failed_states=""
+    if ! failed_states="$(check_compose_running_states "${statuses}")"; then
+      fail "service(s) in fatal state (Exited/Restarting/Dead):"
+      printf '%s\n' "${failed_states}" | sed 's/^/    /'
+      ((fails++)) || true
     else
-      ok
+      unhealthy="$(printf '%s\n' "${statuses}" | grep -E '\(unhealthy\)' || true)"
+      if [[ -n "${unhealthy}" ]]; then
+        fail "unhealthy service(s):"; printf '%s\n' "${unhealthy}" | sed 's/^/    /'; ((fails++)) || true
+      else
+        ok
+      fi
     fi
   fi
 
@@ -377,6 +449,55 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   else
     fail "admin SPA not reachable"; ((fails++)) || true
   fi
+
+  # R6 (YUJ-997 / Jerry-Xin P1 W1B): WuKongIM `/ws` probe.
+  #
+  # Background: WuKongIM is the chat transport. Before this probe,
+  # `--verify` had no way to detect that wukongim had stopped:
+  # `(unhealthy)` only fires when the healthcheck has actually run and
+  # failed, but a freshly stopped container disappears from the
+  # `running` set and (depending on `restart:` policy) never enters
+  # `unhealthy` at all. The new fatal-state check in step 1 covers
+  # `Exited (1)` / `Restarting` / `Dead`, but a clean `docker stop
+  # wukongim` leaves the container as `Exited (0)` and slips past
+  # both. So we also probe the user-visible WS surface end-to-end:
+  # nginx → wukongim:5200.
+  #
+  # We send a real WebSocket upgrade request (RFC 6455 §4.1 mandatory
+  # headers: `Upgrade: websocket`, `Connection: Upgrade`,
+  # `Sec-WebSocket-Version: 13`, base64 `Sec-WebSocket-Key`). Expected
+  # responses when WuKongIM is online:
+  #   - `101 Switching Protocols`  (full handshake accepted — happy)
+  #   - `400 Bad Request`          (WuKongIM is up but rejected our
+  #                                 partial handshake — also healthy
+  #                                 evidence)
+  #   - `426 Upgrade Required`     (some WuKongIM versions return this
+  #                                 for non-conforming upgrades)
+  # Failure signals:
+  #   - `502 / 503 / 504`          (nginx reached, upstream wukongim
+  #                                 absent / down)
+  #   - `000`                      (connection refused / curl error)
+  # Other 4xx/5xx are bucketed as failure too; safer to false-positive
+  # on weird WuKongIM upgrades than to false-negative on a stopped
+  # container. openssl is already a hard prereq (checked above), so the
+  # base64-random WS key generation is always available.
+  step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
+  WS_KEY="$(openssl rand -base64 16 2>/dev/null || echo 'dGhlIHNhbXBsZSBub25jZQ==')"
+  WS_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+              -H 'Upgrade: websocket' \
+              -H 'Connection: Upgrade' \
+              -H 'Sec-WebSocket-Version: 13' \
+              -H "Sec-WebSocket-Key: ${WS_KEY}" \
+              "${BASE_URL}/ws" 2>/dev/null || echo 000)"
+  case "${WS_CODE}" in
+    101|400|426)
+      ok
+      ;;
+    *)
+      fail "WuKongIM /ws probe returned HTTP ${WS_CODE} — check 'docker compose ps wukongim' (a clean stop is invisible to (un)healthy checks but breaks chat)"
+      ((fails++)) || true
+      ;;
+  esac
 
   # -------------------------------------------------------------------------
   # End-to-end auth + presigned PUT (the real OOTB contract test).
@@ -565,17 +686,41 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
   # shell must not redirect destructive ops away from the stack whose
   # directory they're actually standing in.
   project="$(project_name_for_uninstall)"
+  # R6 (YUJ-997 / Jerry-Xin P1 W2A): fail fast on any project name that
+  # would not be a legal Compose name. setup.sh only ever writes safe
+  # values, but the on-disk `.env` is operator-editable; an operator who
+  # hand-edits COMPOSE_PROJECT_NAME to e.g. `octo*v4` (regex metachar)
+  # used to make the literal-prefix volume scan below match the wrong
+  # set. We refuse the run entirely instead of trying to sanitize.
+  validate_compose_project_name "${project}" || exit 1
   # Volume name format is `<project>_<vol>` (underscore separator — see
-  # docker-compose.yaml `volumes:` block). Match strictly on `^<project>_`
-  # so a stack named `octo` does NOT chew through volumes belonging to
-  # `octo-fz` / `octo-prod` / `octo-staging` on the same host.
+  # docker-compose.yaml `volumes:` block).
+  #
+  # R6 hardening (YUJ-997 / Jerry-Xin P1 W2B): match volumes with a
+  # *literal* `<project>_` prefix instead of feeding `^${project}_`
+  # into `grep -E`. Even though the preflight validator above already
+  # forbids regex metacharacters, the defense-in-depth pair (validator
+  # + literal prefix matcher) means a future code path that bypasses
+  # the validator cannot turn a metachar-laden project name into a
+  # destructive over-match against neighbour stacks. We keep `vol_regex`
+  # around purely as a human-friendly preview string in the warn / help
+  # text; it is never used to actually pick the volume set.
   vol_regex="^${project}_"
+  vol_prefix="${project}_"
   # Compute a human-friendly preview of volumes about to be deleted
   # (for option 1 / option 2 confirmation gates). Includes size when
   # `docker system df -v` is available; otherwise prints names only.
   list_target_volumes() {
+    # NOTE: literal prefix match (no `grep -E`). The `case` glob is
+    # byte-for-byte literal against the project string — `*` only
+    # interpolates from the pattern side, never from `$v` — so even a
+    # crafted `.env` cannot widen the match. See R6 W2B above.
     docker volume ls --format '{{.Name}}' 2>/dev/null \
-      | grep -E "${vol_regex}" || true
+      | while IFS= read -r v; do
+          case "${v}" in
+            "${vol_prefix}"*) printf '%s\n' "${v}" ;;
+          esac
+        done
   }
   print_volume_preview() {
     local names size_table
@@ -708,6 +853,15 @@ if [[ ! -f "${ENV_EXAMPLE}" ]]; then
   fatal "Cannot find ${ENV_EXAMPLE}. Run this script from the repository root."
 fi
 
+# R6 (YUJ-997 / Jerry-Xin P1 W2A): if the operator's shell already has
+# COMPOSE_PROJECT_NAME exported, validate it BEFORE preflight uses it.
+# setup.sh would otherwise carry an illegal name (regex metachars,
+# leading dash, etc.) all the way through to compose / volume-list
+# operations and produce confusing downstream errors.
+if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+  validate_compose_project_name "${COMPOSE_PROJECT_NAME}" || exit 1
+fi
+
 # ── Pre-flight: COMPOSE_PROJECT_NAME against existing OCTO state ────────────
 # INCIDENT-2026-05-16-001 root cause + safeguard. If existing OCTO state
 # is on the host AND COMPOSE_PROJECT_NAME is left at the default `octo`,
@@ -763,6 +917,13 @@ preflight_existing_octo() {
           if [[ -z "${new_project}" || "${new_project}" == "octo" ]]; then
             warn "Project name unchanged. Re-run with an exported COMPOSE_PROJECT_NAME if you change your mind."
           else
+            # R6 (YUJ-997 / W2A): same validator the on-disk path uses,
+            # applied to the just-prompted value. Reject illegal names
+            # before exporting so the rest of the run never sees a
+            # metachar-laden project name.
+            if ! validate_compose_project_name "${new_project}"; then
+              fatal "Refusing to export an invalid COMPOSE_PROJECT_NAME — re-run and pick a name that matches the Compose rule."
+            fi
             export COMPOSE_PROJECT_NAME="${new_project}"
             info "COMPOSE_PROJECT_NAME exported as '${new_project}' for this run."
           fi

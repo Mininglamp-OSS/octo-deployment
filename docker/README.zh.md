@@ -324,6 +324,28 @@ MINIO_SERVER_URL=http://<your-host>:29000
 
 `OCTO_HTTPS_PORT`（默认 `28443`）是**单端口 + TLS** 形态的占位变量。证书装载流程**未**自动化——见 [`docker/certs/README.md`](certs/README.md) 里手动步骤（Let's Encrypt 或自签）。证书到位后，取消注释 `docker-compose.yaml` 里的 443 端口映射、certs volume mount，以及 `docker/nginx/conf.d/octo.conf.template` 里的 HTTPS server 块。仍然是单端口故事——客户端只需 `OCTO_HTTPS_PORT` 开放；MinIO 流量还是经 nginx bucket-name 路由在 TLS 下传输。
 
+> ⚠️ **启用 HTTPS 必须同时覆盖三个 URL 变量**——compose 默认把
+> `MINIO_SERVER_URL` / `TS_MINIO_DOWNLOADURL` / `TS_EXTERNAL_BASEURL`
+> 都展开成 `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`。nginx 的 HTTPS
+> server 块只在前面终结 TLS，但 octo-server 仍然按上述三个变量给客户端
+> 返回**绝对 URL**（presigned MinIO PUT/GET、admin 响应里的 baseURL 等）。
+> 不覆盖就会让客户端拿到 `http://…:28080` 的 URL，要么报 mixed-content，
+> 要么直接退化到 HTTP listener。在 [YUJ-984](https://github.com/Mininglamp-OSS/octo-deployment/issues)（`OCTO_PUBLIC_SCHEME`
+> 自动推导）落地之前，请在 `docker/.env` 里显式设置这三个值：
+>
+> ```bash
+> # docker/.env —— 启用 HTTPS server block 时必须设置
+> MINIO_SERVER_URL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_MINIO_DOWNLOADURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_EXTERNAL_BASEURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> ```
+>
+> 注意 `.env` 不做 `${...}` 二次插值——上面三个值要替换成解析后的字面字符串
+> （例如 `https://octo.example.com:28443`）。三个值的 scheme + host + port
+> 必须一致：SigV4 是对这个完整 URL 签名的，octo-server 在启动时也会校验
+> `TS_MINIO_DOWNLOADURL` 只能是 host:port（不能带 path 前缀）。如果希望客户端
+> 走 wss，把 `OCTO_WK_WSS_ADDR` 也指向 `wss://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}/ws`。
+
 ### 在 host nginx 后做 TLS 终结（不同 hostname）
 
 如果用一台**主机** nginx（不是栈内那台）做 TLS 终结，把 `https://your.host/` 反代回栈的 `OCTO_HTTP_PORT`，需要把两个变量都指向公网 host：
