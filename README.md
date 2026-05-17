@@ -62,8 +62,8 @@ See [LICENSE](./LICENSE) for the full Apache 2.0 license terms.
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive: auto-detects public IP, generates all secrets
-cd docker && docker compose up -d --wait    # wait for healthy
-cd .. && ./setup.sh --verify                # end-to-end smoke test
+(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
+./setup.sh --verify                         # admin login + presign PUT end-to-end
 ```
 
 `setup.sh` prints the admin URL + superAdmin password at the end of

@@ -22,8 +22,8 @@ DB / cache / object store.
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive prompts
-cd docker && docker compose up -d --wait    # wait for healthy
-cd .. && ./setup.sh --verify                # smoke test (admin login + presign PUT)
+(cd docker && docker compose up -d --wait)  # subshell: stay in repo root
+./setup.sh --verify                         # smoke test (admin login + presign PUT)
 
 # Open in browser, password printed at the end of setup.sh:
 #   Admin: http://<your-domain>:28080/admin/   (user: superAdmin)
@@ -42,13 +42,17 @@ Redis, WuKongIM monitor, direct REST ports) default to loopback. See
 > **READ THIS BEFORE EVERY `docker compose up -d` / `docker compose down -v`
 > if there is any chance another OCTO stack already lives on this host.**
 
-`docker-compose.yaml` pins the Compose project name to `octo` (top-level
-`name: octo`). That stabilises the in-stack DNS names (`mysql`, `redis`,
-`octo-server`, …) so the rest of the config can reference them by literal
-hostname. The side effect is that **two independent clones of this repo
-on the same host default to the same project name** — meaning a
-`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase the
-named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
+`docker-compose.yaml` sets a top-level `name: octo` as the default
+project name (so a vanilla clone produces stable in-stack DNS names
+`mysql`, `redis`, `octo-server`, … referenceable by literal hostname).
+Compose v2 precedence still lets `COMPOSE_PROJECT_NAME` override that
+top-level `name:` — both for the network/container suffix AND (via the
+explicit `name:` on each volume in the `volumes:` block) for the named
+volumes themselves. The side effect of the default is that **two
+independent clones of this repo on the same host that DO NOT override
+the project name share the same volumes** — meaning a
+`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase
+the named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
 message queues, etc.) belonging to a production clone in
 `/opt/octo-deployment`. That is exactly how `im-test` lost its entire
 user database on 2026-05-16 (INCIDENT-2026-05-16-001).
@@ -67,6 +71,16 @@ cd docker
 docker compose up -d                  # volumes: octo-fz_mysql-data, …
 ```
 
+> 🔒 **`setup.sh` persists `COMPOSE_PROJECT_NAME` into `docker/.env`
+> after you pick it.** Compose auto-loads `docker/.env` before reading
+> either the YAML `name:` or the calling shell's
+> `COMPOSE_PROJECT_NAME`, so a later `cd docker && docker compose up -d`
+> from a fresh shell still scopes to the chosen project — you do NOT
+> have to re-`export` the variable on every login. This also means
+> `setup.sh --uninstall` reads the persisted value to scope its volume
+> teardown grep (`^${project}_`), so it cannot silently chew through
+> volumes from a different `octo-*` stack on the same host.
+
 The two stacks then have fully separate Docker volumes
 (`octo_mysql-data` vs `octo-fz_mysql-data`), networks
 (`octo_octo-net` vs `octo-fz_octo-net`), and container names
@@ -80,7 +94,7 @@ removes its own state.
 > (`OCTO_HTTP_PORT`, `OCTO_HTTPS_PORT`, `OCTO_MYSQL_PORT`,
 > `OCTO_REDIS_PORT`, `OCTO_MINIO_API_PORT`, `OCTO_MINIO_CONSOLE_PORT`,
 > `OCTO_WUKONGIM_PORT`, `OCTO_WUKONGIM_WS_PORT`,
-> `OCTO_WUKONGIM_TCP_PORT`, `OCTO_SUMMARY_PORT`) and uses the same
+> `OCTO_WUKONGIM_TCP_PORT`, `OCTO_SUMMARY_API_PORT`) and uses the same
 > default bridge subnet (`OCTO_NETWORK_SUBNET=172.28.0.0/24`). Two
 > live stacks on one host will fail with port-bind / IPAM-overlap
 > errors unless the second stack's `.env` also overrides every
@@ -155,8 +169,8 @@ Recommended (interactive setup):
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive prompts
-cd docker && docker compose up -d --wait    # wait for healthy (60-120s on first boot)
-cd .. && ./setup.sh --verify                # end-to-end smoke test
+(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
+./setup.sh --verify                         # admin login + presign PUT end-to-end
 ```
 
 `setup.sh` auto-detects the public IP via `ifconfig.me`. If you run
@@ -169,7 +183,7 @@ Or non-interactive:
 
 ```bash
 ./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d --wait
+(cd docker && docker compose up -d --wait)
 ./setup.sh --verify
 ```
 
@@ -177,7 +191,7 @@ To enable the optional LLM summary services, add `--summary`:
 
 ```bash
 ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d --wait
+(cd docker && docker compose up -d --wait)
 ```
 
 `setup.sh` writes `docker/.env` with rotated random secrets and a
@@ -204,13 +218,32 @@ The script probes (and prints PASS/FAIL for each):
 1. `docker compose ps` reports no `(unhealthy)` containers
 2. nginx vhost up (`GET /_nginx_up`)
 3. octo-server REST (`GET /api/v1/health`)
-4. octo-matter (`GET /matter/health`)
-5. MinIO via nginx (`GET /minio/minio/health/live`)
+4. octo-matter (`GET /matter/health`) — **counted** toward failures
+5. MinIO via nginx (`GET /minio/health/live`)
 6. admin SPA reachable (`GET /admin/`)
+7. **admin login** (`POST /api/v1/manager/login` as `superAdmin` with
+   `OCTO_ADMIN_PWD` from `.env`) — exercises the octo-server + MySQL +
+   bcrypt + Redis-cache chain
+8. **presigned PUT issuance** (`GET /api/v1/file/upload/credentials`) —
+   exercises octo-server's MinIO IAM credential path
+9. **1-byte PUT to the signed URL** — exercises nginx forwarding the
+   SigV4 path verbatim AND MinIO accepting the signature (this is the
+   exact code path that silently dropped image messages on the dual-port
+   form before single-port reverse-proxy landed; see
+   OOTB-BUG-2026-05-17-001).
 
-Exit code is non-zero on any failure. This is what to run on a new
-host to confirm "deployment actually works end-to-end" — separate
-from "containers booted".
+Exit code is non-zero on any failure. Steps 7-9 require `python3` on the
+host running `--verify` for JSON parsing; if it is absent the script
+warns and skips those three steps (HTTP reachability still runs). This
+is what to run on a new host to confirm "deployment actually works
+end-to-end" — separate from "containers booted".
+
+Step 9 leaves a 1-byte sentinel object in the `file` bucket. Remove it
+manually if you want a perfectly clean state:
+
+```bash
+docker exec ${COMPOSE_PROJECT_NAME:-octo}-minio-1 mc rm local/file/octo-verify-<timestamp>-<pid>.txt
+```
 
 ### Uninstall / reset
 
@@ -428,7 +461,7 @@ ends stay in sync. The data is protected by:
 - octo-server's authorisation layer in front of `/api/v1/file/*`.
 
 A diagnostics-only `/minio/` location stays in nginx for sidecar
-probes (e.g. `curl http://host:28080/minio/minio/health/live`); it is
+probes (e.g. `curl http://host:28080/minio/health/live`); it is
 NOT used for client object traffic.
 
 ### Dual-port advanced override
@@ -824,6 +857,37 @@ recursively expand `${...}` inside a `.env` value. Leave
 `docker-compose.yaml` builds the address from `OCTO_DOMAIN` /
 `OCTO_HTTP_PORT`. Set a literal value (e.g. `ws://1.2.3.4:28080/ws`)
 only when you want to override the auto-built default.
+
+### SPA route names that collide with MinIO bucket names
+
+The single-port reverse proxy routes any URL matching
+`^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+`
+to MinIO without rewriting the path (presigned URLs depend on the URI
+being byte-identical to what SigV4 signed). If you fork `octo-web` and
+add a frontend route that happens to land under one of these prefixes
+**and** the route's first path segment looks like a MinIO object key
+(`/chat/some-key`, `/group/some-id`, …), nginx will dispatch it to
+MinIO and the browser will see MinIO's XML `NoSuchKey` error instead of
+the SPA.
+
+Mitigations:
+
+- **Prefer SPA prefixes that are NOT in the bucket whitelist** —
+  `/conversations/`, `/teams/`, `/spaces/` are all collision-free.
+- **If you must keep a colliding prefix**, ensure the SPA segments
+  after it cannot be confused with object keys (e.g. namespace them
+  under `/chat/_app/<id>` so the regex still matches but the key is
+  guaranteed to be a 404 you can detect and bounce back to the SPA).
+- **Or**: tighten the bucket-name regex in
+  `docker/nginx/conf.d/octo.conf.template` to require the object-key
+  shape octo-server emits (currently `<bucket>/<unix-timestamp>/<uuid>/<uuid>.<ext>`
+  or `<bucket>/<sanitised-path>` for the upload-path form). The default
+  regex was deliberately kept permissive because the upload-path form
+  has no fixed prefix; narrowing it requires auditing every call site
+  of `getUploadCredentials` in `octo-server` first.
+
+The OOTB SPA shipped in this repo does not collide with any of these
+prefixes, so the default regex is safe out of the box.
 
 ### MySQL refuses to start with "ERROR 1396 (HY000): Operation CREATE USER failed"
 

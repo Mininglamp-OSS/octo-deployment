@@ -78,6 +78,63 @@ compose_cmd() {
   fi
 }
 
+# Returns 0 if `docker compose up -d --wait` is supported (Compose v2.20+).
+# Older Compose (v1, and v2 < 2.20) silently ignores `--wait` and returns 0
+# even when services are still booting, so callers fall back to a manual
+# health poll.
+compose_supports_wait() {
+  local cc="$1"
+  local v="" major="" rest="" minor=""
+  v="$(${cc} version --short 2>/dev/null || true)"
+  v="${v#v}"
+  [[ -z "${v}" ]] && return 1
+  major="${v%%.*}"
+  rest="${v#*.}"
+  minor="${rest%%.*}"
+  [[ ! "${major}" =~ ^[0-9]+$ ]] && return 1
+  [[ ! "${minor}" =~ ^[0-9]+$ ]] && return 1
+  if (( major > 2 )); then return 0; fi
+  if (( major == 2 && minor >= 20 )); then return 0; fi
+  return 1
+}
+
+# Poll `docker compose ps` until no container is `(unhealthy)` or
+# `(health: starting)`. Used on Compose < 2.20 where `up --wait` is a no-op.
+compose_poll_healthy() {
+  local cc="$1" timeout="${2:-180}" elapsed=0 statuses=""
+  while (( elapsed < timeout )); do
+    statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Status}}' 2>/dev/null || true)"
+    if [[ -n "${statuses}" ]]; then
+      if echo "${statuses}" | grep -q '(unhealthy)'; then
+        return 1
+      fi
+      if ! echo "${statuses}" | grep -q '(health: starting)'; then
+        return 0
+      fi
+    fi
+    sleep 5
+    elapsed=$(( elapsed + 5 ))
+  done
+  return 1
+}
+
+# Run `up -d`, preferring `--wait` on Compose ≥ 2.20 and falling back to a
+# manual health poll on older Compose so users on legacy installs do not
+# see a hard failure. Returns the exit code of the compose call (or the
+# poll) so callers can fail-fast.
+compose_up_and_wait() {
+  local cc="$1"
+  if compose_supports_wait "${cc}"; then
+    ( cd "${DOCKER_DIR}" && ${cc} up -d --wait )
+    return $?
+  fi
+  warn "Detected Compose < v2.20 — \`up --wait\` is unavailable, falling back to manual health poll."
+  if ! ( cd "${DOCKER_DIR}" && ${cc} up -d ); then
+    return 1
+  fi
+  compose_poll_healthy "${cc}" 180
+}
+
 # Read a value from docker/.env (defaults if missing). Used by --verify
 # / --uninstall / post-deploy admin-credentials echo.
 env_get() {
@@ -88,6 +145,27 @@ env_get() {
   local v
   v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
   echo "${v:-${default}}"
+}
+
+# Resolve the project name the way Compose does — but for the script's own
+# bookkeeping (uninstall volume scan, `--up` invocation, post-run admin URL).
+# Precedence:
+#   1. COMPOSE_PROJECT_NAME exported in the calling shell (matches Compose)
+#   2. COMPOSE_PROJECT_NAME persisted in docker/.env (written by `setup.sh`
+#      so the value survives the shell that invoked setup)
+#   3. literal "octo" (compose YAML `name:` default)
+project_name() {
+  if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then
+    echo "${COMPOSE_PROJECT_NAME}"
+    return 0
+  fi
+  local from_env
+  from_env="$(env_get COMPOSE_PROJECT_NAME "")"
+  if [[ -n "${from_env}" ]]; then
+    echo "${from_env}"
+    return 0
+  fi
+  echo "octo"
 }
 
 # ── Parse CLI arguments ─────────────────────────────────────────────────────
@@ -184,16 +262,25 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   if curl -fsS --max-time 5 "${BASE_URL}/matter/health" >/dev/null 2>&1; then
     ok
   else
-    fail "no 200 from matter (non-fatal if matter is disabled)"; # not counted
+    # matter is part of the default stack (not profile-gated), so a failed
+    # probe IS a deployment failure. Counted toward `fails` so `--verify`
+    # surfaces it as a non-zero exit and CI / automation cannot mistake a
+    # broken matter for a healthy one.
+    fail "no 200 from matter — check 'docker compose logs matter'"
+    ((fails++)) || true
   fi
 
-  step "MinIO via nginx (GET ${BASE_URL}/minio/minio/health/live)"
-  # `/minio/` location is a diagnostics passthrough — the path
-  # `/minio/health/live` is MinIO's built-in health probe.
-  if curl -fsS --max-time 5 "${BASE_URL}/minio/minio/health/live" >/dev/null 2>&1; then
+  step "MinIO via nginx (GET ${BASE_URL}/minio/health/live)"
+  # `/minio/` location is a passthrough — `proxy_pass http://octo_minio_api;`
+  # has no trailing slash and no rewrite, so the request URI is forwarded
+  # verbatim. MinIO's built-in liveness endpoint lives at `/minio/health/live`
+  # (its first `/minio` is part of MinIO's path, NOT the nginx location).
+  # A double `/minio/minio/...` would be parsed by MinIO as bucket=minio +
+  # key=minio/health/live and return 404 every time.
+  if curl -fsS --max-time 5 "${BASE_URL}/minio/health/live" >/dev/null 2>&1; then
     ok
   else
-    fail "MinIO health probe through nginx failed — bucket-name routing may still work; check nginx logs"
+    fail "MinIO health probe through nginx failed — check nginx + minio logs"
     ((fails++)) || true
   fi
 
@@ -202,6 +289,114 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     ok
   else
     fail "admin SPA not reachable"; ((fails++)) || true
+  fi
+
+  # -------------------------------------------------------------------------
+  # End-to-end auth + presigned PUT (the real OOTB contract test).
+  #
+  # The plain HTTP reachability probes above only prove that nginx routes
+  # are wired and the backing containers respond to unauthenticated GETs.
+  # The single-port reverse proxy ALSO has to carry:
+  #   1. POST /api/v1/manager/login (auth → token) — exercises
+  #      octo-server + MySQL + bcrypt + cache (Redis), the chain that breaks
+  #      first when a `.env` regeneration de-syncs OCTO_ADMIN_PWD.
+  #   2. GET  /api/v1/file/upload/credentials (presign issuance) — exercises
+  #      the MinIO IAM credential path (OCTO_MINIO_APP_*), the bucket-name
+  #      regex location, and the host:port the URL is signed against.
+  #   3. HTTP PUT to the signed URL with a 1-byte payload — exercises
+  #      nginx forwarding the SigV4 path verbatim AND MinIO accepting the
+  #      signature. This is the exact code path that silently dropped
+  #      image messages on the dual-port form when port 29000 was closed
+  #      (OOTB-BUG-2026-05-17-001).
+  # All three must pass for `--verify` to exit 0.
+  # -------------------------------------------------------------------------
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not available — skipping admin login + presign PUT end-to-end checks."
+    warn "(install python3 for full --verify coverage)"
+  else
+    ADMIN_USER="$(env_get OCTO_ADMIN_NAME superAdmin)"
+    ADMIN_PWD="$(env_get OCTO_ADMIN_PWD '')"
+    TOKEN=""
+    if [[ -z "${ADMIN_PWD}" ]]; then
+      step "admin login (POST /api/v1/manager/login)"
+      fail "OCTO_ADMIN_PWD is empty in docker/.env — cannot exercise admin auth"
+      ((fails++)) || true
+    else
+      step "admin login (POST /api/v1/manager/login as ${ADMIN_USER})"
+      LOGIN_BODY="$(printf '{"username":"%s","password":"%s"}' "${ADMIN_USER}" "${ADMIN_PWD}")"
+      LOGIN_RESP="$(curl -sS --max-time 10 -X POST \
+                    "${BASE_URL}/api/v1/manager/login" \
+                    -H 'Content-Type: application/json' \
+                    --data-raw "${LOGIN_BODY}" 2>/dev/null || true)"
+      TOKEN="$(printf '%s' "${LOGIN_RESP}" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+if isinstance(d, dict):
+    print(d.get("token") or "")
+' 2>/dev/null || true)"
+      if [[ -z "${TOKEN}" ]]; then
+        fail "no token in login response (body head: ${LOGIN_RESP:0:200})"
+        ((fails++)) || true
+      else
+        ok
+      fi
+    fi
+
+    if [[ -n "${TOKEN}" ]]; then
+      step "issue presigned PUT (GET /api/v1/file/upload/credentials)"
+      TEST_FILE="octo-verify-$(date +%s)-$$.txt"
+      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=file&filename=${TEST_FILE}&fileSize=1"
+      CRED_RESP="$(curl -sS --max-time 10 -H "token: ${TOKEN}" "${CRED_URL}" 2>/dev/null || true)"
+      # Parse uploadUrl / contentType / contentDisposition out of the JSON.
+      # Use a single python3 invocation so we can shell-eval the three
+      # assignments without re-parsing.
+      CRED_ENV="$(printf '%s' "${CRED_RESP}" | python3 -c '
+import json, shlex, sys
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except Exception:
+    sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+print("UPLOAD_URL=" + shlex.quote(d.get("uploadUrl") or ""))
+print("UPLOAD_CT="  + shlex.quote(d.get("contentType") or ""))
+print("UPLOAD_CD="  + shlex.quote(d.get("contentDisposition") or ""))
+' 2>/dev/null || true)"
+      UPLOAD_URL=""; UPLOAD_CT=""; UPLOAD_CD=""
+      # shellcheck disable=SC2086
+      eval "${CRED_ENV}"
+      if [[ -z "${UPLOAD_URL}" ]]; then
+        fail "no uploadUrl in credentials response (body head: ${CRED_RESP:0:200})"
+        ((fails++)) || true
+      else
+        ok
+        step "PUT 1-byte test object via presigned URL"
+        # Build the curl invocation. The signed URL pins Content-Length;
+        # if contentType / contentDisposition were signed, MinIO rejects
+        # the PUT unless we forward the same header values.
+        PUT_HEADERS=()
+        [[ -n "${UPLOAD_CT}" ]] && PUT_HEADERS+=( -H "Content-Type: ${UPLOAD_CT}" )
+        [[ -n "${UPLOAD_CD}" ]] && PUT_HEADERS+=( -H "Content-Disposition: ${UPLOAD_CD}" )
+        PUT_CODE="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
+                    -X PUT "${PUT_HEADERS[@]}" --data-binary 'x' \
+                    "${UPLOAD_URL}" 2>/dev/null || echo 000)"
+        case "${PUT_CODE}" in
+          200|204) ok ;;
+          *)
+            fail "PUT failed with HTTP ${PUT_CODE} — single-port MinIO routing or signed-header mismatch"
+            ((fails++)) || true
+            ;;
+        esac
+        # NOTE: the test object (1 byte) is intentionally left on disk —
+        # cleanup would require either an octo-server delete endpoint or
+        # an `mc rm` exec, and the leftover is negligible. Operators can
+        # `docker exec <project>-minio-1 mc rm local/file/${TEST_FILE}` if
+        # they want a perfectly clean state after smoke-testing.
+      fi
+    fi
   fi
 
   echo ""
@@ -221,7 +416,17 @@ fi
 
 if [[ "${RUN_UNINSTALL}" == "true" ]]; then
   CC="$(compose_cmd)"
-  project="${COMPOSE_PROJECT_NAME:-octo}"
+  # Prefer the project name persisted in docker/.env over the calling
+  # shell's COMPOSE_PROJECT_NAME — the setup-time choice is the source
+  # of truth, so an operator who later runs `./setup.sh --uninstall` in
+  # a fresh shell still scopes teardown to the right stack instead of
+  # accidentally falling back to the literal "octo" default.
+  project="$(project_name)"
+  # Volume name format is `<project>_<vol>` (underscore separator — see
+  # docker-compose.yaml `volumes:` block). Match strictly on `^<project>_`
+  # so a stack named `octo` does NOT chew through volumes belonging to
+  # `octo-fz` / `octo-prod` / `octo-staging` on the same host.
+  vol_regex="^${project}_"
   echo ""
   printf '%sOCTO Uninstall%s\n' "${BOLD}" "${RESET}"
   echo "Project: ${project}"
@@ -233,8 +438,11 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
   echo "  q) Quit"
   echo ""
   warn "Before option 1 or 2, confirm the volumes about to be removed are YOURS:"
-  echo "    docker volume ls | grep -E '^${project}([-_]|\$)'"
+  echo "    docker volume ls | grep -E '${vol_regex}'"
   read -rp "Choice [1/2/3/q]: " choice
+  # Ensure compose picks up the same project name (in case the env file
+  # is missing the var or the calling shell has a stale value).
+  export COMPOSE_PROJECT_NAME="${project}"
   case "${choice}" in
     1)
       warn "About to: cd docker && ${CC} down -v   (removes ALL named volumes for project '${project}')"
@@ -249,7 +457,7 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
         [[ -z "${v}" ]] && continue
         info "removing volume ${v}"
         docker volume rm "${v}" >/dev/null 2>&1 || warn "could not remove ${v}"
-      done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${project}([-_]|\$)" || true)
+      done < <(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "${vol_regex}" || true)
       info "Data reset complete. Run \`docker compose up -d\` to start fresh."
       ;;
     3)
@@ -532,30 +740,84 @@ if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   fi
 fi
 
+# ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
+# INCIDENT-2026-05-16-001 follow-up: the interactive preflight may
+# `export COMPOSE_PROJECT_NAME=octo-<suffix>` so the rest of THIS shell
+# scopes correctly, but that export vanishes the moment the operator
+# exits setup.sh. A later `cd docker && docker compose up -d --wait`
+# in a fresh shell would then silently fall back to the YAML `name: octo`
+# default, mount the `octo_*` volume set, and (because the project name
+# now mismatches) a subsequent `setup.sh --uninstall` grep would happily
+# scoop up volumes from OTHER `octo-*` stacks on the same host.
+#
+# Writing the value into `docker/.env` is the documented, Compose-native
+# way to make project-name selection durable: Compose auto-loads `.env`
+# from its project directory before reading either `name:` or the
+# COMPOSE_PROJECT_NAME shell env var, so the `up -d` from a vanilla
+# shell ends up scoped to the same project this setup chose.
+PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-octo}"
+if grep -q '^COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then
+  sed_inplace "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${PROJECT_NAME_VALUE}|" "${ENV_OUT}"
+elif grep -q '^# *COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then
+  sed_inplace "s|^# *COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${PROJECT_NAME_VALUE}|" "${ENV_OUT}"
+else
+  # Insert as the very first line so it is impossible to miss when an
+  # operator opens .env by hand.
+  TMP_ENV="${ENV_OUT}.tmp.$$"
+  {
+    printf '# Compose project name — pins this stack to a dedicated set of\n'
+    printf '# Docker volumes, networks, and container names (see docker-compose.yaml\n'
+    printf '# `volumes:` block). Persisted here by setup.sh so it survives the\n'
+    printf '# shell that ran setup; Compose auto-loads docker/.env before falling\n'
+    printf '# back to the YAML `name:` default. Change ONLY if you understand\n'
+    printf '# how it interacts with on-disk volumes.\n'
+    printf 'COMPOSE_PROJECT_NAME=%s\n' "${PROJECT_NAME_VALUE}"
+    cat "${ENV_OUT}"
+  } > "${TMP_ENV}"
+  chmod --reference="${ENV_OUT}" "${TMP_ENV}" 2>/dev/null || chmod 600 "${TMP_ENV}"
+  mv "${TMP_ENV}" "${ENV_OUT}"
+fi
+
 # ── Optional: bring the stack up + wait for healthy ────────────────────────
 HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
 ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
 
 if [[ "${RUN_UP}" == "true" ]]; then
   CC="$(compose_cmd)"
+  # Export the persisted project name so the child `docker compose`
+  # process sees it even if the calling shell never did.
+  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
   echo ""
-  info "Starting stack with --wait (this can take 60-120s on first boot)…"
-  if ( cd "${DOCKER_DIR}" && ${CC} up -d --wait ); then
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — first boot can take 60-120s…"
+  if compose_up_and_wait "${CC}"; then
     info "All services reached healthy."
   else
-    warn "${CC} up --wait reported failures. Run:"
-    warn "    cd docker && ${CC} ps"
-    warn "    cd docker && ${CC} logs --tail 100"
-    warn "or rerun the script with --verify after fixing the root cause."
+    # FAIL-FAST: a compose-up failure means the stack is NOT running.
+    # Previously this was just a warning and the success banner below
+    # printed anyway, which (a) misled the operator and (b) let CI /
+    # automation see exit 0 when nothing was actually up.
+    err "${CC} up failed — stack is NOT running."
+    err "Run:"
+    err "    cd docker && ${CC} ps"
+    err "    cd docker && ${CC} logs --tail 100"
+    err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --verify"
+    err "once the stack is healthy)."
+    err "docker/.env has been written — re-running setup.sh is NOT required."
+    exit 1
   fi
 fi
 
 # ── Print summary ───────────────────────────────────────────────────────────
 echo ""
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-printf '%s  docker/.env generated successfully!%s\n' "${GREEN}" "${RESET}"
+if [[ "${RUN_UP}" == "true" ]]; then
+  printf '%s  docker/.env generated AND stack started successfully!%s\n' "${GREEN}" "${RESET}"
+else
+  printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
+fi
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
 echo ""
+printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
 printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
 printf '  External IP:    %s%s%s\n' "${BOLD}" "${EXTERNAL_IP}" "${RESET}"
 printf '  HTTP port:      %s%s%s\n' "${BOLD}" "${HTTP_PORT}" "${RESET}"
@@ -599,13 +861,13 @@ if [[ "${RUN_UP}" != "true" ]]; then
   echo ""
   info "Next steps:"
   echo "  1. Review docker/.env and adjust as needed"
-  echo "  2. cd docker && docker compose up -d --wait"
-  echo "  3. ./setup.sh --verify    # smoke test"
+  echo "  2. (cd docker && docker compose up -d --wait)   # subshell — keeps you in repo root"
+  echo "  3. ./setup.sh --verify    # admin login + presign PUT end-to-end check"
   echo "  4. Visit ${ADMIN_URL}"
 else
   echo ""
   info "Smoke test:"
-  echo "  ./setup.sh --verify"
+  echo "  ./setup.sh --verify    # admin login + presign PUT end-to-end check"
 fi
 echo ""
 printf '%s  ⚠  Save the admin password above — it is NOT stored elsewhere.%s\n' "${YELLOW}" "${RESET}"

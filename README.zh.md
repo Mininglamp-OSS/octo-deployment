@@ -50,8 +50,8 @@ OCTO 按**"原样"**提供，不附带任何形式的明示或默示担保。OCT
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # 交互式向导（自动探测公网 IP，生成所有密钥）
-cd docker && docker compose up -d --wait    # 等所有服务 healthy
-cd .. && ./setup.sh --verify                # 端到端自检
+(cd docker && docker compose up -d --wait)  # subshell：保持在 repo 根目录
+./setup.sh --verify                         # admin login + presign PUT 端到端检查
 ```
 
 `setup.sh` 在最后打印 admin URL + superAdmin 密码——保存好，不会再存别处。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。

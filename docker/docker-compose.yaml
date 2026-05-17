@@ -34,15 +34,19 @@ volumes:
   # ---------------------------------------------------------------------------
   # Named-volume isolation via COMPOSE_PROJECT_NAME (INCIDENT-2026-05-16-001).
   # ---------------------------------------------------------------------------
-  # `name: octo` (above) pins the Compose project to `octo` so the network /
-  # service names stay stable, but it ALSO removes the directory-based prefix
-  # Compose would otherwise put on volume names. Without an explicit `name:`
-  # on each volume, every clone of this repo on the same host would share the
-  # SAME unprefixed volumes (`mysql-data`, `redis-data`, …) — meaning a
-  # `docker compose down -v` from a "fresh" clone at /tmp/foo wipes the
-  # production stack's MySQL data because both clones map to the same
-  # Docker volume objects. That is exactly how INCIDENT-2026-05-16-001
-  # erased im-test's entire user table during a routine from-zero test.
+  # `name: octo` (above) sets the DEFAULT project name when neither
+  # `COMPOSE_PROJECT_NAME` nor `-p` is supplied — picking a stable default
+  # (instead of falling back to the parent-directory name) keeps the
+  # network / service names predictable for a vanilla `git clone`. It
+  # ALSO removes the directory-based prefix Compose would otherwise put
+  # on volume names. Without an explicit `name:` on each volume entry,
+  # every clone of this repo on the same host that does NOT override
+  # the project name would share the SAME unprefixed volumes
+  # (`mysql-data`, `redis-data`, …) — meaning a `docker compose down -v`
+  # from a "fresh" clone at /tmp/foo wipes the production stack's MySQL
+  # data because both clones map to the same Docker volume objects.
+  # That is exactly how INCIDENT-2026-05-16-001 erased im-test's entire
+  # user table during a routine from-zero test.
   #
   # Setting `name: ${COMPOSE_PROJECT_NAME:-octo}_<vol>` (note the UNDERSCORE
   # separator — see below) makes the volume name follow the
@@ -57,13 +61,14 @@ volumes:
   #     isolated from the original `octo_*` set. `down -v` on either stack
   #     only touches its own volumes.
   #
-  # IMPORTANT: changing `name: octo` at the top of this file to
-  # `name: ${COMPOSE_PROJECT_NAME:-octo}` would let project-name overrides
-  # also rename the network / containers, but it would BREAK existing
-  # deployments whose persistent state lives under the literal `octo` project.
-  # We deliberately keep the project hardcoded to `octo` and only allow the
-  # volume names to drift, so the existing on-disk volumes remain reachable
-  # for everyone on `main`.
+  # PROJECT NAME PRECEDENCE: Compose v2 honours, in priority order,
+  # `-p <name>` on the CLI → `COMPOSE_PROJECT_NAME` env var (auto-loaded
+  # from this directory's `.env`!) → the top-level `name:` field below →
+  # the project directory name. So when a setup persists
+  # `COMPOSE_PROJECT_NAME=octo-fz` into `docker/.env`, the env var WINS
+  # over `name: octo` and the running stack — networks, container names,
+  # AND the volume entries below — all use `octo-fz`. The literal
+  # `name: octo` here is only the "no override anywhere" default.
   #
   # SEPARATOR NOTE: Compose v2 names project-scoped volumes / networks with an
   # UNDERSCORE between project and key (`<project>_<key>`) — that legacy

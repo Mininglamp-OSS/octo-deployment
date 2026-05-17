@@ -49,7 +49,7 @@ docker compose up -d                  # 卷名：octo-fz_mysql-data, …
 
 两份栈就有完全独立的 Docker volume（`octo_mysql-data` 对 `octo-fz_mysql-data`）、网络（`octo_octo-net` 对 `octo-fz_octo-net`）和容器名（`octo-mysql-1` 对 `octo-fz-mysql-1`）。任意一份的 `down -v` 只动它自己的状态。
 
-> ⚠️ **两份栈同时跑还需要分配独立的 host 端口和子网**：`COMPOSE_PROJECT_NAME` 只隔离 Docker 对象，compose 文件依然 publish 同一组 host 端口（`OCTO_HTTP_PORT`、`OCTO_HTTPS_PORT`、`OCTO_MYSQL_PORT`、`OCTO_REDIS_PORT`、`OCTO_MINIO_API_PORT`、`OCTO_MINIO_CONSOLE_PORT`、`OCTO_WUKONGIM_*_PORT`、`OCTO_SUMMARY_PORT`）并使用同一默认 bridge 子网（`OCTO_NETWORK_SUBNET=172.28.0.0/24`）。两份栈同时 live 会以 port-bind / IPAM-overlap 错误失败，除非第二份的 `.env` 也覆盖每个 `*_PORT` 并把 `OCTO_NETWORK_SUBNET` 改成不重叠的 CIDR（例如 `172.29.0.0/24`）。如果用法是「同一时刻只跑一份、第二份 clone 只是 from-zero 验证」，那就 `docker compose stop`（**不要 `down -v`**）停下栈 #1 再起栈 #2，独立卷会保护各自数据。
+> ⚠️ **两份栈同时跑还需要分配独立的 host 端口和子网**：`COMPOSE_PROJECT_NAME` 只隔离 Docker 对象，compose 文件依然 publish 同一组 host 端口（`OCTO_HTTP_PORT`、`OCTO_HTTPS_PORT`、`OCTO_MYSQL_PORT`、`OCTO_REDIS_PORT`、`OCTO_MINIO_API_PORT`、`OCTO_MINIO_CONSOLE_PORT`、`OCTO_WUKONGIM_*_PORT`、`OCTO_SUMMARY_API_PORT`）并使用同一默认 bridge 子网（`OCTO_NETWORK_SUBNET=172.28.0.0/24`）。两份栈同时 live 会以 port-bind / IPAM-overlap 错误失败，除非第二份的 `.env` 也覆盖每个 `*_PORT` 并把 `OCTO_NETWORK_SUBNET` 改成不重叠的 CIDR（例如 `172.29.0.0/24`）。如果用法是「同一时刻只跑一份、第二份 clone 只是 from-zero 验证」，那就 `docker compose stop`（**不要 `down -v`**）停下栈 #1 再起栈 #2，独立卷会保护各自数据。
 
 ### `docker compose down -v` 之前——先确认你要删的是什么
 
@@ -92,8 +92,8 @@ docker ps --filter 'name=octo' --format '{{.Names}}'
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # 交互式向导
-cd docker && docker compose up -d --wait    # 等所有服务 healthy（首次启动 60-120s）
-cd .. && ./setup.sh --verify                # 端到端 smoke test
+(cd docker && docker compose up -d --wait)  # subshell：保持在 repo 根目录
+./setup.sh --verify                         # admin login + presign PUT 端到端检查
 ```
 
 `setup.sh` 通过 `ifconfig.me` 自动探测公网 IP。如果主机有公网 IP（云 VM、有公网 IPv4 的裸金属），交互向导会把探测到的 IP 作为 `OCTO_DOMAIN` 的默认建议——有真正的 DNS 名时填进去，没有就直接用 IP 跑「纯 IP」部署。
@@ -102,7 +102,7 @@ cd .. && ./setup.sh --verify                # 端到端 smoke test
 
 ```bash
 ./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d --wait
+(cd docker && docker compose up -d --wait)
 ./setup.sh --verify
 ```
 
@@ -110,7 +110,7 @@ cd docker && docker compose up -d --wait
 
 ```bash
 ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d --wait
+(cd docker && docker compose up -d --wait)
 ```
 
 `setup.sh` 写出含轮换随机密钥的 `docker/.env` 和自动生成的 `OCTO_ADMIN_PWD`，并**在最后打印 admin URL + 密码**，免得你回头去 grep `.env`。这是从空 checkout 到 `(healthy)` 栈无需手改任何东西的唯一路径。
@@ -130,11 +130,27 @@ cd docker && docker compose up -d --wait
 1. `docker compose ps` 没有 `(unhealthy)` 容器
 2. nginx vhost up（`GET /_nginx_up`）
 3. octo-server REST（`GET /api/v1/health`）
-4. octo-matter（`GET /matter/health`）
-5. 经 nginx 访问 MinIO（`GET /minio/minio/health/live`）
+4. octo-matter（`GET /matter/health`）——**计入** 失败
+5. 经 nginx 访问 MinIO（`GET /minio/health/live`）
 6. admin SPA 可达（`GET /admin/`）
+7. **admin 登录**（`POST /api/v1/manager/login`，用 `.env` 里的
+   `OCTO_ADMIN_PWD` 以 `superAdmin` 身份）——验证 octo-server + MySQL +
+   bcrypt + Redis 缓存这条链
+8. **预签名 PUT 凭据签发**（`GET /api/v1/file/upload/credentials`）——
+   验证 octo-server 的 MinIO IAM 凭据路径
+9. **1 字节 PUT 到预签名 URL**——验证 nginx 原样转发 SigV4 路径以及
+   MinIO 接受签名（双端口形态下 29000 被防火墙挡时图片消息静默丢失走
+   的就是这条路径，见 OOTB-BUG-2026-05-17-001）。
 
-任何步骤失败 exit code 非 0。这是用来在新机器上确认「端到端真的能用」的命令——区别于「容器起来了」。
+任何步骤失败 exit code 非 0。第 7-9 步需要 host 上有 `python3` 来解析 JSON；
+没有的话脚本会 warn 并跳过这三步（HTTP reachability 仍会跑）。这是用来
+在新机器上确认「端到端真的能用」的命令——区别于「容器起来了」。
+
+第 9 步会在 `file` bucket 留下一个 1 字节哨兵对象。想要完全干净的状态可以手动删：
+
+```bash
+docker exec ${COMPOSE_PROJECT_NAME:-octo}-minio-1 mc rm local/file/octo-verify-<timestamp>-<pid>.txt
+```
 
 ### 卸载 / 重置
 
@@ -279,7 +295,7 @@ location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avata
 - 每个预签名 URL 的**短 TTL**（分钟级，不是天级），
 - octo-server 在 `/api/v1/file/*` 前的鉴权层。
 
-nginx 里还保留一个仅供诊断的 `/minio/` location（如 `curl http://host:28080/minio/minio/health/live`），**不**用于客户端对象流量。
+nginx 里还保留一个仅供诊断的 `/minio/` location（如 `curl http://host:28080/minio/health/live`），**不**用于客户端对象流量。
 
 ### 双端口 advanced override
 
