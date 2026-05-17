@@ -98,91 +98,129 @@ compose_supports_wait() {
   return 1
 }
 
-# R6 hardening (YUJ-997): shared "fatal state" detector for
-# `compose ps` output. Extracted from `compose_poll_healthy` so that
-# `--verify` step 1 (container health) can reuse the same logic that
-# the manual health poll already runs at `up` time. Previously
-# `--verify` only grep-ed for `(unhealthy)`, so a service that had
-# crash-looped after `up` (`Restarting (1)` / `Exited (1)` / `Dead`)
-# slipped through and `--verify` printed PASS for a half-dead stack.
+# Shared "expected services vs actual states" contract checker. Used by
+# both `compose_poll_healthy()` (Compose < 2.20 fallback) and `--verify`
+# step 1 (container health) so the two paths CANNOT diverge: whatever
+# the fallback poll accepts as "healthy" is exactly what `--verify`
+# accepts post-deploy.
 #
-# Input  : stdin = `{{.Name}} {{.Status}}` lines (one per container)
-#          $1    = (optional) failed-container output sink (declared by
-#                   caller with `local`); when set, the names of
-#                   services in fatal states are written to it for the
-#                   caller's diagnostic output.
-# Output : prints failing lines to the named sink if non-empty.
-# Returns: 0 if no fatal state, 1 if at least one container is in
-#          Exited(non-zero) / Restarting / Dead (one-shot services
-#          preflight / minio-init are exempted — see below).
+# Contract (per docs/dispatch.md item 9: "every long-running service
+# must be healthy"):
 #
-# One-shot services (preflight, minio-init) intentionally finish as
-# `Exited (0)` once they have done their job — those exits are
-# expected, NOT failures. They are excluded from the failure-state
-# match via the service-name filter below (default compose container
-# naming is `<project>-<service>-<replica>`, e.g.
-# `octo-preflight-1` / `octo-minio-init-1`, so we anchor on
-# `-(preflight|minio-init)-`). Note also that `Exited (0)` from a
-# long-running service is *still* a failure here, because none of the
-# non-one-shot services should ever exit voluntarily — that case is
-# caught by the broader `Exited \([1-9]` clause (a service that exits
-# 0 mid-run is a packaging bug, not OOTB; we accept the residual gap
-# in exchange for not false-positive-ing the one-shots).
-check_compose_running_states() {
-  local statuses="$1" failed=""
-  failed="$(printf '%s\n' "${statuses}" \
-              | grep -vE -- '-(preflight|minio-init)-.*Exited \(0\)' \
-              | grep -E 'Exited \([1-9]|Restarting|Dead' || true)"
-  if [[ -n "${failed}" ]]; then
-    printf '%s\n' "${failed}"
+#   long-running service (anything not in the one-shot allowlist):
+#     PASS   →  status starts with `Up ` AND has no `(unhealthy)` and
+#               no `(health: starting)` suffix (i.e. running and either
+#               healthy or with no healthcheck defined).
+#     WAIT   →  `Up …(unhealthy)` or `Up …(health: starting)`
+#               (transient — pollers should keep waiting; `--verify`
+#               treats this as a failure).
+#     FATAL  →  `Created`, `Exited (…)` (ANY code, including 0 —
+#               long-running svcs must never exit), `Restarting (…)`,
+#               `Dead`, `Paused`, `Removing`, or missing container row.
+#
+#   one-shot service (preflight, minio-init):
+#     PASS   →  `Exited (0)` (job ran and finished cleanly).
+#     WAIT   →  still `Up …` / `Created` (job has not finished yet).
+#     FATAL  →  `Exited (n>0)`, `Restarting (…)`, `Dead`, or missing
+#               container row.
+#
+# Inputs:
+#   $1 = tab-separated `{{.Name}}\t{{.Status}}` snapshot of compose ps
+#        --all (one row per container).
+#   $2 = newline-separated list of services from
+#        `${cc} config --services`.
+#
+# stdout: zero or more rows in the form `<REASON>\t<row-or-svc-detail>`
+#         where REASON ∈ {FATAL, WAIT}. Empty stdout means the contract
+#         is fully satisfied.
+# return: 0 iff stdout is empty, 1 otherwise.
+verify_all_services_running_or_healthy() {
+  local statuses="$1" expected="$2"
+  local svc row status out=""
+  while IFS= read -r svc; do
+    [[ -z "${svc}" ]] && continue
+    # `compose ps --all` names a container `<project>-<svc>-<idx>` (or
+    # the legacy `<project>_<svc>_<idx>` form), so anchor on
+    # `[-_]<svc>[-_]<digit>` to avoid matching e.g. `wukongim` against
+    # a `wukongim-extra` clone.
+    row="$(printf '%s\n' "${statuses}" | grep -E -- "[-_]${svc}[-_][0-9]+	" | head -1 || true)"
+    if [[ -z "${row}" ]]; then
+      out="${out}FATAL	${svc}	(no container row in compose ps)
+"
+      continue
+    fi
+    status="${row#*	}"
+    case "${svc}" in
+      preflight|minio-init)
+        case "${status}" in
+          "Exited (0)"*)                 : ;;  # PASS — one-shot finished
+          Exited*|Restarting*|Dead*)     out="${out}FATAL	${row}
+" ;;
+          *)                             out="${out}WAIT	${row}
+" ;;
+        esac
+        ;;
+      *)
+        case "${status}" in
+          Up*"(unhealthy)"*|Up*"(health: starting)"*)
+            out="${out}WAIT	${row}
+"
+            ;;
+          Up*)                           : ;;  # PASS — healthy or no healthcheck
+          *)                             out="${out}FATAL	${row}
+" ;;
+        esac
+        ;;
+    esac
+  done <<< "${expected}"
+  if [[ -n "${out}" ]]; then
+    printf '%s' "${out}"
     return 1
   fi
   return 0
 }
 
-# Poll `docker compose ps` until no container is `(unhealthy)`,
-# `(health: starting)`, or in a hard-fail state (Exited(non-zero) /
-# Restarting / Dead). Used on Compose < 2.20 where `up --wait` is a
-# no-op.
+# Poll `docker compose ps` until the stack satisfies the
+# `verify_all_services_running_or_healthy` contract (every long-running
+# service `Up` and healthy/no-healthcheck, every one-shot `Exited (0)`).
+# Used on Compose < 2.20 where `up --wait` is a no-op.
 #
-# R5 hardening (YUJ-991): the original check only looked for
-# `(unhealthy)` and `(health: starting)`, so a crash-looping service
-# stuck in `Restarting (1)` or a flat-out `Exited (1)` slipped through
-# the gate and the caller printed "All services healthy" while the
-# stack was actually down. Now we also fail-fast on any container in a
-# non-zero Exited / Restarting / Dead state.
+# The poll delegates the full "expected services vs actual states"
+# check to the shared helper so this fallback path and `--verify`
+# step 1 cannot drift apart. Earlier shapes of this function only
+# looked for the presence of `(unhealthy)` / `(health: starting)`
+# substrings — that let `Created` / `Exited (0)` on a long-running
+# service / a missing container row all silently pass, violating the
+# docs/dispatch.md contract ("every long-running service must be
+# healthy").
 #
-# R6 (YUJ-997): the fatal-state detection now lives in
-# `check_compose_running_states()` so `--verify` step 1 can reuse it
-# (Jerry-Xin P1 W1: step 1 grep `(unhealthy)`-only let a crash-looped
-# container slip through `--verify`).
+# Semantics of the helper's report rows here:
+#   FATAL  → return 1 immediately (non-recoverable: Created, Exited,
+#            Restarting, Dead, missing row, etc.).
+#   WAIT   → keep polling — service is transiently `(unhealthy)` or
+#            `(health: starting)`, or a one-shot that has not yet
+#            finished. `(unhealthy)` can flap back to `(healthy)`
+#            once an upstream finishes booting (mysql is the canonical
+#            example), so a single `(unhealthy)` snapshot does NOT end
+#            the wait.
+#   none   → return 0 (contract satisfied).
 compose_poll_healthy() {
-  local cc="$1" timeout="${2:-180}" elapsed=0 statuses="" failed=""
+  local cc="$1" timeout="${2:-180}" elapsed=0 statuses="" expected="" report=""
+  expected="$(cd "${DOCKER_DIR}" && ${cc} config --services 2>/dev/null | sort -u || true)"
+  if [[ -z "${expected}" ]]; then
+    err "compose config --services produced no output — cannot validate stack health."
+    return 1
+  fi
   while (( elapsed < timeout )); do
-    # `--format '{{.Name}} {{.Status}}'` gives us both the container name
-    # (to filter one-shots) and the status string in one shot. Sticking
-    # to a single `compose ps` call per iteration keeps the poll cheap.
-    statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Name}} {{.Status}}' 2>/dev/null || true)"
+    statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Name}}	{{.Status}}' 2>/dev/null || true)"
     if [[ -n "${statuses}" ]]; then
-      # Hard-fail only on terminal states (Exited(non-zero) / Restarting / Dead).
-      # `(unhealthy)` is intentionally NOT a hard fail here: per
-      # `docker compose up --wait --wait-timeout` semantics (which this
-      # fallback mirrors for Compose < 2.20), a single `(unhealthy)`
-      # snapshot does not end the wait — the container may flap back to
-      # `(healthy)` once its upstream finishes booting (mysql is the
-      # canonical example). Only a `Restarting` / non-zero `Exited`
-      # state — or running out the timeout — ends the wait with a
-      # failure. YUJ-1019 codex review P1 #2.
-      if ! failed="$(check_compose_running_states "${statuses}")"; then
-        echo "FATAL: service(s) in failed state:" >&2
-        printf '%s\n' "${failed}" | sed 's/^/    /' >&2
-        return 1
-      fi
-      # Healthy iff there is no `(unhealthy)` AND no `(health: starting)`
-      # in the snapshot. If either is present, keep polling until the
-      # timeout expires (do NOT early-return).
-      if ! echo "${statuses}" | grep -qE '\(unhealthy\)|\(health: starting\)'; then
+      if report="$(verify_all_services_running_or_healthy "${statuses}" "${expected}")"; then
         return 0
+      fi
+      if printf '%s\n' "${report}" | grep -q '^FATAL	'; then
+        err "FATAL: service(s) in non-recoverable state:"
+        printf '%s\n' "${report}" | grep '^FATAL	' | sed 's/^FATAL	/    /' >&2
+        return 1
       fi
     fi
     sleep 5
@@ -246,7 +284,7 @@ _compose_dots_stop() {
 # 128+SIGNUM code so the script terminates cleanly instead of silently
 # continuing into the success/diagnostic path. Without this, an operator
 # Ctrl-C during `compose up --wait` would clean the dots and then fall
-# through into the success banner. Codex review P1 #1.
+# through into the success banner.
 #
 # Note: we `exit` rather than `kill -s "${sig}" "$$"` because the latter
 # is unreliable here — bash only delivers the re-raised signal at the
@@ -345,7 +383,6 @@ compose_up_and_wait() {
     # because they gate the rest of the stack. So instead of stripping
     # them by name, we strip the specific benign one-shot status
     # (`Exited (0)`) and let everything else flow into the fail grep.
-    # Codex review P2 #1 (R2 follow-up).
     failing_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
                       | grep -vE '^(preflight|minio-init)	Exited \(0\)' \
                       | grep -E '	.*(\(unhealthy\)|Restarting|Dead|Exited \([1-9])' \
@@ -358,9 +395,23 @@ compose_up_and_wait() {
         err "    (cd docker && ${cc} logs --tail 200 ${svc})"
       done <<< "${failing_svcs}"
     else
+      # No hard-fail state — the timeout fired while at least one
+      # container was still in `(health: starting)`. Surface the
+      # concrete service names so the operator does not have to
+      # eyeball the ps snapshot above to find them.
+      starting_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
+                        | grep -E '\(health: starting\)' \
+                        | awk -F'	' '{print $1}' | sort -u || true)"
       err "No service is in a hard-fail state — at least one is still in"
       err "(health: starting) at the ${timeout}s mark. Re-check shortly, or:"
-      err "    (cd docker && ${cc} logs --tail 200 <still-starting-service>)"
+      if [[ -n "${starting_svcs}" ]]; then
+        while IFS= read -r svc; do
+          [[ -z "${svc}" ]] && continue
+          err "    (cd docker && ${cc} logs --tail 200 ${svc})"
+        done <<< "${starting_svcs}"
+      else
+        err "    (cd docker && ${cc} logs --tail 200 <svc>)"
+      fi
       err "Common culprits on a cold boot are mysql / wukongim / minio."
     fi
   fi
@@ -548,69 +599,31 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   if ! ( cd "${DOCKER_DIR}" && ${CC} ps --all >/dev/null 2>&1 ); then
     fail "docker compose ps failed — is the stack up?"; ((fails++)) || true
   else
-    # R8 (YUJ-1002 / Jerry-Xin + lml W2): the previous form used
-    # `${CC} ps --status running` (and then `${CC} ps` without
-    # `--all`) for the actual status snapshot. A cleanly stopped
-    # container (`docker compose stop wukongim` → `Exited (0)`) is
-    # NOT in the running set and ALSO not in the default `ps`
-    # output, so step 1 saw an empty list and "passed" while the
-    # service was gone. The fatal-state grep only catches
-    # `Exited \([1-9])` / `Restarting` / `Dead`; an `Exited (0)`
-    # from a long-running service does not match.
-    #
-    # Fix is two-pronged: (a) use `ps --all` so stopped containers
-    # appear in the snapshot, and (b) cross-check the snapshot
-    # against `compose config --services` so a service whose
-    # container disappeared entirely (a `docker rm` or never-
-    # started one-shot turned long-running by image change) still
-    # counts as a fail. The original `(unhealthy)` + fatal-state
-    # checks then run over the broader set so a `Restarting (1)`
-    # in the `--all` view still trips R6's detector.
+    # Delegate the full "expected services vs actual states" contract
+    # check to `verify_all_services_running_or_healthy` — the same
+    # helper that the `compose up --wait` fallback poll uses, so a
+    # snapshot the poll accepted is also the snapshot --verify
+    # accepts. `--all` is required so a cleanly stopped long-running
+    # container (`docker compose stop wukongim` → `Exited (0)`) still
+    # appears in the snapshot; without it, the row vanishes and step
+    # 1 would "pass" while the service was gone.
     statuses="$(cd "${DOCKER_DIR}" && ${CC} ps --all --format '{{.Name}}	{{.Status}}' 2>/dev/null || true)"
     expected_services="$(cd "${DOCKER_DIR}" && ${CC} config --services 2>/dev/null | sort -u || true)"
-    missing_or_stopped=""
-    # Detect: (1) expected services that produced no container row at
-    # all, (2) services whose container is present but in `Exited (0)`
-    # (clean stop of a long-running service — invisible to the fatal
-    # grep below, but still a deployment failure for everything except
-    # the `preflight` / `minio-init` one-shots, which are *meant* to
-    # finish 0).
-    if [[ -n "${expected_services}" ]]; then
-      while IFS= read -r svc; do
-        [[ -z "${svc}" ]] && continue
-        # one-shots are *expected* to be Exited (0) post-run
-        case "${svc}" in
-          preflight|minio-init) continue ;;
-        esac
-        # `compose ps --all` names a container `<project>-<svc>-<idx>`
-        # (or, with the legacy underscore separator, `<project>_<svc>_<idx>`),
-        # so anchor the match on `-<svc>-` / `_<svc>_` to avoid
-        # false-matching `wukongim` against a `wukongim-extra` clone.
-        row="$(printf '%s\n' "${statuses}" | grep -E -- "[-_]${svc}[-_][0-9]+	" || true)"
-        if [[ -z "${row}" ]]; then
-          missing_or_stopped="${missing_or_stopped}${svc}	(no container)
-"
-        elif printf '%s\n' "${row}" | grep -qE 'Exited \(0\)'; then
-          missing_or_stopped="${missing_or_stopped}${row}
-"
-        fi
-      done <<< "${expected_services}"
-    fi
-    failed_states=""
-    if ! failed_states="$(check_compose_running_states "${statuses}")"; then
-      fail "service(s) in fatal state (Exited/Restarting/Dead):"
-      printf '%s\n' "${failed_states}" | sed 's/^/    /'
-      ((fails++)) || true
-    elif [[ -n "${missing_or_stopped}" ]]; then
-      fail "service(s) missing or cleanly stopped (Exited 0 on long-running service):"
-      printf '%s' "${missing_or_stopped}" | sed 's/^/    /'
+    if [[ -z "${expected_services}" ]]; then
+      fail "compose config --services produced no output — cannot validate stack health."
       ((fails++)) || true
     else
-      unhealthy="$(printf '%s\n' "${statuses}" | grep -E '\(unhealthy\)' || true)"
-      if [[ -n "${unhealthy}" ]]; then
-        fail "unhealthy service(s):"; printf '%s\n' "${unhealthy}" | sed 's/^/    /'; ((fails++)) || true
-      else
+      verify_report=""
+      if verify_report="$(verify_all_services_running_or_healthy "${statuses}" "${expected_services}")"; then
         ok
+      else
+        # At `--verify` time the stack is supposed to be steady, so
+        # we treat BOTH `FATAL` and `WAIT` rows as failures (a
+        # service that is still `(health: starting)` minutes after
+        # `up` is not healthy).
+        fail "service(s) failed health contract (expected vs actual):"
+        printf '%s\n' "${verify_report}" | sed 's/^/    /'
+        ((fails++)) || true
       fi
     fi
   fi
