@@ -22,8 +22,8 @@ DB / cache / object store.
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive prompts
-(cd docker && docker compose up -d --wait)  # subshell: stay in repo root
-./setup.sh --verify                         # smoke test (admin login + presign PUT)
+sudo ./setup.sh --up                        # provision stack
+sudo ./setup.sh --smoke-test                # smoke test (admin login + presign PUT). Alias: --verify (deprecated).
 
 # Open in browser, password printed at the end of setup.sh:
 #   Admin: http://<your-domain>:28080/admin/   (user: superAdmin)
@@ -180,8 +180,8 @@ Recommended (interactive setup):
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive prompts
-(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
-./setup.sh --verify                         # admin login + presign PUT end-to-end
+sudo ./setup.sh --up                        # provision stack
+sudo ./setup.sh --smoke-test                # admin login + presign PUT end-to-end (alias: --verify, deprecated)
 ```
 
 `setup.sh` auto-detects the public IP via `ifconfig.me`. If you run
@@ -194,8 +194,8 @@ Or non-interactive:
 
 ```bash
 ./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
-(cd docker && docker compose up -d --wait)
-./setup.sh --verify
+sudo ./setup.sh --up
+sudo ./setup.sh --smoke-test
 ```
 
 Or, on a fresh host where you want a single command to do both, use
@@ -220,7 +220,7 @@ To enable the optional LLM summary services, add `--summary`:
 
 ```bash
 ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-(cd docker && docker compose up -d --wait)
+sudo ./setup.sh --up
 ```
 
 `setup.sh` writes `docker/.env` with rotated random secrets and a
@@ -233,16 +233,60 @@ Once healthy, the stack is reachable through nginx on
 `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (default `http://octo.local:28080`).
 Add an `/etc/hosts` entry for `octo.local` if you keep the default domain.
 
-### `setup.sh --verify` smoke test
+### `setup.sh --smoke-test` smoke test
 
-After `docker compose up -d --wait` reports all services healthy, run
-the smoke test to confirm the *external* surface actually works:
+After `sudo ./setup.sh --up` reports all services healthy, run the
+smoke test to confirm the *external* surface actually works:
 
 ```bash
-./setup.sh --verify
+sudo ./setup.sh --smoke-test
 ```
 
-The script probes (and prints PASS/FAIL for each):
+> **Why sudo?** `docker/.env` stays at its generated mode 600 / owned
+> by root (whoever ran `sudo ./setup.sh --up`). Both `--up` and
+> `--smoke-test` require sudo because the file contains every
+> high-value secret on the stack — `MYSQL_ROOT_PASSWORD`,
+> `MINIO_ROOT_PASSWORD`, `OCTO_MASTER_KEY`, `OCTO_ADMIN_PWD`,
+> `OCTO_NOTIFY_INTERNAL_TOKEN`, `OCTO_WUKONGIM_MANAGER_TOKEN` — plus
+> Compose control inputs like `COMPOSE_PROJECT_NAME` that the next
+> privileged `docker compose` run will consume verbatim. Earlier
+> revisions chmod'd / chown'd the file to widen access for a
+> sudo-less `--smoke-test`; that widened *write* authority on
+> authoritative deployment config, so R5 reverted to the simplest
+> shape: ".env stays root:600 (default). Both `--up` and
+> `--smoke-test` require sudo because the file contains MySQL/MinIO/
+> admin credentials and Compose control inputs." If you forget sudo,
+> `env_get()` surfaces a clear remediation (`Re-run as: sudo
+> ./setup.sh --smoke-test`) instead of the previous nine cryptic
+> probe FAILs.
+
+> **Naming note** — the original spelling was `--verify`. It is
+> retained as a deprecated alias (prints a one-line yellow notice and
+> runs identically) for at least 2 releases and is scheduled for
+> removal in v2.0+. New automation should prefer `--smoke-test`.
+>
+> **Why not "dry-run"?** This command is **not** read-only. It
+> performs 1 POST (admin login), 1 GET (presign issuance), and 1 PUT
+> (1-byte sentinel object that lands in the MinIO `file` bucket as
+> `octo-verify-<timestamp>-<pid>.txt`). It exercises real auth +
+> real storage; calling it a "verify" or "dry-run" understated the
+> side-effects.
+
+Output is grouped into two failure-domain banners so a FAIL tells you
+immediately which layer to investigate:
+
+- `[infra] container + nginx routing (step 1-7)` — container health,
+  nginx vhost, octo-server REST, matter, MinIO health, admin SPA,
+  web SPA. A FAIL here is a **platform** problem: a container is
+  down, nginx isn't reverse-proxying, or a host port is firewalled.
+  Look at `docker compose ps` / `docker compose logs` first.
+- `[user-path] auth + WS + presigned PUT (step 8-11)` — WuKongIM `/ws`,
+  admin login, presign issuance, signed PUT. A FAIL here is a
+  **contract** problem: the platform is up but auth is wired wrong,
+  MinIO IAM creds desynced, or SigV4 signing mismatches. Look at
+  octo-server + MinIO together, not at nginx.
+
+The 11 probes (PASS/FAIL printed for each):
 
 1. `docker compose ps` reports no `(unhealthy)` containers, no fatal
    states (`Exited (1)` / `Restarting` / `Dead`), and no expected
@@ -272,7 +316,7 @@ The script probes (and prints PASS/FAIL for each):
     OOTB-BUG-2026-05-17-001).
 
 Exit code is non-zero on any failure. `python3` is a **hard
-prerequisite** of `--verify` — step 8 (WuKongIM `/ws` upgrade probe)
+prerequisite** of `--smoke-test` — step 8 (WuKongIM `/ws` upgrade probe)
 opens a raw socket from python3, and steps 9-11 (admin login, presign
 issuance, SigV4 PUT) parse JSON via `python3 -c 'import json'`.
 Silently skipping the JSON-parse steps was the gap that hid
@@ -288,7 +332,7 @@ place — the bundled `minio/minio` image does NOT ship the `mc` client
 (`mc` lives in the separate `minio/mc` image, which is only used by the
 one-shot `minio-init` container), so the obvious
 `docker exec <project>-minio-1 mc rm ...` command would always fail. A
-single byte per `--verify` run is well below noise; if you absolutely
+single byte per `--smoke-test` run is well below noise; if you absolutely
 need a clean bucket, run `mc` from its own image against the bucket via
 the project's docker network, or hit MinIO's S3 DELETE API with the
 admin credentials in `docker/.env`.

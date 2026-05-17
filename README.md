@@ -62,8 +62,8 @@ See [LICENSE](./LICENSE) for the full Apache 2.0 license terms.
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # interactive: auto-detects public IP, generates all secrets
-(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
-./setup.sh --verify                         # admin login + presign PUT end-to-end
+sudo ./setup.sh --up                        # provision stack (sudo for docker engine + .env write)
+sudo ./setup.sh --smoke-test                # verify (sudo to read .env; alias: --verify, deprecated)
 ```
 
 Or, on a fresh host, fold the two steps into one with `--up` (GH#32) —
@@ -80,9 +80,14 @@ names, and a `logs <svc>` hint for each, then exits 1. It prints a
 ```
 
 `setup.sh` prints the admin URL + superAdmin password at the end of
-the run. The password is also persisted to `docker/.env` (mode 600) —
-treat that file as a secret and rotate the password from the admin UI
-after first login (see `docker/README.md` "First-admin bootstrap").
+the run. The password is also persisted to `docker/.env` (mode 600,
+**owned by root**) — treat that file as a secret and rotate the
+password from the admin UI after first login (see `docker/README.md`
+"First-admin bootstrap"). Both `--up` and `--smoke-test` require sudo
+because the file contains MySQL/MinIO/admin credentials and Compose
+control inputs (`COMPOSE_PROJECT_NAME`, `OCTO_MASTER_KEY`,
+`OCTO_ADMIN_PWD`, …) — user-write would silently alter the next
+privileged `docker compose` run.
 The OOTB stack is
 single-port for clients: only **TCP 28080** (`OCTO_HTTP_PORT`, the
 nginx HTTP vhost) needs to be open. With HTTPS the client port becomes

@@ -4,14 +4,16 @@
 # -----------------------------------------------------------------------------
 # Generates docker/.env from docker/.env.example with rotated secrets,
 # user-chosen domain/IP, and optional TLS / LLM summary toggles. Also
-# offers post-deploy smoke test (`--verify`) and clean uninstall
-# (`--uninstall`) subcommands.
+# offers post-deploy smoke test (`--smoke-test`, with `--verify` kept
+# as a deprecated alias) and clean uninstall (`--uninstall`)
+# subcommands.
 #
 # Usage:
 #   ./setup.sh                        # interactive mode
 #   ./setup.sh --non-interactive      # all defaults + auto-detect
 #   ./setup.sh --domain octo.example.com --ip 1.2.3.4 --https --summary
-#   ./setup.sh --verify               # smoke-test an already-up stack
+#   ./setup.sh --smoke-test           # smoke-test an already-up stack
+#   ./setup.sh --verify               # deprecated alias for --smoke-test
 #   ./setup.sh --uninstall            # tear down the stack (interactive)
 #
 # Requires: bash ≥4, openssl, docker, docker compose
@@ -28,6 +30,13 @@ FORCE_OVERWRITE=false
 RUN_UP=false
 RUN_VERIFY=false
 RUN_UNINSTALL=false
+# Track whether --verify (the deprecated alias) was the flag that enabled
+# the smoke test, so the run can print a one-time yellow deprecation notice
+# while still doing the exact same work as --smoke-test. RUN_VERIFY remains
+# the single source of truth for "should we run the smoke test" — both
+# --smoke-test and --verify set it true, so existing automation keeps
+# working unchanged.
+VERIFY_ALIAS_USED=false
 
 # Track which configuration values were supplied explicitly via CLI flags
 # so the interactive prompts (when invoked without --non-interactive)
@@ -56,6 +65,30 @@ fatal() { err "$@"; exit 1; }
 step()  { printf '%s[verify]%s %s ... ' "${CYAN}" "${RESET}" "$*"; }
 ok()    { printf '%sPASS%s\n' "${GREEN}" "${RESET}"; }
 fail()  { printf '%sFAIL%s — %s\n' "${RED}" "${RESET}" "${1:-}"; }
+
+# Group banner printed inside --smoke-test / --verify to visually segment
+# the 11 probes into two failure-domain buckets:
+#
+#   [infra]     — steps 1-7: container health + nginx routing + SPA reachability.
+#                 Failures here mean the platform itself is unhealthy (a
+#                 container is down, nginx isn't reverse-proxying, or a
+#                 host port is firewalled). The operator should look at
+#                 `docker compose ps` / `docker compose logs` first.
+#   [user-path] — steps 8-11: WuKongIM /ws upgrade + admin login + presign
+#                 issuance + signed PUT. Failures here mean the platform
+#                 is up but the end-to-end business contract is broken
+#                 (auth wired wrong, MinIO IAM creds desynced, SigV4
+#                 signing mismatch). The operator should look at
+#                 octo-server + MinIO together, not at nginx.
+#
+# This split lets a `[user-path]` FAIL with all `[infra]` PASS short-circuit
+# the "is it a deployment problem or a contract problem" question that
+# every PR#30 review round had to re-answer.
+banner() {
+  printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+  printf '%s  %s%s\n' "${BOLD}" "$*" "${RESET}"
+  printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+}
 
 # Portable in-place sed (GNU + BSD/macOS compatible).
 sed_inplace() {
@@ -446,6 +479,33 @@ env_get() {
   if [[ ! -f "${ENV_OUT}" ]]; then
     echo "${default}"; return 0
   fi
+  # Bug 2B (YUJ-1020): a `.env` that exists but is unreadable by the
+  # current user (typical when --up ran under sudo and left the file
+  # `-rw------- root:root`, then a non-root user runs --smoke-test /
+  # --verify) makes the `grep` below silently emit empty output. Every
+  # downstream env_get call returns its default, and the smoke test
+  # then exercises octo.local:28080 with an empty admin password and
+  # nine probes FAIL with cryptic "no token in login response" /
+  # "no uploadUrl in credentials response" messages that send the
+  # operator hunting for a stack problem that does not exist.
+  # Detect EACCES once, up front, and surface a single actionable
+  # remediation line instead.
+  #
+  # R5 (YUJ-1020 / Jerry-Xin): the previous remediation suggested
+  # `chown` to the current user, which widened *write* authority on a
+  # file Compose treats as authoritative deployment config (silent
+  # user-edits to COMPOSE_PROJECT_NAME / MYSQL_ROOT_PASSWORD /
+  # MINIO_ROOT_PASSWORD / OCTO_MASTER_KEY would be consumed by the
+  # next privileged `docker compose` run). Final resolution: keep
+  # .env at root:600 (the default) and require sudo for --smoke-test,
+  # mirroring the sudo requirement of --up. Point the operator at the
+  # one-line `sudo ./setup.sh --smoke-test` fix; document the
+  # ownership-restore command as a fallback only.
+  if [[ ! -r "${ENV_OUT}" ]]; then
+    fatal "docker/.env exists but is not readable by user $(id -un).
+Either re-run as root: sudo ./setup.sh --smoke-test
+Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.env (restore default)"
+  fi
   local v
   v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
   # Strip one matched pair of surrounding "" or '' (no nesting / no escape
@@ -533,14 +593,22 @@ while [[ $# -gt 0 ]]; do
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
     --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
-    --up)        RUN_UP=true; shift ;;
-    --verify)    RUN_VERIFY=true; shift ;;
-    --uninstall) RUN_UNINSTALL=true; shift ;;
+    --up)         RUN_UP=true; shift ;;
+    --smoke-test) RUN_VERIFY=true; shift ;;
+    # `--verify` is the original spelling, retained as a deprecated alias
+    # so existing automation / docs / muscle-memory keep working. Sets
+    # RUN_VERIFY exactly like --smoke-test does; the only behavioural
+    # difference is a one-line yellow deprecation notice printed at the
+    # very top of the smoke-test run (see VERIFY_ALIAS_USED below). The
+    # alias is contracted to stay for at least 2 releases (v1.x line)
+    # and is slated for removal in v2.0+.
+    --verify)     RUN_VERIFY=true; VERIFY_ALIAS_USED=true; shift ;;
+    --uninstall)  RUN_UNINSTALL=true; shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>]
                 [--https] [--summary] [--up]
-       setup.sh --verify
+       setup.sh --smoke-test (or --verify, deprecated alias)
        setup.sh --uninstall
 
 Generation:
@@ -568,8 +636,18 @@ Generation:
                       take 60-90s).
 
 Smoke test / tear-down (work against an already-existing docker/.env):
-  --verify            Probe nginx / octo-server / matter / object-store
+  --smoke-test        Probe nginx / octo-server / matter / object-store
                       paths end-to-end. Exits non-zero on any failure.
+                      Output is grouped into [infra] (steps 1-7) and
+                      [user-path] (steps 8-11) so a failure tells you
+                      immediately which failure-domain to investigate.
+                      Real side-effects: 1 POST (admin login), 1 GET
+                      (presign issuance), 1 PUT (1-byte sentinel object
+                      left in the MinIO `file` bucket). Not a dry-run.
+  --verify            Deprecated alias for --smoke-test. Prints a yellow
+                      deprecation notice and otherwise runs identically.
+                      Kept for at least 2 releases; slated for removal
+                      in v2.0+. Prefer --smoke-test in new automation.
   --uninstall         Tear down the stack. Interactively offers three
                       granularity levels (full / data-only / containers-only).
 
@@ -586,6 +664,17 @@ done
 
 # Subcommand short-circuits — run and exit before the generation path.
 if [[ "${RUN_VERIFY}" == "true" ]]; then
+  # Scope 3.1 (YUJ-1020) — R5 nit (Jerry-Xin): print the --verify
+  # deprecation note BEFORE any check that can fatal-exit (file
+  # existence, EACCES preflight, curl prereq). Otherwise an operator
+  # running the deprecated `--verify` against a root:600 .env without
+  # sudo would fatal in env_get() and never see the deprecation
+  # signal, prolonging the rename rollout. The note only prints when
+  # the alias was actually used, so the canonical `--smoke-test` path
+  # is unaffected.
+  if [[ "${VERIFY_ALIAS_USED}" == "true" ]]; then
+    printf '%snote: --verify is an alias for --smoke-test (will be removed in v2.0+).%s\n\n' "${YELLOW}" "${RESET}"
+  fi
   if [[ ! -f "${ENV_OUT}" ]]; then
     fatal "docker/.env not found. Run setup.sh first to generate it."
   fi
@@ -601,13 +690,19 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # auto-detection has a 127.0.0.1 fallback; --verify has no such
   # fallback.
   if ! command -v curl >/dev/null 2>&1; then
-    fatal "curl is required for --verify (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --verify\`."
+    fatal "curl is required for --smoke-test (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
   fi
   CC="$(compose_cmd)"
   DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
   BASE_URL="http://${DOMAIN}:${HTTP_PORT}"
   fails=0
+
+  # Scope 3.2 (YUJ-1020): segment the 11 probes into [infra] (1-7) and
+  # [user-path] (8-11). See the `banner()` docstring above the helper
+  # for the failure-domain rationale. Inserted purely as printf banners
+  # so the existing step counters / fail accounting are untouched.
+  banner "[infra] container + nginx routing (step 1-7)"
 
   step "container health (${CC} ps)"
   if ! ( cd "${DOCKER_DIR}" && ${CC} ps --all >/dev/null 2>&1 ); then
@@ -744,6 +839,8 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # on weird WuKongIM upgrades than to false-negative on a stopped
   # container. openssl is already a hard prereq (checked above), so the
   # base64-random WS key generation is always available.
+  echo ""
+  banner "[user-path] auth + WS + presigned PUT (step 8-11)"
   step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
   # R8 (YUJ-1002 / ReviewBot P0): replace curl with a python3 socket
   # probe. The R7 form looked like
@@ -860,7 +957,7 @@ PYEOF
     # caller cannot mistake reachability-only coverage for the full
     # contract test.
     step "python3 prerequisite (admin login + presign PUT)"
-    fail "python3 is required for --verify (admin login JSON encoding + presign response parsing). Install python3 — every modern Linux distro ships it in the base image — and re-run \`setup.sh --verify\`."
+    fail "python3 is required for --smoke-test (admin login JSON encoding + presign response parsing). Install python3 — every modern Linux distro ships it in the base image — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
     ((fails++)) || true
   else
     ADMIN_USER="$(env_get OCTO_ADMIN_NAME superAdmin)"
@@ -921,7 +1018,20 @@ print(tok or "")
     if [[ -n "${TOKEN}" ]]; then
       step "issue presigned PUT (GET /api/v1/file/upload/credentials)"
       TEST_FILE="octo-verify-$(date +%s)-$$.txt"
-      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=file&filename=${TEST_FILE}&fileSize=1"
+      # Bug 1 (YUJ-1020): octo-server `modules/file/api.go:checkReq()` only
+      # accepts a fixed whitelist of `type=` values — chat / moment /
+      # momentcover / sticker / report / common / chatbg / download /
+      # workplacebanner / workplaceappicon. The old probe used `type=file`,
+      # which is NOT in the whitelist, so the server short-circuited with
+      # `{"status":400,"msg":"文件类型错误"}` (api.go:730) and the smoke
+      # test FAIL-ed at "no uploadUrl in credentials response" 100% of
+      # the time — never proving the SigV4 PUT path at all. `common`
+      # is the most generic / least-attribute-coupled type in the
+      # whitelist (no special bucket / no special path-shape requirement),
+      # so it is the right choice for a synthetic 1-byte sentinel.
+      # Verified: `grep -n "TypeCommon" octo-server/modules/file/const.go`
+      # → `TypeCommon Type = "common"`.
+      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=common&filename=${TEST_FILE}&fileSize=1"
       CRED_RESP="$(curl -sS --max-time 10 -H "token: ${TOKEN}" "${CRED_URL}" 2>/dev/null || true)"
       # Parse uploadUrl / contentType / contentDisposition out of the JSON.
       # Use a single python3 invocation so we can shell-eval the three
@@ -996,12 +1106,12 @@ print("UPLOAD_CD="  + shlex.quote(unwrap(d, "contentDisposition") or ""))
   echo ""
   if [[ "${fails}" -eq 0 ]]; then
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-    printf '%s  setup.sh --verify: end-to-end smoke test PASSED ✅%s\n' "${GREEN}" "${RESET}"
+    printf '%s  setup.sh --smoke-test: end-to-end smoke test PASSED ✅%s\n' "${GREEN}" "${RESET}"
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
     exit 0
   else
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-    printf '%s  setup.sh --verify: %d step(s) failed ❌%s\n' "${RED}" "${fails}" "${RESET}"
+    printf '%s  setup.sh --smoke-test: %d step(s) failed ❌%s\n' "${RED}" "${fails}" "${RESET}"
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
     err "Tail logs with: cd docker && ${CC} logs --tail 100"
     exit 1
@@ -1517,6 +1627,38 @@ if [[ "${RUN_UP}" == "true" ]]; then
   info "A '.' will print every 5s while we wait so you know the script is still alive."
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
+    # Bug 2 (YUJ-1020) — R5 final resolution: keep docker/.env at its
+    # generated state (root:600 when --up runs under sudo, which is the
+    # typical path) and require sudo for BOTH `--up` AND `--smoke-test`.
+    #
+    # R1-R4 explored permission relaxations (chmod 640, groupadd+chgrp,
+    # chown to SUDO_USER) so a non-root user could run `--smoke-test`
+    # against an --up-under-sudo .env without re-asking for sudo. Every
+    # variant widened *write* authority on a file that Compose treats
+    # as authoritative deployment config — silent user-edits to
+    # COMPOSE_PROJECT_NAME / MYSQL_ROOT_PASSWORD / MINIO_ROOT_PASSWORD
+    # / OCTO_MASTER_KEY / OCTO_ADMIN_PWD would be consumed by the next
+    # privileged `docker compose` run, which is a worse attack surface
+    # than the original "9 cryptic FAILs" UX problem.
+    #
+    # R5 resolution (Jerry-Xin's "require sudo" proposal, accepted by
+    # Coda after cross-author persuasion): no perm change here. The
+    # documented workflow becomes:
+    #     sudo ./setup.sh --up           # provision stack
+    #     sudo ./setup.sh --smoke-test   # verify
+    # Both commands need to read docker/.env (which contains
+    # MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MASTER_KEY,
+    # OCTO_ADMIN_PWD, OCTO_NOTIFY_INTERNAL_TOKEN, plus Compose control
+    # inputs like COMPOSE_PROJECT_NAME), so the sudo requirement is
+    # already implied by what these commands do. The single-shell
+    # `sudo --up && sudo --smoke-test` flow that lml2468 valued in R4
+    # is preserved verbatim — the only cost is typing 5 extra letters
+    # for the second invocation.
+    #
+    # env_get() in --smoke-test still has an EACCES preflight that
+    # surfaces a clear "Re-run as: sudo ./setup.sh --smoke-test"
+    # remediation if the operator forgets sudo (defense-in-depth for
+    # the non-sudo invocation).
   else
     # FAIL-FAST: a compose-up failure means the stack is NOT running.
     # Previously this was just a warning and the success banner below
@@ -1525,7 +1667,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # `compose_up_and_wait` already printed `ps` + a `logs <svc>` hint
     # (YUJ-1019 / GH#32) above this line, so we only need the
     # rerun-pointer here.
-    err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --verify"
+    err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --smoke-test"
     err "once the stack is healthy)."
     err "docker/.env has been written — re-running setup.sh is NOT required."
     exit 1
@@ -1587,13 +1729,13 @@ if [[ "${RUN_UP}" != "true" ]]; then
   info "Next steps:"
   echo "  1. Review docker/.env and adjust as needed"
   echo "  2. (cd docker && docker compose up -d --wait)   # subshell — keeps you in repo root"
-  echo "  3. ./setup.sh --verify    # admin login + presign PUT end-to-end check"
+  echo "  3. sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check (sudo: .env is root:600)"
   echo "  4. Visit ${ADMIN_URL}"
 else
   echo ""
   info "Smoke test:"
-  echo "  ./setup.sh --verify    # admin login + presign PUT end-to-end check"
+  echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check (sudo: .env is root:600)"
 fi
 echo ""
-printf '%s  ⚠  Admin password is saved in docker/.env (mode 600). Treat that file as a secret and rotate from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
+printf '%s  ⚠  docker/.env (mode 600, owned by root) — contains all admin/DB/MinIO secrets. Both --up and --smoke-test require sudo to read this file. Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 echo ""
