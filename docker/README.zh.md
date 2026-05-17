@@ -391,6 +391,355 @@ TS_MINIO_DOWNLOADURL=https://your.host
 
 ---
 
+## 生产 HTTPS 部署
+
+OOTB 栈在 `OCTO_HTTP_PORT`（默认 `28080`）上只跑 HTTP。生产部署推荐
+**在栈前面套一层反向代理**做 TLS 终结，而不是把 certbot 塞到栈里。
+这样证书生命周期归反向代理层管（这是它该待的地方——见下面「为什么
+不内置 certbot」），也能让你复用车间里已经在用的 Let's Encrypt /
+Cloudflare / 内部 CA 任何 workflow。
+
+下面给出三条经过实战的路径，**彼此独立——选一条匹配你环境的就行，
+不需要三个都装**。
+
+三条路径的 upstream 都是栈内 nginx 的 `http://<host>:28080`。把栈内
+nginx 限制到 loopback 上（见下面 [HTTPS 防火墙规则](#https-防火墙规则)）
+让 `28080` 不直接出公网——反向代理是唯一对外监听端口。
+
+> 💡 **三条路径都必须在 `docker/.env` 里设这几个 HTTPS URL 变量。**
+> TLS 在反向代理终结后，octo-server 仍然按下面这些变量给客户端返回
+> **绝对 URL**（预签名 MinIO PUT/GET、admin baseURL、WS 地址）。
+> 请把字面 hostname 写进去（`.env` 不做 `${...}` 二次插值）：
+>
+> ```bash
+> # docker/.env —— 套反向代理时必填
+> MINIO_SERVER_URL=https://octo.example.com
+> TS_MINIO_DOWNLOADURL=https://octo.example.com
+> TS_EXTERNAL_BASEURL=https://octo.example.com
+> OCTO_WK_WS_ADDR=wss://octo.example.com/ws        # 浏览器走 WSS
+> ```
+>
+> 三个 URL 的 scheme + host + port 必须一致——SigV4 对这个完整 URL
+> 签名，octo-server 在启动时也会校验 `TS_MINIO_DOWNLOADURL` 是 host:port
+> only（不带 path 前缀）。背景见上面 Network surface 章节的 [HTTPS 形态](#https-形态tls-终结)。
+
+### 路径 A —— Cloudflare Tunnel（推荐「我就想快速搞个 HTTPS」）
+
+零 DNS 改动、零防火墙入站端口、自动 HTTPS、白送 DDoS + CDN。唯一
+前置是域名在 Cloudflare 上（免费版就够）。
+
+```bash
+# 1. 装 cloudflared（Debian/Ubuntu）
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+  -o /tmp/cloudflared.deb
+sudo dpkg -i /tmp/cloudflared.deb
+
+# 2. 登录 —— 会弹浏览器选 Cloudflare zone
+cloudflared tunnel login
+
+# 3. 创建 tunnel（UUID + credentials JSON 落到 ~/.cloudflared/）
+cloudflared tunnel create octo
+
+# 4. 路由 DNS —— Cloudflare 自动给你建 CNAME
+cloudflared tunnel route dns octo octo.example.com
+
+# 5. 写 /etc/cloudflared/config.yml（把 step 3 输出的 UUID 替进去——
+#    `cloudflared tunnel list` 可以查到）
+sudo install -d -m 0755 /etc/cloudflared
+sudo tee /etc/cloudflared/config.yml >/dev/null <<'YML'
+tunnel: <TUNNEL-UUID>
+credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: octo.example.com
+    service: http://localhost:28080
+    originRequest:
+      connectTimeout: 30s
+      noTLSVerify: false
+  - service: http_status:404
+YML
+
+# 6. 纯语法校验（不发 Cloudflare 请求）
+#    cloudflared 在不传 --config 时自动读 /etc/cloudflared/config.yml
+sudo cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate
+
+# 7. 装 systemd 服务并启动
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+Cloudflare tunnel 在 edge 上终结 TLS，把 `https://octo.example.com/*`
+（包括 `/ws` WebSocket upgrade 和 `/{bucket}/{key}` MinIO presign PUT/GET）
+经一条出站 mTLS 隧道转发回你的 host——**主机防火墙完全不需要开任何
+入站端口**。栈内 nginx 仍然负责 bucket-name 路由，因为 Cloudflare
+原样转发 path（不 rewrite、不破签）。
+
+**请求体大小**：Cloudflare Free 版请求体上限 100 MB；Pro 200 MB；
+Business 500 MB。OOTB 的聊天图片 / 文件消息 100 MB 够用。要更大就在
+Cloudflare dashboard 里调（Rules → Configuration Rules → "Upload size
+limit"），或升 plan。
+
+**WebSocket**：`cloudflared` 自动转发 `Upgrade` / `Connection` 头——
+`/ws` 和 `/api/*` 的 long-poll fallback 直接就能用，不用配。
+
+### 路径 B —— host nginx + certbot（最常见的自托管形态）
+
+经典「这台机器上本来就跑 nginx」路径。certbot 的 `--nginx` 插件
+一并搞定证书签发 + 自动续期 + nginx reload，配完之后证书生命周期
+完全无人值守。
+
+```bash
+# 1. 装 nginx + certbot
+sudo apt-get update
+sudo apt-get install -y nginx python3-certbot-nginx
+
+# 2. 在 http{} 作用域里定义 WebSocket-upgrade map。
+#    Debian/Ubuntu 的 /etc/nginx/nginx.conf 默认 include
+#    /etc/nginx/conf.d/*.conf 进 http{}，所以扔一个小文件过去就行：
+sudo tee /etc/nginx/conf.d/connection_upgrade.conf >/dev/null <<'NGINX'
+# proxy_set_header Connection $connection_upgrade 必须配这个 map。
+# 把入站 Upgrade 头映射成 per-request 的 Connection 值：
+#   WS 握手 → "upgrade"，其它请求 → "close"。
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+NGINX
+
+# 3. 写 OCTO vhost
+sudo tee /etc/nginx/sites-available/octo.conf >/dev/null <<'NGINX'
+upstream octo_backend {
+    server 127.0.0.1:28080;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name octo.example.com;
+
+    # certbot --nginx 会在加完 443 server 块之后把这一段改写成 301 到 https://。
+    # ACME HTTP-01 和 80→443 redirect 都需要 80 端口可达。
+    location / {
+        proxy_pass http://octo_backend;
+        proxy_http_version 1.1;
+
+        # 把客户端身份转发给栈内 nginx 和应用
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # WebSocket upgrade —— /ws 和 /api long-poll fallback 都要。
+        # 不配这两行 WS 握手会静默退化到 200，聊天客户端永远连不上。
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+
+        # MinIO presign PUT —— 聊天图片 / 文件附件上传可能 10-100 MB。
+        # 这个拓扑里先卡住请求的是**主机** nginx；栈内 nginx 默认已经够宽松。
+        client_max_body_size               100M;
+
+        # 长连聊天 WebSocket。OOTB 聊天会话一开几个小时；默认 60s
+        # read_timeout 会过早断开。
+        proxy_read_timeout                 3600s;
+        proxy_send_timeout                 3600s;
+    }
+}
+NGINX
+
+sudo ln -sf /etc/nginx/sites-available/octo.conf /etc/nginx/sites-enabled/octo.conf
+
+# 4. 让 certbot 动 vhost 之前先 validate 语法
+sudo nginx -t
+
+# 5. 一次性：签证书 + 装证书 + 加 443 块 + 设自动续期
+sudo certbot --nginx -d octo.example.com \
+  --non-interactive --agree-tos -m admin@example.com --redirect
+
+# 6. 确认续期 timer 已就位（Debian/Ubuntu 出厂启用）
+sudo systemctl status certbot.timer
+sudo certbot renew --dry-run
+```
+
+`certbot --nginx` 会加上 `listen 443 ssl` 块、指向
+`/etc/letsencrypt/live/octo.example.com/` 里签好的 LE 证书、给 80 块
+加 `return 301 https://...`，并装上 `certbot.timer` 在过期前约 30 天
+自动续期。配完之后运维要做的只剩 `nginx` 和 `certbot` 包打补丁。
+
+**WebSocket 关键**：`proxy_set_header Upgrade` / `proxy_set_header
+Connection` 这一对加上 http{} 作用域的 `map $http_upgrade
+$connection_upgrade` 是 nginx WebSocket 的标准配方。少了 `map`，
+`Connection: $http_upgrade` 会在每个请求（包括非 WS）上都展开成字面
+`"upgrade"`，REST 的 keepalive 会被打断。`map` 不能省。
+
+**请求体大小**：`client_max_body_size 100M` 覆盖聊天 / 文件消息的
+MinIO presign PUT。用户要传更大的就再往上调——栈内 nginx 不会成为
+瓶颈。
+
+### 路径 C —— Caddy（单 binary，最少零件）
+
+Caddy 用一个非常短的 Caddyfile 自动签 + 自动续 Let's Encrypt 证书。
+没有 certbot、没有 timer、没有单独的 vhost-enable 仪式。
+
+```bash
+# 1. 装 Caddy（Debian/Ubuntu —— 官方签名 apt 仓库）
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update
+sudo apt-get install -y caddy
+
+# 2. 写 Caddyfile
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'CADDY'
+octo.example.com {
+    # Caddy 在第一次请求时自动给 LE 申请证书并在过期前约 30 天续期。
+    # WebSocket upgrade 是自动的 —— reverse_proxy 指令本身就转发
+    # Upgrade / Connection 头。
+    reverse_proxy 127.0.0.1:28080 {
+        # Caddy 的 reverse_proxy 自动设 Host + X-Forwarded-For /
+        # -Proto / -Host。唯一值得显式加的是 X-Real-IP，Caddy 默认
+        # 不设，但栈内 nginx + octo-server 的 access log 会读。
+        header_up X-Real-IP {remote_host}
+
+        # 长连聊天 WebSocket。OOTB 聊天一开几个小时；把超时调到默认
+        # 30s/2m 之上。
+        transport http {
+            read_timeout  1h
+            write_timeout 1h
+        }
+    }
+
+    # MinIO presign PUT —— 聊天图片 / 文件附件上传。
+    # Caddy 在 HTTP 层默认 request body 上限 10 MiB；调到跟上面两条
+    # 路径同档。
+    request_body {
+        max_size 100MB
+    }
+}
+CADDY
+
+# 3. 校验
+sudo caddy validate --config /etc/caddy/Caddyfile
+
+# 4. reload（Caddy 是热 reload —— 不掉连接）
+sudo systemctl reload caddy
+```
+
+Caddy 在一个 binary 里帮你做：
+
+- 第一次入站请求时申请 LE 证书（HTTP-01 走 :80、TLS-ALPN-01 走 :443；
+  签发期间两个端口必须公网可达）。
+- 过期前约 30 天自动续期。无 timer、无 cron。
+- 默认讲 HTTP/2 和 HTTP/3。
+- 自动转发 `Upgrade` / `Connection` 头——不用像 nginx 那样配 `map` 块。
+
+**请求体大小**：Caddy HTTP 层默认 body cap 10 MiB，比一张稍大点的
+图片小，MinIO presign PUT 直接会被卡。`request_body { max_size 100MB }`
+把它放到跟另外两条路径同档。
+
+### 为什么不在本仓库内置 certbot
+
+两个理由：
+
+1. **证书生命周期归反向代理层管，不归应用层。** 已经成规模的运维
+   都在前门有反向代理（host nginx、Caddy、Cloudflare、Traefik、云
+   LB），现成的 TLS 终结点已经在那。在这个栈里再塞 certbot 容器要么
+   (a) 跟那个前门抢 80/443、要么 (b) 走
+   `--standalone-with-cert-forward` 那种比「让现有前门 proxy 到 :28080」
+   严格更脆的方案。OOTB 的最佳点就是「我给你一个 `:28080` 上能用的 HTTP
+   栈，TLS 你用自己习惯的工具套」。
+2. **全自动 DNS-01 需要写 DNS 的凭据**，这个没办法 portable 地 ship。
+   Cloudflare API token、Route53 key、阿里云 AccessKey、内部 DNS——
+   每家配法都不一样。我们不想要一个会问你 zone 写权限的 setup 脚本。
+
+如果你确实有强需求把 TLS 终结在栈里（比如无前置代理的离线机房），
+`nginx/conf.d/octo.conf.template` 里 HTTPS server 块仍在，配套手动
+流程见 [`docker/certs/README.md`](certs/README.md)。除此之外推荐用
+上面三条反向代理路径。
+
+### HTTPS 防火墙规则
+
+套反向代理后：
+
+| 端口 | 方向 | 谁需要开 | 用途 |
+| ---- | ---- | -------- | ---- |
+| `443/tcp` | 入站 | 路径 B/C 的反向代理主机（路径 A：不需要） | 客户端 HTTPS |
+| `80/tcp`  | 入站 | 路径 B/C 的反向代理主机（路径 A：不需要） | LE HTTP-01 ACME 挑战 + HTTP→HTTPS redirect |
+| `28080/tcp` | **只限 loopback** | 栈内 nginx | upstream —— 限制到 `127.0.0.1`，不让出公网 |
+
+路径 A（Cloudflare Tunnel）**完全不需要入站端口**——隧道是出站的，
+反向代理主机的防火墙入站可以全关。
+
+路径 B 和 C 要把栈内 nginx 限制到 loopback，让只有 host 侧反向代理
+能到。最简单的形式是主机防火墙（**不用改 `docker-compose.yaml`**）：
+
+```bash
+# Debian/Ubuntu + ufw —— 路径 B / C
+sudo ufw allow 443/tcp
+sudo ufw allow 80/tcp     # 路径 B/C 才需要（Cloudflare Tunnel 不需要）
+sudo ufw deny 28080/tcp   # 拦掉外部客户端直连栈内 nginx
+sudo ufw enable
+```
+
+或者改 `docker/docker-compose.yaml` 里 nginx 的 ports 段，把
+`"${OCTO_HTTP_PORT:-28080}:80"` 改成
+`"127.0.0.1:${OCTO_HTTP_PORT:-28080}:80"`，让 Docker 一开始就只绑
+loopback（纵深防御；防 `ufw disable` 失误）。
+
+### 反向代理上的 WebSocket
+
+OCTO 在 `/ws` 上跑 WebSocket（WuKongIM 浏览器传输，聊天数据面）。
+`/api/*` 是纯 REST，**也** 必须经过不会破 HTTP/1.1 keepalive 的代理
+——long-poll fallback 假设连接保持打开。上面三条路径都覆盖了这两点：
+
+- **路径 A**（Cloudflare Tunnel）：`cloudflared` 自动转发
+  `Upgrade` / `Connection` 头——`/ws` upgrade 不用配、`/api/*`
+  keepalive 不用配。
+- **路径 B**（host nginx）：`proxy_set_header Upgrade $http_upgrade`
+  + `proxy_set_header Connection $connection_upgrade` 这一对，加上
+  http{} 作用域的 `map $http_upgrade $connection_upgrade`，是 nginx
+  的标准 WebSocket 配方。少了 `map`，`Connection: $http_upgrade` 会
+  在每个请求（包括非 WS）上展开成字面 `"upgrade"`，破 REST 的
+  keepalive。上面的 step 2 把 `map` 放在
+  `/etc/nginx/conf.d/connection_upgrade.conf` 里，在任何 vhost 之前
+  就加载到 http{} 作用域。
+- **路径 C**（Caddy）：`reverse_proxy` 指令自动转发 `Upgrade` /
+  `Connection`，不用显式配。
+
+如果 `/ws` 连接握手成功（`101 Switching Protocols`）但 ~60s 后就断
+开，问题在 `proxy_read_timeout`（nginx）或
+`transport http { read_timeout }`（Caddy）——OOTB 聊天会话开几个小
+时，3600s 是安全值。
+
+### 内部端口 vs 外部端口映射
+
+套反向代理后，把 OOTB 栈合在一起的两个端口被拆开了：
+
+| 层 | 监听 | 谁能到达 |
+| --- | ---- | -------- |
+| 反向代理（host nginx / Caddy / Cloudflare edge） | `:443`（+ `:80` 给 ACME / redirect） | 公网 |
+| 栈内 nginx（`OCTO_HTTP_PORT`） | `127.0.0.1:28080`（按上面防火墙 / 端口绑定限制后） | 只有主机 loopback |
+| 后端服务（MinIO API、MySQL、Redis、WuKongIM monitor…） | `127.0.0.1:<port>`（`OCTO_*_BIND` 默认值） | 只有主机 loopback |
+
+反向代理是**唯一**对外监听点。其它都按
+[Backing-service host bindings](#backing-service-host-bindings) 和
+[Network surface](#network-surface) 里写的待在 loopback 上。OOTB 默认
+把 `28080` 绑到 `0.0.0.0` 是给笔记本上单端口部署用的——只要前面套
+了反向代理，就立刻把它收到 loopback（防火墙或者改 compose ports，见
+上）。
+
+> 💡 **为什么不直接把栈内 nginx 绑到 `:443`？** 两个理由：(1) 那会
+> 把所有 TLS 旋钮（证书路径、cipher suite、HTTP/2、HSTS）都塞进
+> `nginx/conf.d/octo.conf.template`，那个文件本来就该是单租户的应用
+> 层关注点；(2) 这样会把证书私钥放进一个生命周期绑定到应用发版的
+> 容器里。反向代理拆出来让应用层保持「无证书」，让证书生命周期待在
+> 它该待的地方。
+
+---
+
 ## MinIO bootstrap & 凭据范围
 
 本栈带的 `octo-server` MinIO 客户端**不是** MinIO root 用户。第一次启动时，`minio` healthy 后 `minio-init` 一次性服务依次：
