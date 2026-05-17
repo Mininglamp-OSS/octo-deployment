@@ -162,7 +162,16 @@ verify_all_services_running_or_healthy() {
         ;;
       *)
         case "${status}" in
-          Up*"(unhealthy)"*|Up*"(health: starting)"*)
+          Up*"(unhealthy)"*|Up*"(health: starting)"*|Created*)
+            # `Created` on a long-running svc is the cold-boot race
+            # window: `compose up -d` ordered it after a depends_on
+            # gate (e.g. preflight exit 0, mysql health) and Compose
+            # has not yet `Start`-ed it. From `compose_poll_healthy`
+            # this is WAIT (poll again — `Created` will flip to `Up`
+            # once the gate clears); from `--verify` (stack already
+            # steady) WAIT is treated as a failure by the caller,
+            # which is what we want — a `Created` row at that point
+            # means the gate never cleared.
             out="${out}WAIT	${row}
 "
             ;;
@@ -195,14 +204,19 @@ verify_all_services_running_or_healthy() {
 # healthy").
 #
 # Semantics of the helper's report rows here:
-#   FATAL  → return 1 immediately (non-recoverable: Created, Exited,
-#            Restarting, Dead, missing row, etc.).
-#   WAIT   → keep polling — service is transiently `(unhealthy)` or
-#            `(health: starting)`, or a one-shot that has not yet
-#            finished. `(unhealthy)` can flap back to `(healthy)`
-#            once an upstream finishes booting (mysql is the canonical
-#            example), so a single `(unhealthy)` snapshot does NOT end
-#            the wait.
+#   FATAL  → return 1 immediately (non-recoverable: Exited on a
+#            long-running svc, Restarting, Dead, missing row,
+#            one-shot `Exited (n>0)`, etc.).
+#   WAIT   → keep polling — service is transiently `(unhealthy)`,
+#            `(health: starting)`, or `Created` (long-running svc
+#            still in the cold-boot race window — Compose ordered
+#            it after a depends_on gate and has not `Start`-ed it
+#            yet); or a one-shot that has not yet finished.
+#            `(unhealthy)` can flap back to `(healthy)` once an
+#            upstream finishes booting (mysql is the canonical
+#            example), so a single `(unhealthy)` snapshot does NOT
+#            end the wait. `Created` likewise flips to `Up` once
+#            the gate clears.
 #   none   → return 0 (contract satisfied).
 compose_poll_healthy() {
   local cc="$1" timeout="${2:-180}" elapsed=0 statuses="" expected="" report=""
