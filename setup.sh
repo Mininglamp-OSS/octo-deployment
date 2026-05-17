@@ -210,21 +210,84 @@ validate_compose_project_name() {
   return 0
 }
 
-# Run `up -d`, preferring `--wait` on Compose ≥ 2.20 and falling back to a
-# manual health poll on older Compose so users on legacy installs do not
-# see a hard failure. Returns the exit code of the compose call (or the
-# poll) so callers can fail-fast.
+# Default wait timeout (seconds) for `compose up -d --wait` and the
+# manual-poll fallback. Aligned at 120s after PR#30 public-IP E2E
+# (YUJ-1019 / GH#32) exposed that the previous 60s ceiling tripped on a
+# cold MySQL boot on small GCP instances. 120s comfortably covers the
+# first-time pull-and-init path on a freshly built host while still being
+# short enough to surface a stuck container instead of waiting forever.
+COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
+
+# Run `up -d`, preferring `--wait --wait-timeout` on Compose ≥ 2.20 and
+# falling back to a manual health poll on older Compose so users on
+# legacy installs do not see a hard failure. While we wait, a background
+# subshell prints a `.` every 5 seconds so the operator can SEE the
+# script is still alive on slow hosts (cold MySQL init can take 60-90s
+# during which compose itself prints nothing).
+#
+# On failure (timeout, hard error, or one or more containers ending in a
+# fatal state) we dump `compose ps` and a `logs <unhealthy-svc>` hint so
+# the operator has an immediate next step instead of a bare non-zero
+# exit. Returns the exit code of the compose call (or the poll) so
+# callers can fail-fast.
 compose_up_and_wait() {
   local cc="$1"
+  local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local rc=0 log_file dots_pid
+
+  log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
+
+  # Start the dots ticker. Sleep first so we do not print a leading dot
+  # before compose has even forked. Output to stderr so it stays
+  # visible even when stdout is being captured by a CI wrapper.
+  ( while :; do sleep 5; printf '.' >&2; done ) &
+  dots_pid=$!
+  # Guarantee the ticker is reaped on any exit path, including Ctrl-C.
+  trap 'kill "'"${dots_pid}"'" 2>/dev/null || true; wait "'"${dots_pid}"'" 2>/dev/null || true' EXIT INT TERM
+
   if compose_supports_wait "${cc}"; then
-    ( cd "${DOCKER_DIR}" && ${cc} up -d --wait )
-    return $?
+    set +e
+    ( cd "${DOCKER_DIR}" && ${cc} up -d --wait --wait-timeout "${timeout}" ) > "${log_file}" 2>&1
+    rc=$?
+    set -e
+  else
+    warn "Detected Compose < v2.20 — \`up --wait\` is unavailable, falling back to manual health poll."
+    set +e
+    ( cd "${DOCKER_DIR}" && ${cc} up -d ) > "${log_file}" 2>&1
+    rc=$?
+    set -e
+    if (( rc == 0 )); then
+      set +e
+      compose_poll_healthy "${cc}" "${timeout}"
+      rc=$?
+      set -e
+    fi
   fi
-  warn "Detected Compose < v2.20 — \`up --wait\` is unavailable, falling back to manual health poll."
-  if ! ( cd "${DOCKER_DIR}" && ${cc} up -d ); then
-    return 1
+
+  # Stop the ticker, terminate the dots line, and clear the EXIT trap so
+  # it does not double-fire (or hide a later real error) on the next
+  # script-level exit.
+  kill "${dots_pid}" 2>/dev/null || true
+  wait "${dots_pid}" 2>/dev/null || true
+  trap - EXIT INT TERM
+  printf '\n' >&2
+
+  if (( rc != 0 )); then
+    err ""
+    err "compose up did not reach healthy within ${timeout}s (rc=${rc})."
+    if [[ -s "${log_file}" ]]; then
+      err "── Last compose output (tail) ────────────────────────────────"
+      tail -n 40 "${log_file}" | sed 's/^/    /' >&2 || true
+    fi
+    err "── Current service state (docker compose ps) ────────────────"
+    ( cd "${DOCKER_DIR}" && ${cc} ps ) >&2 || true
+    err ""
+    err "Inspect the failing services' logs, e.g.:"
+    err "    (cd docker && ${cc} logs --tail 200 <unhealthy-service>)"
+    err "Common culprits on a cold boot are mysql / wukongim / minio."
   fi
-  compose_poll_healthy "${cc}" 180
+  rm -f "${log_file}" 2>/dev/null || true
+  return "${rc}"
 }
 
 # Read a value from docker/.env (defaults if missing). Used by --verify
@@ -350,8 +413,12 @@ Generation:
                       See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
-  --up                After writing .env, run `docker compose up -d --wait`
-                      and print healthy/unhealthy status for every service.
+  --up                After writing .env, run `docker compose up -d --wait
+                      --wait-timeout 120` and block until every service is
+                      healthy (or print `compose ps` + a `logs <svc>` hint
+                      and exit 1 on timeout). A '.' prints every 5 seconds
+                      while waiting so the run is visibly alive on slow
+                      hosts (cold MySQL init can take 60-90s).
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --verify            Probe nginx / octo-server / matter / object-store
@@ -1337,18 +1404,18 @@ if [[ "${RUN_UP}" == "true" ]]; then
   # process sees it even if the calling shell never did.
   export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
   echo ""
-  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — first boot can take 60-120s…"
-  if compose_up_and_wait "${CC}"; then
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
+  info "A '.' will print every 5s while we wait so you know the script is still alive."
+  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
   else
     # FAIL-FAST: a compose-up failure means the stack is NOT running.
     # Previously this was just a warning and the success banner below
     # printed anyway, which (a) misled the operator and (b) let CI /
     # automation see exit 0 when nothing was actually up.
-    err "${CC} up failed — stack is NOT running."
-    err "Run:"
-    err "    cd docker && ${CC} ps"
-    err "    cd docker && ${CC} logs --tail 100"
+    # `compose_up_and_wait` already printed `ps` + a `logs <svc>` hint
+    # (YUJ-1019 / GH#32) above this line, so we only need the
+    # rerun-pointer here.
     err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --verify"
     err "once the stack is healthy)."
     err "docker/.env has been written — re-running setup.sh is NOT required."

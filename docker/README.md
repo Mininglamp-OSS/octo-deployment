@@ -198,6 +198,21 @@ Or non-interactive:
 ./setup.sh --verify
 ```
 
+Or, on a fresh host where you want a single command to do both, use
+`--up` (added for GH#32) — `setup.sh` writes `.env` AND brings the
+stack up itself, blocking until every container is `(healthy)` (or
+exits 1 with `compose ps` + a `logs <unhealthy-svc>` hint on timeout):
+
+```bash
+./setup.sh --non-interactive --ip 1.2.3.4 --up
+./setup.sh --verify
+```
+
+`--up` uses `docker compose up -d --wait --wait-timeout 120` under
+the hood (with a manual health-poll fallback on Compose < v2.20). It
+prints a `.` every 5 seconds while waiting so the run is visibly
+alive on slow hosts (cold MySQL init can take 60-90s).
+
 To enable the optional LLM summary services, add `--summary`:
 
 ```bash
