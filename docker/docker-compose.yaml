@@ -671,7 +671,15 @@ services:
       # --- it is never a leak vector). The mounted octo-server.yaml
       # --- carries empty `external.*` placeholders so these env vars
       # --- are the single source of truth.
-      TS_EXTERNAL_BASEURL: "http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}"
+      # --- R8 (YUJ-1002 / Jerry-Xin + lml P1): wrap in `${VAR:-default}`
+      # --- so an operator who sets TS_EXTERNAL_BASEURL in `docker/.env`
+      # --- (e.g. `TS_EXTERNAL_BASEURL=https://octo.example.com:28443`
+      # --- per the HTTPS override doc in docker/README.md) actually
+      # --- takes effect. Previously this was a hard-coded
+      # --- `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` and ignored any
+      # --- `.env` override — clients then received `http://…:28080`
+      # --- back from /api responses behind an HTTPS-fronted stack.
+      TS_EXTERNAL_BASEURL: "${TS_EXTERNAL_BASEURL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}"
       TS_EXTERNAL_IP: "${OCTO_EXTERNAL_IP:-127.0.0.1}"
       # No `:-` default — an empty value here would silently drop
       # /internal/* callback HMAC verification on the octo-server side

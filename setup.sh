@@ -273,6 +273,26 @@ project_name() {
   echo "octo"
 }
 
+# R8 (YUJ-1002 / Jerry-Xin W1): same shell > .env > "octo" precedence
+# as `project_name()`, but exposed as a one-shot helper so the
+# preflight detector and the `.env` rewrite at the bottom of the
+# script can both consume it cheaply. Prior to R8 those two call
+# sites used `${COMPOSE_PROJECT_NAME:-octo}` and so SILENTLY collapsed
+# to the default `octo` whenever the operator's shell had not
+# re-exported the value — overwriting an already-persisted
+# `COMPOSE_PROJECT_NAME=octo-fz` in `docker/.env` and re-pointing the
+# stack at the `octo_*` volume set (cross-stack volume collision,
+# the exact failure mode YUJ-988 chased).
+read_existing_project_name() {
+  local from_env
+  from_env="$(env_get COMPOSE_PROJECT_NAME "")"
+  if [[ -n "${from_env}" ]]; then
+    echo "${from_env}"
+    return 0
+  fi
+  echo "octo"
+}
+
 # Resolve the project name for the destructive `--uninstall` path ONLY.
 # Unlike `project_name()`, this deliberately IGNORES the calling shell's
 # COMPOSE_PROJECT_NAME and reads strictly from docker/.env (with literal
@@ -376,22 +396,65 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   fails=0
 
   step "container health (${CC} ps)"
-  if ! ( cd "${DOCKER_DIR}" && ${CC} ps --status running >/dev/null 2>&1 ); then
+  if ! ( cd "${DOCKER_DIR}" && ${CC} ps --all >/dev/null 2>&1 ); then
     fail "docker compose ps failed — is the stack up?"; ((fails++)) || true
   else
-    # Pull `{{.Name}} {{.Status}}` once, then run BOTH checks against
-    # it: the original `(unhealthy)` grep AND the R6 fatal-state
-    # detector (`check_compose_running_states`, shared with the
-    # `up` health poll). Without the second check, a service that
-    # crash-looped after `up` (`Restarting (1)` / `Exited (1)` /
-    # `Dead`) slipped through step 1 and `--verify` printed PASS for
-    # a half-dead stack — exactly the gap Jerry-Xin flagged in PR#30
-    # R5 (P1 W1).
-    statuses="$(cd "${DOCKER_DIR}" && ${CC} ps --format '{{.Name}}	{{.Status}}' 2>/dev/null || true)"
+    # R8 (YUJ-1002 / Jerry-Xin + lml W2): the previous form used
+    # `${CC} ps --status running` (and then `${CC} ps` without
+    # `--all`) for the actual status snapshot. A cleanly stopped
+    # container (`docker compose stop wukongim` → `Exited (0)`) is
+    # NOT in the running set and ALSO not in the default `ps`
+    # output, so step 1 saw an empty list and "passed" while the
+    # service was gone. The fatal-state grep only catches
+    # `Exited \([1-9])` / `Restarting` / `Dead`; an `Exited (0)`
+    # from a long-running service does not match.
+    #
+    # Fix is two-pronged: (a) use `ps --all` so stopped containers
+    # appear in the snapshot, and (b) cross-check the snapshot
+    # against `compose config --services` so a service whose
+    # container disappeared entirely (a `docker rm` or never-
+    # started one-shot turned long-running by image change) still
+    # counts as a fail. The original `(unhealthy)` + fatal-state
+    # checks then run over the broader set so a `Restarting (1)`
+    # in the `--all` view still trips R6's detector.
+    statuses="$(cd "${DOCKER_DIR}" && ${CC} ps --all --format '{{.Name}}	{{.Status}}' 2>/dev/null || true)"
+    expected_services="$(cd "${DOCKER_DIR}" && ${CC} config --services 2>/dev/null | sort -u || true)"
+    missing_or_stopped=""
+    # Detect: (1) expected services that produced no container row at
+    # all, (2) services whose container is present but in `Exited (0)`
+    # (clean stop of a long-running service — invisible to the fatal
+    # grep below, but still a deployment failure for everything except
+    # the `preflight` / `minio-init` one-shots, which are *meant* to
+    # finish 0).
+    if [[ -n "${expected_services}" ]]; then
+      while IFS= read -r svc; do
+        [[ -z "${svc}" ]] && continue
+        # one-shots are *expected* to be Exited (0) post-run
+        case "${svc}" in
+          preflight|minio-init) continue ;;
+        esac
+        # `compose ps --all` names a container `<project>-<svc>-<idx>`
+        # (or, with the legacy underscore separator, `<project>_<svc>_<idx>`),
+        # so anchor the match on `-<svc>-` / `_<svc>_` to avoid
+        # false-matching `wukongim` against a `wukongim-extra` clone.
+        row="$(printf '%s\n' "${statuses}" | grep -E -- "[-_]${svc}[-_][0-9]+	" || true)"
+        if [[ -z "${row}" ]]; then
+          missing_or_stopped="${missing_or_stopped}${svc}	(no container)
+"
+        elif printf '%s\n' "${row}" | grep -qE 'Exited \(0\)'; then
+          missing_or_stopped="${missing_or_stopped}${row}
+"
+        fi
+      done <<< "${expected_services}"
+    fi
     failed_states=""
     if ! failed_states="$(check_compose_running_states "${statuses}")"; then
       fail "service(s) in fatal state (Exited/Restarting/Dead):"
       printf '%s\n' "${failed_states}" | sed 's/^/    /'
+      ((fails++)) || true
+    elif [[ -n "${missing_or_stopped}" ]]; then
+      fail "service(s) missing or cleanly stopped (Exited 0 on long-running service):"
+      printf '%s' "${missing_or_stopped}" | sed 's/^/    /'
       ((fails++)) || true
     else
       unhealthy="$(printf '%s\n' "${statuses}" | grep -E '\(unhealthy\)' || true)"
@@ -450,6 +513,30 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     fail "admin SPA not reachable"; ((fails++)) || true
   fi
 
+  # R8 (YUJ-1002 / Jerry-Xin + lml W2): web SPA `/` probe.
+  #
+  # Every other probe targets a specific backend route — admin SPA,
+  # /api/v1/health (octo-server), /matter/health, MinIO, /ws. The
+  # user-visible web SPA at `/` was never explicitly exercised: nginx
+  # routes `/` to the web container, and when that container goes
+  # missing the probe surface above stays green (admin still loads,
+  # API still answers) while end users hit a 502 on the home page.
+  # Same shape as the admin SPA probe — accept 200 (SPA index) or
+  # 304 (cached); anything else means nginx couldn't reach web.
+  step "web SPA reachable (GET ${BASE_URL}/)"
+  web_code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "${BASE_URL}/" 2>/dev/null || echo '000')"
+  web_code="${web_code%%[!0-9]*}"
+  web_code="${web_code:-000}"
+  case "${web_code}" in
+    200|304)
+      ok
+      ;;
+    *)
+      fail "web SPA returned HTTP ${web_code} — check 'docker compose ps web' / nginx upstream for the web container"
+      ((fails++)) || true
+      ;;
+  esac
+
   # R6 (YUJ-997 / Jerry-Xin P1 W1B): WuKongIM `/ws` probe.
   #
   # Background: WuKongIM is the chat transport. Before this probe,
@@ -482,39 +569,66 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # container. openssl is already a hard prereq (checked above), so the
   # base64-random WS key generation is always available.
   step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
-  WS_KEY="$(openssl rand -base64 16 2>/dev/null || echo 'dGhlIHNhbXBsZSBub25jZQ==')"
-  # R7 (YUJ-999 / ReviewBot P1): on the happy path nginx returns
-  # `101 Switching Protocols` and keeps the TCP socket open waiting
-  # for WebSocket frames. curl (no `--ws`) does not speak the WS
-  # framing protocol — after the 101 it has no body to consume and
-  # either holds the connection until `--max-time` aborts (curl
-  # exit 28) or otherwise non-zero exits. The previous
-  # `curl ... || echo 000` form concatenated both outputs to stdout,
-  # so on a healthy WuKongIM `WS_CODE` became `101\n000` (or
-  # `\n000` on an even earlier timeout) and `case "${WS_CODE}" in
-  # 101|400|426)` did NOT match — the probe FAILED on the most
-  # common healthy outcome. Fix: separate stdout capture from the
-  # exit-code fallback, then keep only the leading digits so a
-  # `101` + later trailing token still reduces to `101`.
-  WS_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
-              -H 'Upgrade: websocket' \
-              -H 'Connection: Upgrade' \
-              -H 'Sec-WebSocket-Version: 13' \
-              -H "Sec-WebSocket-Key: ${WS_KEY}" \
-              "${BASE_URL}/ws" 2>/dev/null)" || WS_CODE=""
-  # Strip everything from the first non-digit on (so `101\n` etc.
-  # collapse to `101`) and default to `000` if curl wrote nothing.
-  WS_CODE="${WS_CODE%%[!0-9]*}"
+  # R8 (YUJ-1002 / ReviewBot P0): replace curl with a python3 socket
+  # probe. The R7 form looked like
+  #   `WS_CODE="$(curl ... )" || WS_CODE=""`
+  # and tripped over a bash quirk: the assignment's exit status is the
+  # exit status of the command substitution, so `curl` returning 28
+  # (max-time abort, which is *the expected outcome on a healthy
+  # WuKongIM* — the 101 has no body to drain) made the `||` branch fire
+  # and clobber the just-captured "101" with "". The probe then FAILED
+  # on the healthy path — exactly what step 5.5 is meant to catch.
+  #
+  # python3 is already a hard prereq for `--verify` (the admin login
+  # and presign blocks below `python3 -c 'import json'`). Speaking the
+  # bare WebSocket upgrade over a raw TCP socket sidesteps both the
+  # curl WS framing limitation AND the bash command-substitution
+  # exit-code quirk: we read the first line of the response, parse the
+  # numeric status code in python, and propagate healthy/fail purely
+  # through the script's own exit code. RFC 6455 §4.1 mandatory
+  # headers are still sent (`Upgrade: websocket`, `Connection: Upgrade`,
+  # `Sec-WebSocket-Version: 13`, base64 `Sec-WebSocket-Key`) so a
+  # well-behaved WuKongIM still answers 101.
+  WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
+import base64, os, re, socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+key = base64.b64encode(os.urandom(16)).decode()
+req = (
+    f"GET /ws HTTP/1.1\r\n"
+    f"Host: {host}:{port}\r\n"
+    "Upgrade: websocket\r\n"
+    "Connection: Upgrade\r\n"
+    "Sec-WebSocket-Version: 13\r\n"
+    f"Sec-WebSocket-Key: {key}\r\n"
+    "\r\n"
+)
+code = 0
+try:
+    s = socket.create_connection((host, port), timeout=5)
+    try:
+        s.sendall(req.encode("ascii"))
+        first = s.recv(256).decode("ascii", "ignore").split("\r\n")[0]
+        m = re.match(r"HTTP/1\.[01] (\d{3})", first)
+        if m:
+            code = int(m.group(1))
+    finally:
+        s.close()
+except (socket.timeout, ConnectionRefusedError, OSError):
+    code = 0
+print(code)
+sys.exit(0 if code in (101, 400, 426) else 1)
+PYEOF
+)"
+  WS_STATUS=$?
+  # Strip any trailing whitespace; python prints exactly one int + \n.
+  WS_CODE="${WS_OUT%%[!0-9]*}"
   WS_CODE="${WS_CODE:-000}"
-  case "${WS_CODE}" in
-    101|400|426)
-      ok
-      ;;
-    *)
-      fail "WuKongIM /ws probe returned HTTP ${WS_CODE} — check 'docker compose ps wukongim' (a clean stop is invisible to (un)healthy checks but breaks chat)"
-      ((fails++)) || true
-      ;;
-  esac
+  if [[ "${WS_STATUS}" -eq 0 ]]; then
+    ok
+  else
+    fail "WuKongIM /ws probe returned HTTP ${WS_CODE} — check 'docker compose ps wukongim' (a clean stop is invisible to (un)healthy checks but breaks chat)"
+    ((fails++)) || true
+  fi
 
   # -------------------------------------------------------------------------
   # End-to-end auth + presigned PUT (the real OOTB contract test).
@@ -899,7 +1013,13 @@ preflight_existing_octo() {
     return 0
   fi
 
-  local project="${COMPOSE_PROJECT_NAME:-octo}"
+  # R8 (YUJ-1002 / Jerry-Xin W1): honour the persisted
+  # `docker/.env` value when the operator's shell has not exported
+  # `COMPOSE_PROJECT_NAME`. Without this, the preflight prompt
+  # treated an already-isolated stack (`COMPOSE_PROJECT_NAME=octo-fz`
+  # in `.env`, no shell export) as if it were brand-new and printed
+  # "RISK of volume collision" against its own volumes.
+  local project="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
   warn ""
   warn "⚠  Detected EXISTING OCTO state on this host:"
   if [[ -n "${existing_volumes}" ]]; then
@@ -1126,7 +1246,17 @@ fi
 # from its project directory before reading either `name:` or the
 # COMPOSE_PROJECT_NAME shell env var, so the `up -d` from a vanilla
 # shell ends up scoped to the same project this setup chose.
-PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-octo}"
+# R8 (YUJ-1002 / Jerry-Xin W1): mirror the `project_name()` precedence
+# (shell > docker/.env > "octo") here as well. The previous form
+# `${COMPOSE_PROJECT_NAME:-octo}` ignored the persisted `.env` value
+# and so an `./setup.sh --force` rerun from a shell that had NOT
+# re-exported COMPOSE_PROJECT_NAME overwrote a saved `octo-fz` with
+# the default `octo` — quietly re-aliasing the stack onto the shared
+# `octo_*` volume set on the next `compose up`. `read_existing_project_name`
+# reads the same `.env` file the rest of the script speaks to, so the
+# three layers stay in lock-step with the documented `project_name()`
+# contract.
+PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
 if grep -q '^COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then
   sed_inplace "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${PROJECT_NAME_VALUE}|" "${ENV_OUT}"
 elif grep -q '^# *COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then

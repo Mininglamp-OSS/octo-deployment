@@ -93,8 +93,8 @@ removes its own state.
 > file still publishes the same host ports
 > (`OCTO_HTTP_PORT`, `OCTO_HTTPS_PORT`, `OCTO_MYSQL_PORT`,
 > `OCTO_REDIS_PORT`, `OCTO_MINIO_API_PORT`, `OCTO_MINIO_CONSOLE_PORT`,
-> `OCTO_WUKONGIM_PORT`, `OCTO_WUKONGIM_WS_PORT`,
-> `OCTO_WUKONGIM_TCP_PORT`, `OCTO_SUMMARY_API_PORT`) and uses the same
+> `OCTO_WK_API_PORT`, `OCTO_WK_WS_PORT`,
+> `OCTO_WK_TCP_PORT`, `OCTO_WK_MONITOR_PORT`, `OCTO_SUMMARY_API_PORT`) and uses the same
 > default bridge subnet (`OCTO_NETWORK_SUBNET=172.28.0.0/24`). Two
 > live stacks on one host will fail with port-bind / IPAM-overlap
 > errors unless the second stack's `.env` also overrides every
@@ -123,9 +123,13 @@ docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_" # actual volumes t
 docker ps --filter 'name=octo' --format '{{.Names}}'
 
 # 3. If anything in (1) or (2) is NOT yours, STOP. Set
-#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check:
-#       COMPOSE_PROJECT_NAME=octo-fz docker compose config --volumes
-#       COMPOSE_PROJECT_NAME=octo-fz docker ps
+#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check.
+#    `docker ps` itself does NOT read COMPOSE_PROJECT_NAME (that env
+#    var is consumed by `docker compose` only), so the command form
+#    has to either go through `docker compose ps` OR filter by the
+#    project-name prefix directly:
+#       COMPOSE_PROJECT_NAME=octo-fz docker compose ps
+#       docker ps --filter name=octo-fz
 ```
 
 `setup.sh` runs an equivalent check at the top of each invocation and
