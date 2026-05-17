@@ -624,16 +624,22 @@ Generation:
                       See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
-  --up                After writing .env, run `docker compose up -d --wait
-                      --wait-timeout 120` and block until every long-
-                      running service is healthy AND every one-shot init
-                      job (preflight / minio-init) exited 0. On timeout
-                      or startup failure: print `compose ps`, list the
-                      specific failing service names, and emit one
-                      `logs <svc>` hint for each before exit 1. A '.'
-                      prints every 5 seconds while waiting so the run is
-                      visibly alive on slow hosts (cold MySQL init can
-                      take 60-90s).
+  --up                START-ONLY subcommand (peer of --smoke-test /
+                      --uninstall): requires an existing docker/.env and
+                      runs `docker compose up -d --wait --wait-timeout
+                      120`, blocking until every long-running service is
+                      healthy AND every one-shot init job (preflight /
+                      minio-init) exited 0. NEVER regenerates secrets —
+                      run `./setup.sh` first to create docker/.env. On
+                      timeout or startup failure: print `compose ps`,
+                      list the specific failing service names, and emit
+                      one `logs <svc>` hint for each before exit 1. A
+                      '.' prints every 5 seconds while waiting so the
+                      run is visibly alive on slow hosts (cold MySQL
+                      init can take 60-90s). Requires sudo because the
+                      Docker daemon socket and docker/.env (mode 600,
+                      owned by root once the stack has been initialised)
+                      both require root.
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --smoke-test        Probe nginx / octo-server / matter / object-store
@@ -643,7 +649,9 @@ Smoke test / tear-down (work against an already-existing docker/.env):
                       immediately which failure-domain to investigate.
                       Real side-effects: 1 POST (admin login), 1 GET
                       (presign issuance), 1 PUT (1-byte sentinel object
-                      left in the MinIO `file` bucket). Not a dry-run.
+                      left in the MinIO `common` bucket, since the
+                      probe issues credentials for type=common). Not a
+                      dry-run.
   --verify            Deprecated alias for --smoke-test. Prints a yellow
                       deprecation notice and otherwise runs identically.
                       Kept for at least 2 releases; slated for removal
@@ -1247,14 +1255,14 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
 fi
 
 # If the operator supplied any "decision" flag (--domain / --ip / --https
-# / --summary / --up) but did not pass --non-interactive, treat those
-# flags as the decision and skip the prompts.
+# / --summary) but did not pass --non-interactive, treat those flags as
+# the decision and skip the prompts. (--up no longer participates: R6
+# made it a start-only subcommand that exits before the prompts.)
 if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
      || "${IP_SET_VIA_CLI}" == "true" \
      || "${HTTPS_SET_VIA_CLI}" == "true" \
-     || "${SUMMARY_SET_VIA_CLI}" == "true" \
-     || "${RUN_UP}" == "true" ]]; then
+     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
     info "CLI flags supplied; switching to non-interactive mode."
     info "(Pass no flags, or only --force, to get the interactive prompts.)"
     NON_INTERACTIVE=true
@@ -1395,6 +1403,71 @@ Export COMPOSE_PROJECT_NAME=octo-<suffix> before re-running, or run interactivel
 }
 
 preflight_existing_octo
+
+# ── R6 (YUJ-1020): --up is a START-ONLY subcommand ──────────────────────────
+# lml2468 + Jerry-Xin R5 consensus (option B, architecturally cleaner):
+# `--up` is a peer of `--smoke-test` / `--uninstall`. It NEVER triggers
+# .env generation. Documented workflow:
+#
+#   ./setup.sh                    # step 1: gen .env (interactive, no sudo)
+#   sudo ./setup.sh --up          # step 2: start the stack (start-only)
+#   sudo ./setup.sh --smoke-test  # step 3: verify
+#
+# Before R6 the script forced NON_INTERACTIVE=true on --up and then hit
+# the "docker/.env already exists" guard a few lines below — fatal in
+# the exact workflow our own README documented. Adding --force would
+# have regenerated every secret and broken step 1's output. The clean
+# fix is to short-circuit here: validate that .env exists, then delegate
+# straight to compose_up_and_wait and exit. No prompt, no overwrite, no
+# secret regeneration on this code path — ever.
+if [[ "${RUN_UP}" == "true" ]]; then
+  if [[ ! -f "${ENV_OUT}" ]]; then
+    fatal "docker/.env not found. Run 'setup.sh' first to generate it, then 'sudo setup.sh --up' to start."
+  fi
+
+  CC="$(compose_cmd)"
+  # Persist the project name from the existing .env (or the operator's
+  # shell env) so the child compose process sees the same value the
+  # stack was provisioned with. Mirrors the same precedence used by the
+  # generation path further down.
+  PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
+  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
+
+  echo ""
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
+  info "A '.' will print every 5s while we wait so you know the script is still alive."
+
+  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
+    info "All services reached healthy."
+
+    DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
+    HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
+    ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+
+    echo ""
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  Stack started successfully!%s\n' "${GREEN}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
+    printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
+    printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    info "Next step:"
+    echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"
+    echo ""
+    exit 0
+  else
+    # compose_up_and_wait already printed `ps` + a `logs <svc>` hint
+    # (YUJ-1019 / GH#32) above this line, so we only need the
+    # rerun-pointer here.
+    err "Fix the root cause and rerun 'sudo ./setup.sh --up' (or 'sudo ./setup.sh --smoke-test' once the stack is healthy)."
+    err "docker/.env is unchanged — re-running setup.sh is NOT required."
+    exit 1
+  fi
+fi
 
 # ── Guard against overwriting an existing .env ─────────────────────────────
 if [[ -f "${ENV_OUT}" ]] && [[ "${FORCE_OVERWRITE}" != "true" ]]; then
@@ -1613,75 +1686,21 @@ else
   mv "${TMP_ENV}" "${ENV_OUT}"
 fi
 
-# ── Optional: bring the stack up + wait for healthy ────────────────────────
+# ── Compute admin URL for the post-generation summary ─────────────────────
 HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
 ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
 
-if [[ "${RUN_UP}" == "true" ]]; then
-  CC="$(compose_cmd)"
-  # Export the persisted project name so the child `docker compose`
-  # process sees it even if the calling shell never did.
-  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
-  echo ""
-  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
-  info "A '.' will print every 5s while we wait so you know the script is still alive."
-  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
-    info "All services reached healthy."
-    # Bug 2 (YUJ-1020) — R5 final resolution: keep docker/.env at its
-    # generated state (root:600 when --up runs under sudo, which is the
-    # typical path) and require sudo for BOTH `--up` AND `--smoke-test`.
-    #
-    # R1-R4 explored permission relaxations (chmod 640, groupadd+chgrp,
-    # chown to SUDO_USER) so a non-root user could run `--smoke-test`
-    # against an --up-under-sudo .env without re-asking for sudo. Every
-    # variant widened *write* authority on a file that Compose treats
-    # as authoritative deployment config — silent user-edits to
-    # COMPOSE_PROJECT_NAME / MYSQL_ROOT_PASSWORD / MINIO_ROOT_PASSWORD
-    # / OCTO_MASTER_KEY / OCTO_ADMIN_PWD would be consumed by the next
-    # privileged `docker compose` run, which is a worse attack surface
-    # than the original "9 cryptic FAILs" UX problem.
-    #
-    # R5 resolution (Jerry-Xin's "require sudo" proposal, accepted by
-    # Coda after cross-author persuasion): no perm change here. The
-    # documented workflow becomes:
-    #     sudo ./setup.sh --up           # provision stack
-    #     sudo ./setup.sh --smoke-test   # verify
-    # Both commands need to read docker/.env (which contains
-    # MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MASTER_KEY,
-    # OCTO_ADMIN_PWD, OCTO_NOTIFY_INTERNAL_TOKEN, plus Compose control
-    # inputs like COMPOSE_PROJECT_NAME), so the sudo requirement is
-    # already implied by what these commands do. The single-shell
-    # `sudo --up && sudo --smoke-test` flow that lml2468 valued in R4
-    # is preserved verbatim — the only cost is typing 5 extra letters
-    # for the second invocation.
-    #
-    # env_get() in --smoke-test still has an EACCES preflight that
-    # surfaces a clear "Re-run as: sudo ./setup.sh --smoke-test"
-    # remediation if the operator forgets sudo (defense-in-depth for
-    # the non-sudo invocation).
-  else
-    # FAIL-FAST: a compose-up failure means the stack is NOT running.
-    # Previously this was just a warning and the success banner below
-    # printed anyway, which (a) misled the operator and (b) let CI /
-    # automation see exit 0 when nothing was actually up.
-    # `compose_up_and_wait` already printed `ps` + a `logs <svc>` hint
-    # (YUJ-1019 / GH#32) above this line, so we only need the
-    # rerun-pointer here.
-    err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --smoke-test"
-    err "once the stack is healthy)."
-    err "docker/.env has been written — re-running setup.sh is NOT required."
-    exit 1
-  fi
-fi
+# R6 (YUJ-1020): the old "--up after .env generation" path is gone. `--up`
+# is now a start-only subcommand handled at the top of this script (search
+# for "R6 (YUJ-1020): --up is a START-ONLY subcommand"). Reaching this
+# line means we are on the generation path (`./setup.sh` without --up),
+# so there is no compose work to do here — just print the summary below
+# and tell the operator to run `sudo ./setup.sh --up` next.
 
 # ── Print summary ───────────────────────────────────────────────────────────
 echo ""
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-if [[ "${RUN_UP}" == "true" ]]; then
-  printf '%s  docker/.env generated AND stack started successfully!%s\n' "${GREEN}" "${RESET}"
-else
-  printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
-fi
+printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
 echo ""
 printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
@@ -1724,18 +1743,30 @@ if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
 fi
 
-if [[ "${RUN_UP}" != "true" ]]; then
-  echo ""
-  info "Next steps:"
-  echo "  1. Review docker/.env and adjust as needed"
-  echo "  2. (cd docker && docker compose up -d --wait)   # subshell — keeps you in repo root"
-  echo "  3. sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check (sudo: .env is root:600)"
-  echo "  4. Visit ${ADMIN_URL}"
-else
-  echo ""
-  info "Smoke test:"
-  echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check (sudo: .env is root:600)"
-fi
+# R6 (YUJ-1020): we are always on the generation path here (--up exits
+# earlier as a start-only subcommand). Print the canonical 3-step next-
+# steps list so the operator never has to guess the workflow.
 echo ""
-printf '%s  ⚠  docker/.env (mode 600, owned by root) — contains all admin/DB/MinIO secrets. Both --up and --smoke-test require sudo to read this file. Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
+info "Next steps:"
+echo "  1. Review docker/.env and adjust as needed"
+echo "  2. sudo ./setup.sh --up           # start the stack (Docker + .env both need root)"
+echo "  3. sudo ./setup.sh --smoke-test   # admin login + presign PUT end-to-end check"
+echo "  4. Visit ${ADMIN_URL}"
+echo ""
+
+# R6 Nit 1 (Jerry-Xin W2): post-gen message must match what the file
+# actually looks like on disk. `./setup.sh` (non-sudo) writes the file
+# as the current user; `sudo ./setup.sh` writes it as root. The two
+# branches keep the security framing identical (mode 600 + secrets +
+# sudo needed for subsequent --up/--smoke-test because Docker needs
+# root either way), just with the correct owner string.
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf '%s  ⚠  docker/.env (mode 600, owned by root) — contains all admin/DB/MinIO secrets.%s\n' "${YELLOW}" "${RESET}"
+  printf '%s     Next: sudo ./setup.sh --up%s\n' "${YELLOW}" "${RESET}"
+  printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
+else
+  printf '%s  ⚠  docker/.env (mode 600, owned by %s) — contains all admin/DB/MinIO secrets, readable by you.%s\n' "${YELLOW}" "$(id -un)" "${RESET}"
+  printf '%s     Next: sudo ./setup.sh --up  (sudo needed for Docker; --up will not touch this file)%s\n' "${YELLOW}" "${RESET}"
+  printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
+fi
 echo ""

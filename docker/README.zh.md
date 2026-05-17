@@ -113,11 +113,12 @@ sudo ./setup.sh --up
 sudo ./setup.sh --smoke-test
 ```
 
-或者，在全新机器上想一条命令搞定 `.env` 生成 + 起栈，用 `--up`（GH#32 引入）——`setup.sh` 会写完 `.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1：
+或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会动步骤 1 写出的 `.env`，它只是 start-only 子命令：
 
 ```bash
-./setup.sh --non-interactive --ip 1.2.3.4 --up
-./setup.sh --verify
+./setup.sh --non-interactive --ip 1.2.3.4         # 步骤 1：gen .env，不提示，无需 sudo
+sudo ./setup.sh --up                              # 步骤 2：启栈（start-only）
+sudo ./setup.sh --smoke-test                      # 步骤 3：端到端 verify
 ```
 
 `--up` 底层调 `docker compose up -d --wait --wait-timeout 120`（Compose < v2.20 上自动 fallback 到手动 health poll）。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
@@ -141,11 +142,11 @@ sudo ./setup.sh --up
 sudo ./setup.sh --smoke-test
 ```
 
-> **为什么要 sudo？** `docker/.env` 保持生成时的状态：mode 600 / owner 为 root（跑 `sudo ./setup.sh --up` 的那个 root）。`--up` 和 `--smoke-test` 都需要 sudo，因为这个文件装着全栈的高价值密钥——`MYSQL_ROOT_PASSWORD`、`MINIO_ROOT_PASSWORD`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD`、`OCTO_NOTIFY_INTERNAL_TOKEN`、`OCTO_WUKONGIM_MANAGER_TOKEN`——再加上 `COMPOSE_PROJECT_NAME` 这种会被下一次特权 `docker compose` 直接 consume 的 Compose 控制项。早先几轮 R1-R4 试过 chmod / chown / groupadd 让普通用户能跑 `--smoke-test`，但都会**扩大写权限**到一个 Compose 视为权威部署配置的文件上——R5 改成最简方案：".env 保持 root:600（default），`--up` 和 `--smoke-test` 都要 sudo，因为文件里全是 MySQL / MinIO / admin 凭据和 Compose 控制项"。忘 sudo 时 `env_get()` 会给一行清晰的 remediation（`Re-run as: sudo ./setup.sh --smoke-test`），而不是过去那 9 条让人摸不到头脑的 FAIL。
+> **为什么要 sudo？** `docker/.env` 由步骤 1（`./setup.sh`）生成。步骤 1 不带 sudo 跑时，文件 owner 是当前用户（mode 600）；带 sudo 跑时，owner 是 root。无论哪种，步骤 2（`sudo ./setup.sh --up`）需要 sudo 是因为要连 Docker daemon socket，而步骤 2 跑完后文件 owner 都会变成 root。`--up`（start-only 子命令，永远不会重新生成密钥）和 `--smoke-test` 都需要 sudo，因为这个文件装着全栈的高价值密钥——`MYSQL_ROOT_PASSWORD`、`MINIO_ROOT_PASSWORD`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD`、`OCTO_NOTIFY_INTERNAL_TOKEN`、`OCTO_WUKONGIM_MANAGER_TOKEN`——再加上 `COMPOSE_PROJECT_NAME` 这种会被下一次特权 `docker compose` 直接 consume 的 Compose 控制项。早先几轮 R1-R4 试过 chmod / chown / groupadd 让普通用户能跑 `--smoke-test`，但都会**扩大写权限**到一个 Compose 视为权威部署配置的文件上——R5 改成最简方案：".env 保持 root:600，`--up` 和 `--smoke-test` 都要 sudo，因为文件里全是 MySQL / MinIO / admin 凭据和 Compose 控制项"。忘 sudo 时 `env_get()` 会给一行清晰的 remediation（`Re-run as: sudo ./setup.sh --smoke-test`），而不是过去那 9 条让人摸不到头脑的 FAIL。
 
 > **命名说明** —— 原拼写是 `--verify`，作为 deprecated alias 保留（跑起来会先打印一行黄色 deprecation note，行为与 `--smoke-test` 完全一致），至少保留 2 个 release，预计 v2.0+ 删除。新写的自动化优先用 `--smoke-test`。
 >
-> **为什么不是 "dry-run"？** 这条命令**不是只读的**：会发 1 POST（admin 登录）+ 1 GET（presign 签发）+ 1 PUT（在 MinIO `file` bucket 留下一个 1 字节哨兵对象 `octo-verify-<timestamp>-<pid>.txt`）。它走的是真实的 auth + 真实的 storage 路径，叫成 "verify" / "dry-run" 会低估副作用。
+> **为什么不是 "dry-run"？** 这条命令**不是只读的**：会发 1 POST（admin 登录）+ 1 GET（presign 签发）+ 1 PUT（在 MinIO `common` bucket 留下一个 1 字节哨兵对象 `octo-verify-<timestamp>-<pid>.txt`，因为 presign 请求带的是 `type=common`）。它走的是真实的 auth + 真实的 storage 路径，叫成 "verify" / "dry-run" 会低估副作用。
 
 输出按失败域分组打印两个 banner，FAIL 时一眼能看出该排查哪一层：
 
@@ -179,10 +180,15 @@ sudo ./setup.sh --smoke-test
 （所有 modern Linux 发行版 base image 都自带）再重跑。这是用来在新机器
 上确认「端到端真的能用」的命令——区别于「容器起来了」。
 
-第 11 步会在 `file` bucket 留下一个 1 字节哨兵对象
-（`octo-verify-<timestamp>-<pid>.txt`）。这是故意留下的——本仓库使用
-的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的 `minio/mc`
-镜像里，只被一次性的 `minio-init` 容器用到），所以
+第 11 步会在 `common` bucket 留下一个 1 字节哨兵对象
+（`octo-verify-<timestamp>-<pid>.txt`）。bucket 由第 10 步发给
+`GET /api/v1/file/upload/credentials` 的 `type=common` 决定 —— octo-server
+的 MinIO 后端把 `type=` 映射到对象路径首段，再由 `splitBucketAndObject`
+（octo-server `modules/file/helpers.go`）按 allow-list（`file`/`chat`/
+`moment`/`sticker`/`report`/`chatbg`/`common`/`download`/`group`/`avatar`）
+路由到对应 bucket，所以 `type=common` 就落在 `common`。哨兵对象是故意留下
+的——本仓库使用的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的
+`minio/mc` 镜像里，只被一次性的 `minio-init` 容器用到），所以
 `docker exec <project>-minio-1 mc rm ...` 这种命令必然报
 `mc: executable file not found`。每次 `--smoke-test` 多 1 字节远低于噪声；
 真要清干净请单独跑 `minio/mc` 镜像接入项目的 docker 网络，或者拿

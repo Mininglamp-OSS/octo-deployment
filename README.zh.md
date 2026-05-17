@@ -49,19 +49,39 @@ OCTO 按**"原样"**提供，不附带任何形式的明示或默示担保。OCT
 ```bash
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
-./setup.sh                                  # 交互式向导（自动探测公网 IP，生成所有密钥）
-sudo ./setup.sh --up                        # 起栈（docker 引擎 + 写 .env 都需要 root）
-sudo ./setup.sh --smoke-test                # admin login + presign PUT 端到端检查（读 .env 需要 sudo；旧名 --verify 仍可用，已 deprecated）
+./setup.sh                                  # 步骤 1：交互式向导，自动探测公网 IP，把所有密钥写到 docker/.env（无需 sudo）
+sudo ./setup.sh --up                        # 步骤 2：启动栈（start-only，不再重新生成密钥）；Docker + .env 都需要 root
+sudo ./setup.sh --smoke-test                # 步骤 3：admin login + presign PUT 端到端检查（旧名 --verify 仍可用，已 deprecated）
 ```
 
-在全新机器上想一条命令搞定，用 `--up`（GH#32）—— `setup.sh` 写完 `docker/.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。等待期间每 5 秒打一个 `.`，方便看到脚本还活着：
+`--up` 是 **start-only** 子命令（R6 / GH#33）：要求 `docker/.env` 已存在
+（由步骤 1 生成），跑 `docker compose up -d --wait --wait-timeout 120`，
+**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、
+`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出
+问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。
+等待期间每 5 秒打一个 `.`，方便看到脚本还活着。`--up` 永远不会动
+`docker/.env`——那个文件属于跑步骤 1 的用户。
+
+要一条命令搞定（无人值守场景），步骤 1 用 `--non-interactive` 跑、再接
+步骤 2：
 
 ```bash
-./setup.sh --non-interactive --ip <PUBLIC_IP> --up   # 写 .env + 起栈 + 等齐 healthy
-./setup.sh --smoke-test
+./setup.sh --non-interactive --ip <PUBLIC_IP>         # 步骤 1：gen .env，不提示
+sudo ./setup.sh --up                                  # 步骤 2：启栈 + 等齐 healthy
+sudo ./setup.sh --smoke-test                          # 步骤 3：verify
 ```
 
-`setup.sh` 在最后打印 admin URL + superAdmin 密码。密码同时已写入 `docker/.env`（mode 600，**owner 为 root**）——请把这个文件当成密钥对待，首次登录后从 admin UI 轮换密码（见 `docker/README.zh.md`「首位管理员引导」一节）。`--up` 和 `--smoke-test` 都需要 sudo，因为 `.env` 里有 MySQL / MinIO / admin 凭据和 Compose 控制项（`COMPOSE_PROJECT_NAME`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD` 等）——给用户写权限会被下一次特权 `docker compose` 静默 consume。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST）默认 loopback。
+`setup.sh` 在步骤 1 结束时打印 admin URL + superAdmin 密码。密码同时已
+写入 `docker/.env`（mode 600）——请把这个文件当成密钥对待，首次登录后
+从 admin UI 轮换密码（见 `docker/README.zh.md`「首位管理员引导」一节）。
+步骤 2 跑完后该文件 owner 会变成 `root`（因为 `--up` 用 sudo 跑）；`--up`
+和 `--smoke-test` 都需要 sudo，因为 `.env` 里有 MySQL / MinIO / admin 凭据
+和 Compose 控制项（`COMPOSE_PROJECT_NAME`、`OCTO_MASTER_KEY`、
+`OCTO_ADMIN_PWD` 等）——给用户写权限会被下一次特权 `docker compose`
+静默 consume。客户端只需开**一个** TCP 端口：`28080`（`OCTO_HTTP_PORT`，
+nginx HTTP 入口）。HTTPS 启用后客户端端口换成 `28443`
+（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM
+monitor、各服务直连 REST）默认 loopback。
 
 卸载 / 重置走交互式：
 
