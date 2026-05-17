@@ -589,7 +589,28 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # headers are still sent (`Upgrade: websocket`, `Connection: Upgrade`,
   # `Sec-WebSocket-Version: 13`, base64 `Sec-WebSocket-Key`) so a
   # well-behaved WuKongIM still answers 101.
-  WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
+  #
+  # R9 (YUJ-1004 / Jerry-Xin + lml2468 P0-2): the assignment MUST be
+  # wrapped in an `if` head. `setup.sh:19` runs under `set -euo pipefail`,
+  # and per `bash(1)` "errexit" the simple-command form
+  #     WS_OUT="$(python3 …)"
+  # propagates the command-substitution exit status to the assignment;
+  # `set -e` then immediately aborts the whole `--verify` run as soon as
+  # python3 returns non-zero (i.e. the very case step 5.5 is meant to
+  # report). That swallowed every downstream check — the `fail` line, the
+  # `((fails++))`, the admin-login probe, the presigned-PUT probe — and
+  # left `--verify` exiting 0-ish or aborting silently with no fails-count
+  # summary. The `WS_STATUS=$?` line below was effectively dead code.
+  # Using `if … then … else WS_STATUS=$? fi` keeps the command substitution
+  # inside the "test in an if statement" exemption listed in bash(1) under
+  # `set -e`, so the failing python3 is captured (not fatal), `WS_STATUS`
+  # is set to the python exit code, and the rest of `--verify` proceeds
+  # to run, accumulate fails, and exit non-zero with the proper summary.
+  # Chosen over `… || true`: `|| true` would also mask any genuine bash
+  # syntax / runtime error inside the heredoc body (e.g. a typo turning a
+  # name-resolution failure into a silent pass). The explicit `if` keeps
+  # the intent ("python3 exit code drives WS_STATUS, nothing more") legible.
+  if WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
 import base64, os, re, socket, sys
 host, port = sys.argv[1], int(sys.argv[2])
 key = base64.b64encode(os.urandom(16)).decode()
@@ -618,8 +639,11 @@ except (socket.timeout, ConnectionRefusedError, OSError):
 print(code)
 sys.exit(0 if code in (101, 400, 426) else 1)
 PYEOF
-)"
-  WS_STATUS=$?
+)"; then
+    WS_STATUS=0
+  else
+    WS_STATUS=$?
+  fi
   # Strip any trailing whitespace; python prints exactly one int + \n.
   WS_CODE="${WS_OUT%%[!0-9]*}"
   WS_CODE="${WS_CODE:-000}"
@@ -1182,6 +1206,23 @@ OCTO_ADMIN_PWD="$(openssl rand -base64 18)"
 # ── Build .env from template ────────────────────────────────────────────────
 info "Generating docker/.env from template…"
 
+# R9 (YUJ-1004 / Jerry-Xin + lml2468 P0-1): snapshot the persisted
+# COMPOSE_PROJECT_NAME *before* the template overwrite below resets
+# docker/.env to its placeholder form. Without this, the later
+# `PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"`
+# call reads a freshly-installed template that no longer contains the
+# operator's chosen suffix (e.g. `octo-fz`), silently falls back to the
+# bare default `octo`, and re-aliases the stack onto the shared `octo_*`
+# volume set on the next `compose up` — re-playing INCIDENT-2026-05-16-001.
+# Read-before-overwrite is the only correct ordering: trust the on-disk
+# `.env` while it still reflects the prior install, then capture into a
+# local that the post-overwrite sed/grep path can splice back in. This
+# also generalises hard-rule #7 ("any 'overwrite-then-read' pattern in a
+# config-file mutator is a bug"). The capture is unconditional because
+# `read_existing_project_name` already encodes the correct precedence
+# (shell COMPOSE_PROJECT_NAME → docker/.env → literal "octo").
+SAVED_PROJECT="$(read_existing_project_name)"
+
 if command -v install &>/dev/null; then
   install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
 else
@@ -1256,7 +1297,14 @@ fi
 # reads the same `.env` file the rest of the script speaks to, so the
 # three layers stay in lock-step with the documented `project_name()`
 # contract.
-PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
+# R9 (YUJ-1004 / Jerry-Xin + lml2468 P0-1): the R8 form still re-read
+# `.env` here, but by this point the template has already been installed
+# over it (line 1186) so the docker/.env-side fallback resolves to the
+# template literal `octo` instead of the operator's `octo-fz`. Use the
+# `SAVED_PROJECT` snapshot captured *before* the template overwrite (see
+# the read-before-overwrite block above) so the shell-export → previously-
+# persisted-.env → "octo" precedence stays intact across `--force` reruns.
+PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-${SAVED_PROJECT}}"
 if grep -q '^COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then
   sed_inplace "s|^COMPOSE_PROJECT_NAME=.*|COMPOSE_PROJECT_NAME=${PROJECT_NAME_VALUE}|" "${ENV_OUT}"
 elif grep -q '^# *COMPOSE_PROJECT_NAME=' "${ENV_OUT}"; then
