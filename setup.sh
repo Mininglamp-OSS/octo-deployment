@@ -305,12 +305,20 @@ validate_compose_project_name() {
 }
 
 # Default wait timeout (seconds) for `compose up -d --wait` and the
-# manual-poll fallback. Aligned at 120s after PR#30 public-IP E2E
-# (YUJ-1019 / GH#32) exposed that the previous 60s ceiling tripped on a
-# cold MySQL boot on small GCP instances. 120s comfortably covers the
-# first-time pull-and-init path on a freshly built host while still being
-# short enough to surface a stuck container instead of waiting forever.
-COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
+# manual-poll fallback. R7 (YUJ-1020 / GH#42): bumped 120 → 240 after the
+# fresh-host empirical cold-boot timeline showed the chain only reaches
+# healthy at ~110s on a small GCP instance (mysql init ~20s; octo-server
+# panic-and-recover after mysql warms 25-45s; dependents unblock another
+# ~50s). 120s sat exactly on that edge and flapped on the first boot.
+# 240s gives roughly 2x headroom for mysql init + the octo-server panic-
+# recover loop + every dependent's own healthcheck, without letting a
+# truly stuck container hang the script forever (the manual-poll
+# fallback also escalates `FATAL` rows to immediate fail). Combined
+# with the retry-once wrapper around `_compose_up_and_wait_once`, a
+# clean first boot pays nothing extra and a flap on the cold-boot edge
+# recovers on the warm second attempt (mysql/init/image cache already
+# hot, dependents reach healthy in <10s).
+COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=240
 
 # Cleanup helper for `compose_up_and_wait`: idempotently kill the dots
 # subshell, reap it, and clear the EXIT trap. Used both from the normal
@@ -363,9 +371,24 @@ _compose_on_signal() {
 # names, and print a `logs <svc>` hint for each so the operator has an
 # immediate next step instead of a bare non-zero exit. Returns the exit
 # code of the compose call (or the poll) so callers can fail-fast.
-compose_up_and_wait() {
+# R7 (YUJ-1020 / GH#42): split into a private `_compose_up_and_wait_once`
+# (one cold/warm attempt) and a public `compose_up_and_wait` wrapper that
+# retries once on a soft timeout. Rationale: even with the 240s budget
+# above, a fresh GCP small instance can flap on the cold-boot edge when
+# mysql init + the octo-server panic-recover loop run back-to-back. A
+# second invocation rides the warm mysql / image cache and completes in
+# <10s, so retry-once is effectively free on the clean first run and
+# turns a known-transient flap into a single-pass `--up`. We retry ONLY
+# when no service has actually died (hard-failure rows — Restarting /
+# Dead / Exited(non-zero) — short-circuit straight to the diagnostic
+# dump on the first attempt). To keep the failure narrative readable,
+# the diagnostic dump (`ps`, failing-services log hints) is suppressed
+# on the first attempt and only printed when the SECOND attempt also
+# fails.
+_compose_up_and_wait_once() {
   local cc="$1"
   local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local suppress_diagnostics="${3:-false}"
   local rc=0 log_file ps_snapshot failing_svcs
 
   log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
@@ -408,6 +431,13 @@ compose_up_and_wait() {
   trap - EXIT INT TERM
 
   if (( rc != 0 )); then
+    if [[ "${suppress_diagnostics}" == "true" ]]; then
+      # First attempt under retry-once: stay quiet so the wrapper can
+      # decide whether to retry or escalate. Still clean up the log file
+      # before returning.
+      rm -f "${log_file}" 2>/dev/null || true
+      return "${rc}"
+    fi
     err ""
     err "compose up did not reach a healthy state within ${timeout}s (or compose itself failed; rc=${rc})."
     if [[ -s "${log_file}" ]]; then
@@ -466,6 +496,32 @@ compose_up_and_wait() {
   return "${rc}"
 }
 
+# R7 (YUJ-1020 / GH#42) public wrapper: retry-once on transient cold-boot
+# flap. First attempt runs with `suppress_diagnostics=true` so we do not
+# spam the operator with `ps` / `logs <svc>` hints for a flap that the
+# second attempt is about to recover from. If the first attempt fails we
+# print a one-line info, retry once with diagnostics enabled, and return
+# the second attempt's exit code. Hard-failure rows (Restarting / Dead /
+# Exited(n>0)) still surface on the second attempt — they would not
+# recover on the retry anyway, so escalating with the full dump is the
+# right behaviour. Clean first runs pay nothing.
+compose_up_and_wait() {
+  local cc="$1"
+  local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local rc=0
+
+  set +e
+  _compose_up_and_wait_once "${cc}" "${timeout}" true
+  rc=$?
+  set -e
+  if (( rc == 0 )); then
+    return 0
+  fi
+
+  warn "First wait did not reach healthy within ${timeout}s (rc=${rc}). Retrying once — the warm mysql / image cache typically recovers in <10s."
+  _compose_up_and_wait_once "${cc}" "${timeout}" false
+}
+
 # Read a value from docker/.env (defaults if missing). Used by --verify
 # / --uninstall / post-deploy admin-credentials echo.
 #
@@ -516,6 +572,39 @@ Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.
     v="${v#\'}"; v="${v%\'}"
   fi
   echo "${v:-${default}}"
+}
+
+# R7 (YUJ-1020 / GH#40+41): placeholder-aware host selection helper.
+#
+# The OOTB deployment has TWO independent host knobs that until R7 were
+# never reconciled at the system layer (the per-PR fixes in PR#43 / PR#44
+# disagreed on which one was authoritative for which path — see the R7
+# decision context). This helper makes the system decision explicit and
+# the rest of the script reads it.
+#
+# Rule:
+#   - `OCTO_DOMAIN` is a PLACEHOLDER (empty or the literal default
+#     `octo.local` — operator never put real DNS in front of the VM) →
+#     `OCTO_EXTERNAL_IP` is the authoritative host. setup.sh
+#     materialises explicit `MINIO_SERVER_URL` / `TS_MINIO_DOWNLOADURL`
+#     / `TS_EXTERNAL_BASEURL` overrides pointing at the IP (S1 below),
+#     and `--smoke-test` probes the IP (S2 below). The presigned PUT
+#     URL the server returns therefore uses the IP and the browser /
+#     curl can actually reach it.
+#   - `OCTO_DOMAIN` is a REAL domain (anything other than empty /
+#     `octo.local`) → `OCTO_DOMAIN` is the authoritative host. Compose
+#     defaults (`${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) take effect, the
+#     three URL overrides are NOT written into `.env`, and the
+#     `--smoke-test` probes the DOMAIN. `OCTO_EXTERNAL_IP` keeps its
+#     existing role for internal binding / firewall guidance only.
+#
+# Returns 0 (true) if OCTO_DOMAIN is a placeholder, 1 (false) otherwise.
+# Reads strictly from `.env` (via env_get) so the same answer is given
+# from --up / --smoke-test / .env-generation paths.
+is_placeholder_domain() {
+  local d
+  d="$(env_get OCTO_DOMAIN "")"
+  [[ -z "${d}" || "${d}" == "octo.local" ]]
 }
 
 # Resolve the project name the way Compose does — but for the script's own
@@ -627,19 +716,21 @@ Generation:
   --up                START-ONLY subcommand (peer of --smoke-test /
                       --uninstall): requires an existing docker/.env and
                       runs `docker compose up -d --wait --wait-timeout
-                      120`, blocking until every long-running service is
+                      240`, blocking until every long-running service is
                       healthy AND every one-shot init job (preflight /
-                      minio-init) exited 0. NEVER regenerates secrets —
-                      run `./setup.sh` first to create docker/.env. On
-                      timeout or startup failure: print `compose ps`,
+                      minio-init) exited 0. On a cold-boot soft timeout
+                      the wait retries ONCE on the warm mysql / image
+                      cache (typically <10s). NEVER regenerates secrets
+                      — run `./setup.sh` first to create docker/.env.
+                      On a second-attempt failure: print `compose ps`,
                       list the specific failing service names, and emit
                       one `logs <svc>` hint for each before exit 1. A
                       '.' prints every 5 seconds while waiting so the
                       run is visibly alive on slow hosts (cold MySQL
-                      init can take 60-90s). Requires sudo because the
-                      Docker daemon socket and docker/.env (mode 600,
-                      owned by root once the stack has been initialised)
-                      both require root.
+                      init can take 60-90s). Requires sudo: the Docker
+                      daemon socket needs root, and --up chowns
+                      docker/.env back to root:root 600 once the stack
+                      is healthy so --smoke-test can read it.
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --smoke-test        Probe nginx / octo-server / matter / object-store
@@ -659,16 +750,28 @@ Smoke test / tear-down (work against an already-existing docker/.env):
   --uninstall         Tear down the stack. Interactively offers three
                       granularity levels (full / data-only / containers-only).
 
-When any of --domain / --ip / --https / --summary / --up is given without
+When any of --domain / --ip / --https / --summary is given without
 --non-interactive, setup.sh treats the flags as your decisions and runs
 non-interactively so the documented one-liner forms (see docker/README.md)
-work as written.
+work as written. --up is a start-only subcommand (peer of --smoke-test
+/ --uninstall) and never participates in the decision-flag handling.
 USAGE
       exit 0
       ;;
     *) fatal "Unknown argument: $1" ;;
   esac
 done
+
+# S4 (R7 / YUJ-1020) early EUID guard for --up: enforce sudo BEFORE
+# `preflight_existing_octo` runs (it shells out to docker, which itself
+# needs the root-owned daemon socket, so a non-sudo --up would emit a
+# confusing docker permission error in the middle of the preflight
+# instead of the clean S4 message). The --smoke-test EUID guard is
+# already early (inside the RUN_VERIFY short-circuit a few lines below,
+# which exits well before preflight).
+if [[ "${RUN_UP}" == "true" ]] && [[ ${EUID} -ne 0 ]]; then
+  fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
+fi
 
 # Subcommand short-circuits — run and exit before the generation path.
 if [[ "${RUN_VERIFY}" == "true" ]]; then
@@ -682,6 +785,18 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # is unaffected.
   if [[ "${VERIFY_ALIAS_USED}" == "true" ]]; then
     printf '%snote: --verify is an alias for --smoke-test (will be removed in v2.0+).%s\n\n' "${YELLOW}" "${RESET}"
+  fi
+  # S4 (R7 / YUJ-1020): hard EUID guard. After R7, `--up` chowns `.env`
+  # back to `root:root 600` once compose is healthy, so `--smoke-test`
+  # MUST run as root to read the file. Fail fast at the top of the block
+  # with a one-line actionable error — without this guard the env_get
+  # EACCES preflight further down still surfaces the issue, but the
+  # remediation message ("Or adjust ownership: chown root:root + chmod
+  # 600 to restore the default") is a fallback for legacy `.env` states,
+  # not the canonical path. The canonical path for an R7 stack is
+  # exactly `sudo ./setup.sh --smoke-test`.
+  if [[ ${EUID} -ne 0 ]]; then
+    fatal "sudo required for --smoke-test (needs to read root-owned .env). Re-run as 'sudo ./setup.sh --smoke-test'."
   fi
   if [[ ! -f "${ENV_OUT}" ]]; then
     fatal "docker/.env not found. Run setup.sh first to generate it."
@@ -703,7 +818,21 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   CC="$(compose_cmd)"
   DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-  BASE_URL="http://${DOMAIN}:${HTTP_PORT}"
+  # S2 (R7 / GH#40): placeholder-aware probe-host selection. When OCTO_DOMAIN
+  # is a placeholder (empty or `octo.local`), `--smoke-test` must talk to the
+  # public IP — `octo.local` does not resolve from a GCP host without DNS, so
+  # the old `http://octo.local:28080` BASE_URL flatlined 8/11 probes on a
+  # healthy stack (PR#30 GCP E2E). When OCTO_DOMAIN is a real domain, we
+  # respect it (browsers go via DNS; the IP is only for internal binding /
+  # firewall). The presigned PUT URL the server returns is consumed verbatim
+  # by step 11 — S1 below pins the server to the same IP/DOMAIN choice when
+  # it writes `.env`, so step 11's URL matches BASE_URL automatically.
+  if is_placeholder_domain; then
+    PROBE_HOST="$(env_get OCTO_EXTERNAL_IP "${DOMAIN}")"
+  else
+    PROBE_HOST="${DOMAIN}"
+  fi
+  BASE_URL="http://${PROBE_HOST}:${HTTP_PORT}"
   fails=0
 
   # Scope 3.2 (YUJ-1020): segment the 11 probes into [infra] (1-7) and
@@ -891,7 +1020,7 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # syntax / runtime error inside the heredoc body (e.g. a typo turning a
   # name-resolution failure into a silent pass). The explicit `if` keeps
   # the intent ("python3 exit code drives WS_STATUS, nothing more") legible.
-  if WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
+  if WS_OUT="$(python3 - "${PROBE_HOST}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
 import base64, os, re, socket, sys
 host, port = sys.argv[1], int(sys.argv[2])
 key = base64.b64encode(os.urandom(16)).decode()
@@ -1421,9 +1550,29 @@ preflight_existing_octo
 # straight to compose_up_and_wait and exit. No prompt, no overwrite, no
 # secret regeneration on this code path — ever.
 if [[ "${RUN_UP}" == "true" ]]; then
-  if [[ ! -f "${ENV_OUT}" ]]; then
-    fatal "docker/.env not found. Run 'setup.sh' first to generate it, then 'sudo setup.sh --up' to start."
+  # S4 (R7 / YUJ-1020): hard EUID guard at the top of `--up`. We chown
+  # `.env` back to `root:root 600` once compose is healthy (below), so
+  # this command must run as root. Docker itself also needs root (the
+  # daemon socket), so the sudo requirement is a single coherent
+  # constraint instead of half-failing partway through. PR#36 docs
+  # already promised "Both --up and --smoke-test require sudo"; S4
+  # actually enforces it instead of relying on Docker / chown to surface
+  # the issue later with a less actionable error.
+  if [[ ${EUID} -ne 0 ]]; then
+    fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
   fi
+  # R7 (YUJ-1020) Test-A path: existing .env → start-only (R6 semantics:
+  # never touch a provisioned .env). Missing .env → fall through to the
+  # generation block below; after generation completes the end-of-script
+  # R7 hook (search for "R7 RUN_UP post-generation hook") will run
+  # compose_up_and_wait + chown so a single
+  #   `sudo bash setup.sh --non-interactive --ip <IP> --up`
+  # invocation provisions AND starts the stack in one shot. The R6
+  # anti-bug (--up silently re-running secret generation on an existing
+  # .env) is still prevented because that branch short-circuits here.
+  if [[ ! -f "${ENV_OUT}" ]]; then
+    info "docker/.env not present — will generate it first, then start the stack (single-command --up bootstrap)."
+  else
 
   CC="$(compose_cmd)"
   # Persist the project name from the existing .env (or the operator's
@@ -1439,6 +1588,23 @@ if [[ "${RUN_UP}" == "true" ]]; then
 
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
+
+    # S4 (R7 / YUJ-1020): after compose is healthy, lock `.env` down to
+    # `root:root 600` so subsequent `--smoke-test` can read it (and
+    # nobody else can). PR#36 docs promised this lockdown across R5/R6
+    # but no code actually did the chown — the file kept whatever
+    # ownership the prior `./setup.sh` (interactive, non-sudo) had given
+    # it (user-owned), which then surprised operators who expected the
+    # documented `-rw------- root root` state. We are already root here
+    # (S4 EUID guard above), so chown/chmod cannot fail under normal
+    # conditions; tolerate a missing `.env` (cannot happen — guarded
+    # above — but defensive) and a chown error on read-only filesystems
+    # so a transient FS condition does not mask a healthy compose.
+    if [[ -f "${ENV_OUT}" ]]; then
+      chown root:root "${ENV_OUT}" 2>/dev/null || warn "could not chown docker/.env to root:root (read-only FS?)."
+      chmod 600 "${ENV_OUT}" 2>/dev/null || warn "could not chmod docker/.env to 600."
+      info "docker/.env now owned by root:root (mode 600)."
+    fi
 
     DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
     HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
@@ -1466,6 +1632,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
     err "Fix the root cause and rerun 'sudo ./setup.sh --up' (or 'sudo ./setup.sh --smoke-test' once the stack is healthy)."
     err "docker/.env is unchanged — re-running setup.sh is NOT required."
     exit 1
+  fi
   fi
 fi
 
@@ -1690,6 +1857,47 @@ fi
 HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
 ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
 
+# S1 (R7 / YUJ-1020 / GH#41): placeholder-aware materialisation of
+# MinIO / TS URL overrides.
+#
+# When the operator uses `--ip <public-IP>` WITHOUT a real `--domain`,
+# `OCTO_DOMAIN` stays at its placeholder `octo.local` and the compose
+# defaults (`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) end up signing
+# presigned PUT URLs against `http://octo.local:28080/...`. The
+# operator's browser cannot resolve `octo.local` (no DNS pointed at the
+# VM), and every image / file message silently breaks at the upload
+# step — exactly the GH#41 failure mode caught on Coda E2E v12.
+#
+# When `OCTO_DOMAIN` IS a real domain (anything other than empty /
+# `octo.local`), the compose defaults already do the right thing and
+# rely on DNS — writing IP-based overrides here would break that DNS
+# topology (`--domain octo.example.com --ip 1.2.3.4` would have client
+# browsers calling the IP instead of the documented domain).
+#
+# So S1 materialises three lockstep overrides ONLY when both:
+#   (1) OCTO_DOMAIN is placeholder (empty or `octo.local`), AND
+#   (2) OCTO_EXTERNAL_IP is set (operator gave us something concrete).
+# All three URLs must agree (SigV4 rejects every PUT with `403
+# SignatureDoesNotMatch` if MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
+# disagree on host:port), so they are written as a single block.
+# Reads/imports stay literal — Compose interpolates `.env` once into
+# YAML without recursive expansion.
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+  info "OCTO_DOMAIN is a placeholder (${DOMAIN}); materialising IP-based URL overrides so presigned PUT / TS callback URLs are browser-reachable from ${EXTERNAL_IP}."
+  cat >> "${ENV_OUT}" <<URLS
+
+# S1 (R7 / YUJ-1020 / GH#41): MaterialiseD because OCTO_DOMAIN=${DOMAIN}
+# (placeholder) and --ip ${EXTERNAL_IP} was supplied. Without these three
+# overrides the compose defaults would sign presigned PUT URLs against
+# http://${DOMAIN}:${HTTP_PORT}, which does not resolve from a client
+# without DNS pointed at this host. Set OCTO_DOMAIN=<real DNS name>
+# and re-run setup.sh --force if you want the DNS-based topology instead.
+MINIO_SERVER_URL=http://${EXTERNAL_IP}:${HTTP_PORT}
+TS_MINIO_DOWNLOADURL=http://${EXTERNAL_IP}:${HTTP_PORT}
+TS_EXTERNAL_BASEURL=http://${EXTERNAL_IP}:${HTTP_PORT}
+URLS
+fi
+
 # R6 (YUJ-1020): the old "--up after .env generation" path is gone. `--up`
 # is now a start-only subcommand handled at the top of this script (search
 # for "R6 (YUJ-1020): --up is a START-ONLY subcommand"). Reaching this
@@ -1770,3 +1978,51 @@ else
   printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 fi
 echo ""
+
+# R7 RUN_UP post-generation hook (YUJ-1020 Test-A): when --up was
+# supplied alongside --non-interactive / --ip on a fresh host (no
+# pre-existing docker/.env), the start-only short-circuit at the top of
+# this script intentionally fell through here so the generation block
+# above could write the .env. Now we close the loop: do the same
+# compose_up_and_wait + chown + summary the existing-.env --up branch
+# does, so the single command
+#   `sudo bash setup.sh --non-interactive --ip <IP> --up`
+# provisions and starts the stack in one invocation. The S4 EUID guard
+# at the top of `--up` already enforced that we are root here.
+if [[ "${RUN_UP}" == "true" ]]; then
+  CC="$(compose_cmd)"
+  PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
+  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
+
+  echo ""
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
+  info "A '.' will print every 5s while we wait so you know the script is still alive."
+
+  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
+    info "All services reached healthy."
+    if [[ -f "${ENV_OUT}" ]]; then
+      chown root:root "${ENV_OUT}" 2>/dev/null || warn "could not chown docker/.env to root:root (read-only FS?)."
+      chmod 600 "${ENV_OUT}" 2>/dev/null || warn "could not chmod docker/.env to 600."
+      info "docker/.env now owned by root:root (mode 600)."
+    fi
+    echo ""
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  Stack started successfully!%s\n' "${GREEN}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
+    printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
+    printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    info "Next step:"
+    echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"
+    echo ""
+    exit 0
+  else
+    err "Fix the root cause and rerun 'sudo ./setup.sh --up' (or 'sudo ./setup.sh --smoke-test' once the stack is healthy)."
+    err "docker/.env IS already generated — re-running setup.sh is NOT required."
+    exit 1
+  fi
+fi
