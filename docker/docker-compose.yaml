@@ -256,7 +256,19 @@ services:
       # `:29000`), override MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
       # in .env. See docker/README.md "Network surface" for the
       # rationale and trade-offs.
-      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}
+      # GH#41 (YUJ-1060): default prefers OCTO_EXTERNAL_IP over
+      # OCTO_DOMAIN. OOTB public-IP deployments leave OCTO_DOMAIN at
+      # the `octo.local` placeholder (no DNS), and a presigned PUT
+      # signed against that host fails browser DNS — every image /
+      # file message silently breaks. setup.sh always populates
+      # OCTO_EXTERNAL_IP (from --ip or auto-detect), so preferring
+      # it here makes the default browser-reachable without operator
+      # intervention. Operators with a real DNS name set OCTO_DOMAIN
+      # AND override MINIO_SERVER_URL explicitly in .env. MUST track
+      # TS_MINIO_DOWNLOADURL below — MinIO validates SigV4 against
+      # the host octo-server signed for; a mismatch returns 403
+      # SignatureDoesNotMatch on every PUT.
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_EXTERNAL_IP:-${OCTO_DOMAIN:-octo.local}}:${OCTO_HTTP_PORT:-28080}}
       # MINIO_BROWSER_REDIRECT_URL is the canonical URL MinIO redirects
       # the console to after auth. The previous default pointed at the
       # nginx /minio-console/ route, but that route is no longer exposed
@@ -659,7 +671,19 @@ services:
       # --- terminating TLS at a different hostname), set
       # --- TS_MINIO_DOWNLOADURL in .env to the public URL of YOUR
       # --- nginx — still host:port only, no path.
-      TS_MINIO_DOWNLOADURL: "${TS_MINIO_DOWNLOADURL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}"
+      # --- GH#41 (YUJ-1060): default prefers OCTO_EXTERNAL_IP over
+      # --- OCTO_DOMAIN so that OOTB public-IP deployments produce a
+      # --- browser-resolvable presign host without operator action.
+      # --- Without this, OCTO_DOMAIN stays at the placeholder
+      # --- `octo.local`, octo-server signs presigned PUT URLs against
+      # --- `http://octo.local:28080/...`, and the browser hits DNS
+      # --- fail → every image / file message silently breaks.
+      # --- setup.sh always populates OCTO_EXTERNAL_IP (from --ip or
+      # --- auto-detect); operators with a real DNS name set
+      # --- OCTO_DOMAIN AND override TS_MINIO_DOWNLOADURL explicitly
+      # --- in .env. MUST track MINIO_SERVER_URL above — the two MUST
+      # --- resolve to the SAME host:port or SigV4 fails on every PUT.
+      TS_MINIO_DOWNLOADURL: "${TS_MINIO_DOWNLOADURL:-http://${OCTO_EXTERNAL_IP:-${OCTO_DOMAIN:-octo.local}}:${OCTO_HTTP_PORT:-28080}}"
       # --- octo-server's own external URL (the value it returns to
       # --- clients in places that need an absolute URL — e.g. login
       # --- redirects, OIDC callback hints, public asset links). The
