@@ -618,6 +618,7 @@ through nginx bucket-name routing under TLS.
 > MINIO_SERVER_URL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
 > TS_MINIO_DOWNLOADURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
 > TS_EXTERNAL_BASEURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> OCTO_WK_WSS_ADDR=wss://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}/ws
 > ```
 >
 > Substitute the literal hostname and port (`.env` does not interpolate
@@ -645,6 +646,440 @@ Both must use the **same scheme + host:port** (no path prefix —
 startup). The bucket-name regex location in the in-compose nginx will
 still route `/{bucket}/{key}` to MinIO; just make sure the host nginx
 forwards those paths through to the compose stack.
+
+---
+
+## Production HTTPS deployment
+
+The OOTB stack ships HTTP-only on `OCTO_HTTP_PORT` (default `28080`).
+For production we recommend terminating TLS at a **reverse proxy in
+front of** the compose stack rather than baking certbot into the
+container set. This keeps cert lifecycle in the reverse-proxy layer
+(where it belongs — see "Why we don't bundle certbot" below) and lets
+you reuse whatever Let's Encrypt / Cloudflare / internal-CA workflow
+your fleet already uses.
+
+Three battle-tested paths follow. They are independent — pick the one
+that matches your environment, you only need one.
+
+In all three paths the upstream is the in-compose nginx on
+`http://<host>:28080`. Restrict the in-compose nginx to the loopback
+interface (see [Firewall rules for HTTPS](#firewall-rules-for-https)
+below) so port `28080` is not directly reachable from the internet —
+the reverse proxy is the only public listener.
+
+> 💡 **HTTPS env override required for all three paths.** Once TLS
+> terminates at the reverse proxy, octo-server still hands clients
+> absolute URLs (presigned MinIO PUT/GET, admin baseURL, WS address).
+> Set the following in `docker/.env` with the resolved literal
+> hostname (`.env` does not interpolate `${...}` inside values):
+>
+> ```bash
+> # docker/.env — required when fronted by a reverse proxy
+> MINIO_SERVER_URL=https://octo.example.com
+> TS_MINIO_DOWNLOADURL=https://octo.example.com
+> TS_EXTERNAL_BASEURL=https://octo.example.com
+> OCTO_WK_WSS_ADDR=wss://octo.example.com/ws       # browser WSS via reverse proxy (maps to WK_EXTERNAL_WSSADDR)
+> ```
+>
+> All three URL values must share scheme + host + port — SigV4 signs
+> against this exact URL and octo-server validates
+> `TS_MINIO_DOWNLOADURL` as host:port-only at startup (no path
+> prefix). See [HTTPS form (TLS termination)](#https-form-tls-termination)
+> in the Network surface section above for the underlying rationale.
+
+### Path A — Cloudflare Tunnel (recommended for "I just need HTTPS, fast")
+
+Zero DNS edits, zero firewall ports open inbound, automatic HTTPS,
+free DDoS + CDN. The only prerequisite is a domain on Cloudflare
+(free plan is sufficient).
+
+```bash
+# 1. Install cloudflared (Debian/Ubuntu).
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+  -o /tmp/cloudflared.deb
+sudo dpkg -i /tmp/cloudflared.deb
+
+# 2. Auth — opens a browser to pick the Cloudflare zone.
+cloudflared tunnel login
+
+# 3. Create the tunnel (records the UUID + credentials JSON under ~/.cloudflared/).
+cloudflared tunnel create octo
+
+# 4. Route DNS — Cloudflare auto-creates the CNAME for you.
+cloudflared tunnel route dns octo octo.example.com
+
+# 5. Write /etc/cloudflared/config.yml (substitute the UUID from step 3 —
+#    `cloudflared tunnel list` prints it). Also copy the per-tunnel credentials
+#    JSON from your user ~/.cloudflared/ into a service-owned path so the
+#    root-owned systemd unit can read it (otherwise the service fails to start
+#    because /root/.cloudflared/<uuid>.json does not exist).
+sudo install -d -m 0755 /etc/cloudflared
+sudo cp ~/.cloudflared/*.json /etc/cloudflared/
+sudo tee /etc/cloudflared/config.yml >/dev/null <<'YML'
+tunnel: <TUNNEL-UUID>
+credentials-file: /etc/cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: octo.example.com
+    service: http://localhost:28080
+    originRequest:
+      connectTimeout: 30s
+  - service: http_status:404
+YML
+
+# 6. Validate the config syntactically (no live Cloudflare call).
+#    cloudflared auto-loads /etc/cloudflared/config.yml when --config is omitted.
+sudo cloudflared --config /etc/cloudflared/config.yml tunnel ingress validate
+
+# 7. Install as systemd service and start.
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+Cloudflare's tunnel terminates TLS at the edge and proxies
+`https://octo.example.com/*` (including `/ws` WebSocket upgrade and
+`/{bucket}/{key}` MinIO presign PUT/GET) over a single outbound mTLS
+tunnel to your host — **no inbound ports need to be open** on the host
+firewall. The in-compose nginx still does the bucket-name routing for
+presigned URLs because Cloudflare forwards the path verbatim (no
+rewrite, no signature break).
+
+**Body size note**: Cloudflare's Free plan caps request bodies at
+100 MB; Pro raises it to 200 MB; Business to 500 MB. For OOTB chat
+image / file messages 100 MB is plenty. If you need more, configure
+it via Cloudflare dashboard (Rules → Configuration Rules → "Upload
+size limit") or upgrade the plan.
+
+**WebSocket note**: `cloudflared` forwards `Upgrade` / `Connection`
+headers automatically — `/ws` and any `/api/*` long-poll fallback
+just work, nothing to configure.
+
+### Path B — host nginx + certbot (most common self-hosted form)
+
+The classic "I already run nginx on this host" path. certbot's
+`--nginx` plugin handles cert issuance AND automatic renewal AND
+nginx reload, so once it's set up the cert lifecycle is hands-off.
+
+```bash
+# 1. Install nginx + certbot.
+sudo apt-get update
+sudo apt-get install -y nginx python3-certbot-nginx
+
+# 2. Make sure the WebSocket-upgrade map is defined at http{} scope.
+#    Debian/Ubuntu's default /etc/nginx/nginx.conf already includes
+#    /etc/nginx/conf.d/*.conf inside http{}, so drop a small file there:
+sudo tee /etc/nginx/conf.d/connection_upgrade.conf >/dev/null <<'NGINX'
+# Required for proxy_set_header Connection $connection_upgrade.
+# Maps the incoming Upgrade header to a per-request Connection value:
+#   "upgrade" for WS handshakes, "close" for everything else.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+NGINX
+
+# 3. Drop the OCTO vhost.
+sudo tee /etc/nginx/sites-available/octo.conf >/dev/null <<'NGINX'
+upstream octo_backend {
+    server 127.0.0.1:28080;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name octo.example.com;
+
+    # certbot --nginx will rewrite this to a 301 redirect to https://
+    # AFTER adding the 443 server block. ACME HTTP-01 + the redirect
+    # both need port 80 reachable.
+    location / {
+        proxy_pass http://octo_backend;
+        proxy_http_version 1.1;
+
+        # Forward client identity to the in-compose nginx and the app.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+
+        # WebSocket upgrade — required for /ws AND /api long-poll fallback.
+        # WITHOUT this pair, the WS handshake silently degrades to 200 and
+        # the chat client never connects.
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+
+        # MinIO presign PUT — chat-image / file-attachment uploads can be
+        # 10-100 MB. The cap that hits first in this topology is the HOST
+        # nginx; the in-compose nginx is already permissive enough.
+        client_max_body_size               100M;
+
+        # Long-lived chat WebSocket. OOTB chat sessions hold the socket
+        # open for hours; the default 60s read_timeout drops it early.
+        proxy_read_timeout                 3600s;
+        proxy_send_timeout                 3600s;
+    }
+}
+NGINX
+
+sudo ln -sf /etc/nginx/sites-available/octo.conf /etc/nginx/sites-enabled/octo.conf
+
+# 4. Validate the vhost syntax BEFORE asking certbot to touch it.
+sudo nginx -t
+
+# 5. Issue + install cert + add 443 block + set up auto-renew, in one shot.
+sudo certbot --nginx -d octo.example.com \
+  --non-interactive --agree-tos -m admin@example.com --redirect
+
+# 6. Verify the renewal timer is armed (Debian/Ubuntu ship it pre-enabled).
+sudo systemctl status certbot.timer
+sudo certbot renew --dry-run
+```
+
+`certbot --nginx` adds the `listen 443 ssl` block, points it at the
+LE cert in `/etc/letsencrypt/live/octo.example.com/`, sets
+`return 301 https://...` on the port-80 block, and installs the
+`certbot.timer` that renews ~30 days before expiry. Operator action
+after that is limited to keeping `nginx` and `certbot` packages
+patched.
+
+**WebSocket note**: the `proxy_set_header Upgrade` /
+`proxy_set_header Connection` pair plus the `map $http_upgrade
+$connection_upgrade` block is the standard nginx WebSocket recipe.
+`$http_upgrade` is empty on a normal REST request and equals
+`websocket` on a WS upgrade; the `map` translates that into the
+matching `Connection` value (`""` for REST, `upgrade` for WS). The
+trap to avoid is hardcoding `proxy_set_header Connection "upgrade"`
+on every request — that forces `Connection: upgrade` on non-WS
+requests too and breaks HTTP/1.1 keepalive on REST. Always drive
+`Connection` from the `map`, never a literal `"upgrade"`.
+
+**Body size note**: `client_max_body_size 100M` covers MinIO presign
+PUT for chat / file messages. Bump higher if your users upload bigger
+files — the in-compose nginx will not be the bottleneck.
+
+### Path C — Caddy (single binary, fewest moving parts)
+
+Caddy auto-issues + auto-renews Let's Encrypt certs from a tiny
+Caddyfile. No certbot, no timer, no separate vhost-enable dance.
+
+```bash
+# 1. Install Caddy (Debian/Ubuntu — official signed package repo).
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt-get update
+sudo apt-get install -y caddy
+
+# 2. Write the Caddyfile.
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'CADDY'
+octo.example.com {
+    # Caddy auto-provisions the LE cert on first request and auto-renews
+    # ~30 days before expiry. WebSocket upgrade is automatic — the
+    # reverse_proxy directive already forwards Upgrade / Connection.
+    reverse_proxy 127.0.0.1:28080 {
+        # Caddy's reverse_proxy auto-sets Host + X-Forwarded-For /
+        # -Proto / -Host. The only header worth adding explicitly is
+        # X-Real-IP, which Caddy does NOT set by default but the
+        # in-compose nginx + octo-server access logs read.
+        header_up X-Real-IP {remote_host}
+
+        # Long-lived chat WebSocket. OOTB chat sessions hold the socket
+        # open for hours; bump timeouts above the default 30s/2m.
+        transport http {
+            read_timeout  1h
+            write_timeout 1h
+        }
+    }
+
+    # MinIO presign PUT — chat-image / file-attachment uploads.
+    # Caddy's default request body cap is 10 MiB at the HTTP layer; raise
+    # it to match the host nginx / Cloudflare paths above.
+    request_body {
+        max_size 100MB
+    }
+}
+CADDY
+
+# 3. Validate the config.
+sudo caddy validate --config /etc/caddy/Caddyfile
+
+# 4. Reload (Caddy hot-reloads — no dropped connections).
+sudo systemctl reload caddy
+```
+
+What Caddy does for you, in one binary:
+
+- Obtains the LE cert on the first inbound request (HTTP-01 via :80,
+  TLS-ALPN-01 via :443; both ports must be reachable from the
+  internet during issuance).
+- Auto-renews at ~30 days before expiry. No timer, no cron entry.
+- Speaks HTTP/2 and HTTP/3 by default.
+- Forwards `Upgrade` / `Connection` headers automatically — no `map`
+  block dance like nginx.
+
+**Body size note**: Caddy's HTTP layer default body cap is 10 MiB,
+which is below MinIO presign PUT for any image larger than a small
+thumbnail. The `request_body { max_size 100MB }` line raises it to
+match the other two paths.
+
+### Why we don't bundle certbot in this repo
+
+Two reasons, in this order:
+
+1. **Cert lifecycle belongs in the reverse-proxy layer, not the app
+   layer.** Operators with existing fleets already terminate TLS at a
+   front door (host nginx, Caddy, Cloudflare, Traefik, a cloud LB).
+   Bundling a certbot container in this stack would either (a) fight
+   that front door for port 80 / 443, or (b) require a
+   `--standalone-with-cert-forward` dance that is strictly more
+   fragile than just pointing the existing front door at `:28080`. The
+   OOTB sweet spot is "give you a working HTTP stack on `:28080`; you
+   front it with your own TLS."
+2. **Fully automated DNS-01 needs DNS provider write credentials**,
+   and there is no portable way to ship that. Cloudflare API token vs
+   Route53 key vs Aliyun AccessKey vs internal DNS — each is a
+   different out-of-band setup. We do not want a setup script that
+   asks for write credentials to your zone.
+
+If you have a strong reason to terminate TLS inside the compose stack
+itself (air-gapped lab where no host-side proxy is available, e.g.),
+the HTTPS server block in `nginx/conf.d/octo.conf.template` is still
+present and the manual procedure in
+[`docker/certs/README.md`](certs/README.md) covers it. The three
+reverse-proxy paths above are the recommended form for everything
+else.
+
+### Firewall rules for HTTPS
+
+When fronting the stack with a reverse proxy:
+
+| Port | Direction | Who needs to open it | Why |
+| ---- | --------- | -------------------- | --- |
+| `443/tcp` | inbound | Path B/C reverse-proxy host (Path A: not needed) | client HTTPS |
+| `80/tcp`  | inbound | Path B/C reverse-proxy host (Path A: not needed) | LE HTTP-01 ACME challenge + HTTP→HTTPS redirect |
+| `28080/tcp` | **loopback only** | in-compose nginx | upstream — bind to `127.0.0.1` via `OCTO_NGINX_BIND` so it is not reachable from the internet |
+
+Path A (Cloudflare Tunnel) needs **no inbound ports at all** — the
+tunnel is outbound-only. The reverse-proxy host firewall stays
+completely closed inbound.
+
+#### Primary — restrict the in-compose nginx to loopback (the only reliable way)
+
+Edit `docker/.env` and set:
+
+```bash
+OCTO_NGINX_BIND=127.0.0.1
+```
+
+then restart nginx:
+
+```bash
+sudo docker compose up -d nginx
+```
+
+This binds port `28080` to the loopback interface only — only your
+reverse proxy on the same host can reach it. External clients hitting
+`http://<public-IP>:28080/` get connection refused / timeout at the
+kernel level, before Docker or any container is involved.
+
+Verify (on the host running compose):
+
+```bash
+curl -fsS http://127.0.0.1:28080/_nginx_up   # → "ok" (200)
+curl --max-time 5 http://<public-IP>:28080/_nginx_up   # → connection refused / timeout
+```
+
+#### Secondary — defence-in-depth, NOT a replacement for OCTO_NGINX_BIND
+
+> ⚠️ **DO NOT rely on `ufw deny 28080/tcp` alone.** Docker publishes
+> ports via the iptables `DOCKER` chain, which is evaluated **before**
+> ufw's `INPUT` / `ufw-*` chains. External traffic still reaches
+> Docker-published ports regardless of ufw rules — `ufw deny 28080`
+> looks correct in `ufw status` but does not actually block the port.
+> See: https://github.com/docker/for-linux/issues/690
+>
+> `ufw deny 28080/tcp` can be added as defence-in-depth
+> (belt-and-suspenders), but `OCTO_NGINX_BIND=127.0.0.1` is the only
+> reliable restriction.
+
+The usual host-firewall rules for Paths B / C (these *do* work — they
+control `443` / `80` on the host nginx, which is not Docker-published):
+
+```bash
+# Debian/Ubuntu with ufw — Path B / C (the in-compose nginx is already
+# restricted via OCTO_NGINX_BIND=127.0.0.1 above; these open the reverse
+# proxy's own listeners).
+sudo ufw allow 443/tcp
+sudo ufw allow 80/tcp     # Path B/C only (Cloudflare Tunnel does not need this)
+sudo ufw enable
+```
+
+### WebSocket via reverse proxy
+
+OCTO uses WebSocket on `/ws` (WuKongIM browser transport, the chat
+data plane). `/api/*` is REST only, but **must** still pass through a
+proxy that does NOT downgrade HTTP/1.1 keepalive — long-poll fallback
+paths assume the connection stays open. All three reverse-proxy paths
+above handle both:
+
+- **Path A** (Cloudflare Tunnel): `cloudflared` auto-forwards
+  `Upgrade` / `Connection` headers — `/ws` upgrade works with no
+  config, `/api/*` keepalive works with no config.
+- **Path B** (host nginx): the
+  `proxy_set_header Upgrade $http_upgrade` +
+  `proxy_set_header Connection $connection_upgrade` pair PLUS the
+  `map $http_upgrade $connection_upgrade` block at http{} scope is
+  the standard nginx WebSocket recipe. `$http_upgrade` is empty on
+  REST and `websocket` on WS upgrade; the `map` translates that into
+  the matching `Connection` value (`""` for REST, `upgrade` for WS).
+  The trap is hardcoding `proxy_set_header Connection "upgrade"` —
+  that forces `Connection: upgrade` on every request and breaks
+  HTTP/1.1 keepalive on REST. The config above ships the `map` in
+  `/etc/nginx/conf.d/connection_upgrade.conf` so it loads at http{}
+  scope before any vhost.
+- **Path C** (Caddy): the `reverse_proxy` directive forwards
+  `Upgrade` / `Connection` automatically. No explicit header config
+  needed.
+
+If your `/ws` connection establishes (`101 Switching Protocols`) but
+drops after ~60s, the culprit is `proxy_read_timeout` (nginx) or
+`transport http { read_timeout }` (Caddy) — OOTB chat sessions hold
+the socket open for hours, so 3600s is the safe value.
+
+### Internal vs external port mapping
+
+The reverse-proxy setup separates two ports that the OOTB stack
+collapses:
+
+| Layer | Listens on | Reachable from |
+| ----- | ---------- | -------------- |
+| Reverse proxy (host nginx / Caddy / Cloudflare edge) | `:443` (+ `:80` for ACME / redirect) | the internet |
+| In-compose nginx (`OCTO_HTTP_PORT`) | `127.0.0.1:28080` (after the firewall / port-bind restriction above) | the host loopback only |
+| Backing services (MinIO API, MySQL, Redis, WuKongIM monitor, …) | `127.0.0.1:<port>` (`OCTO_*_BIND` defaults) | the host loopback only |
+
+The reverse proxy is the **only** public listener. Everything else
+stays on loopback exactly as documented in
+[Backing-service host bindings](#backing-service-host-bindings) and
+[Network surface](#network-surface). The OOTB default of binding
+`28080` to `0.0.0.0` (`OCTO_NGINX_BIND=0.0.0.0`) is for laptop-only
+single-port deployments — set `OCTO_NGINX_BIND=127.0.0.1` in
+`docker/.env` and `docker compose up -d nginx` the moment you put a
+reverse proxy in front (see [Firewall rules for HTTPS](#firewall-rules-for-https)
+above for why a ufw rule alone is not enough).
+
+> 💡 **Why not bind the in-compose nginx directly to `:443`?** Two
+> reasons: (1) it forces every TLS knob (cert path, cipher suite,
+> HTTP/2 enablement, HSTS) into `nginx/conf.d/octo.conf.template`,
+> which is supposed to be a single-tenant app-layer concern; (2) it
+> puts the cert private key inside a container whose lifecycle is
+> tied to application releases. The reverse-proxy split keeps the
+> app layer cert-free and lets the cert lifecycle live where it
+> belongs.
 
 ---
 
