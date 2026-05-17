@@ -375,6 +375,30 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   if [[ ! -f "${ENV_OUT}" ]]; then
     fatal "docker/.env not found. Run setup.sh first to generate it."
   fi
+  # Permission preflight (YUJ-1020 / GH#33 Bug 2B): if --up was run as
+  # root (sudo) but --verify is now invoked as a regular user, the
+  # `.env` file is `-rw------- root:root` and EVERY `env_get` call that
+  # follows silently falls back to defaults. The verify run then prints
+  # nine cryptic FAILs (wrong OCTO_HTTP_PORT, empty OCTO_ADMIN_PWD,
+  # wrong DOMAIN, …) that look like a broken stack but are really a
+  # file-permission issue. Detect EACCES once, up front, with a clear
+  # remediation message instead of letting the operator chase 9 ghosts.
+  #
+  # `setup.sh --up` (post-YUJ-1020 fix) now chmod 640 + chgrp the
+  # invoking user's primary group, so fresh installs do not hit this
+  # path. The check stays as a safety net for legacy `.env` files
+  # generated before the fix.
+  if [[ ! -r "${ENV_OUT}" ]]; then
+    env_owner="$(stat -c '%U:%G %a' "${ENV_OUT}" 2>/dev/null || stat -f '%Su:%Sg %Lp' "${ENV_OUT}" 2>/dev/null || echo 'unknown')"
+    err "docker/.env exists but is not readable by the current user (${env_owner})."
+    err "Likely cause: setup.sh --up was run with sudo so docker/.env is owned by root,"
+    err "but --verify is now being invoked by a regular user."
+    err "Pick ONE of the following:"
+    err "    sudo ./setup.sh --verify"
+    err "    sudo chmod 640 docker/.env && sudo chgrp \"\$(id -gn)\" docker/.env"
+    err "    sudo chown \"\$(id -un):\$(id -gn)\" docker/.env"
+    exit 1
+  fi
   # R5 hardening (YUJ-991): curl is a HARD prerequisite for --verify.
   # Every probe below uses `curl -fsS ...` (nginx vhost, octo-server
   # /health, matter, MinIO health, admin SPA, login POST, presign GET,
@@ -745,7 +769,19 @@ print(tok or "")
     if [[ -n "${TOKEN}" ]]; then
       step "issue presigned PUT (GET /api/v1/file/upload/credentials)"
       TEST_FILE="octo-verify-$(date +%s)-$$.txt"
-      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=file&filename=${TEST_FILE}&fileSize=1"
+      # `type=common` is the octo-server `TypeCommon` constant — the
+      # "generic" upload type accepted by `checkReq()` in
+      # modules/file/api.go. The whitelist there is closed-set:
+      #   chat | moment | momentcover | sticker | report | common |
+      #   chatbg | download | workplacebanner | workplaceappicon
+      # `file` is NOT on the list (octo-server returns
+      #   {"status":400,"msg":"文件类型错误"} for unknown types),
+      # so use `common` as the smoke-test channel. We deliberately
+      # avoid `chat` here because chat objectKeys land under the
+      # production user-content bucket prefix; `common` is the
+      # generic-uploads namespace and is the right home for a
+      # synthetic 1-byte sentinel left behind by --verify.
+      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=common&filename=${TEST_FILE}&fileSize=1"
       CRED_RESP="$(curl -sS --max-time 10 -H "token: ${TOKEN}" "${CRED_URL}" 2>/dev/null || true)"
       # Parse uploadUrl / contentType / contentDisposition out of the JSON.
       # Use a single python3 invocation so we can shell-eval the three
@@ -1353,6 +1389,42 @@ if [[ "${RUN_UP}" == "true" ]]; then
     err "once the stack is healthy)."
     err "docker/.env has been written — re-running setup.sh is NOT required."
     exit 1
+  fi
+
+  # Relax docker/.env permissions so the invoking (non-root) user can
+  # later run `./setup.sh --verify` without sudo (YUJ-1020 / GH#33 Bug
+  # 2A). Background: `setup.sh --up` is typically invoked via sudo (docker
+  # group membership is not assumed in OOTB docs), which writes `.env` as
+  # `-rw------- root:root`. Without this hand-off, the unprivileged
+  # operator then runs `./setup.sh --verify`, hits EACCES on every
+  # `env_get` call, and sees nine cryptic FAILs (see Bug 2B for the
+  # symptom-side hardening).
+  #
+  # Strategy: mode 640 (root-write, group-read), with the group set to
+  # the invoking user's primary group. The user keeps no write bit on
+  # the secret, but can read it. Detection of "the invoking user":
+  #   1. SUDO_USER  — set by sudo when --up was launched via sudo
+  #   2. fallback   — current user when --up was launched directly
+  # If neither resolves (e.g. running as bare root in a container with
+  # no SUDO_USER), skip the chgrp silently — the file is already 600
+  # root-owned, which is the safest default.
+  if [[ -f "${ENV_OUT}" ]]; then
+    target_user=""
+    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+      target_user="${SUDO_USER}"
+    elif [[ "$(id -un 2>/dev/null || echo root)" != "root" ]]; then
+      target_user="$(id -un)"
+    fi
+    if [[ -n "${target_user}" ]]; then
+      target_group="$(id -gn "${target_user}" 2>/dev/null || echo "")"
+      if [[ -n "${target_group}" ]]; then
+        if chgrp "${target_group}" "${ENV_OUT}" 2>/dev/null && chmod 640 "${ENV_OUT}" 2>/dev/null; then
+          info "Relaxed docker/.env to mode 640, group ${target_group} (so ${target_user} can run ./setup.sh --verify without sudo)."
+        else
+          warn "Could not chgrp/chmod docker/.env — \`./setup.sh --verify\` will need sudo (or run: sudo chgrp ${target_group} docker/.env && sudo chmod 640 docker/.env)."
+        fi
+      fi
+    fi
   fi
 fi
 
