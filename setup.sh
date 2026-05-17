@@ -131,7 +131,7 @@ compose_supports_wait() {
 check_compose_running_states() {
   local statuses="$1" failed=""
   failed="$(printf '%s\n' "${statuses}" \
-              | grep -vE -- '-(preflight|minio-init)-' \
+              | grep -vE -- '-(preflight|minio-init)-.*Exited \(0\)' \
               | grep -E 'Exited \([1-9]|Restarting|Dead' || true)"
   if [[ -n "${failed}" ]]; then
     printf '%s\n' "${failed}"
