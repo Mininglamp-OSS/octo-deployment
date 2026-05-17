@@ -323,11 +323,11 @@ Generation:
   --force             Overwrite an existing docker/.env without prompting.
   --domain <d>        Set OCTO_DOMAIN (default: octo.local).
   --ip <ip>           Set OCTO_EXTERNAL_IP (skip auto-detect).
-  --https             HTTPS preparation flag. Sets OCTO_TLS_ENABLED=true and
-                      prints HTTPS activation instructions. This does NOT
-                      fully enable HTTPS — you still need to install certs
-                      and edit nginx + docker-compose manually. See
-                      docker/certs/README.md for the full procedure.
+  --https             HTTPS preparation flag. Prints the manual
+                      activation steps. This does NOT fully enable
+                      HTTPS — you still need to install certs, edit
+                      nginx + docker-compose, and restart manually.
+                      See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
   --up                After writing .env, run `docker compose up -d --wait`
@@ -483,12 +483,29 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # base64-random WS key generation is always available.
   step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
   WS_KEY="$(openssl rand -base64 16 2>/dev/null || echo 'dGhlIHNhbXBsZSBub25jZQ==')"
+  # R7 (YUJ-999 / ReviewBot P1): on the happy path nginx returns
+  # `101 Switching Protocols` and keeps the TCP socket open waiting
+  # for WebSocket frames. curl (no `--ws`) does not speak the WS
+  # framing protocol — after the 101 it has no body to consume and
+  # either holds the connection until `--max-time` aborts (curl
+  # exit 28) or otherwise non-zero exits. The previous
+  # `curl ... || echo 000` form concatenated both outputs to stdout,
+  # so on a healthy WuKongIM `WS_CODE` became `101\n000` (or
+  # `\n000` on an even earlier timeout) and `case "${WS_CODE}" in
+  # 101|400|426)` did NOT match — the probe FAILED on the most
+  # common healthy outcome. Fix: separate stdout capture from the
+  # exit-code fallback, then keep only the leading digits so a
+  # `101` + later trailing token still reduces to `101`.
   WS_CODE="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
               -H 'Upgrade: websocket' \
               -H 'Connection: Upgrade' \
               -H 'Sec-WebSocket-Version: 13' \
               -H "Sec-WebSocket-Key: ${WS_KEY}" \
-              "${BASE_URL}/ws" 2>/dev/null || echo 000)"
+              "${BASE_URL}/ws" 2>/dev/null)" || WS_CODE=""
+  # Strip everything from the first non-digit on (so `101\n` etc.
+  # collapse to `101`) and default to `000` if curl wrote nothing.
+  WS_CODE="${WS_CODE%%[!0-9]*}"
+  WS_CODE="${WS_CODE:-000}"
   case "${WS_CODE}" in
     101|400|426)
       ok
@@ -1074,11 +1091,14 @@ sed_inplace "s|^OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}
 sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_OUT}"
 
 # TLS setting
-if [[ "${ENABLE_HTTPS}" == "true" ]]; then
-  sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=true|" "${ENV_OUT}"
-else
-  sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=false|" "${ENV_OUT}"
-fi
+# R7 (YUJ-999 / ReviewBot P2): OCTO_TLS_ENABLED used to be flipped here,
+# but nothing in docker-compose.yaml or the nginx templates reads it.
+# Toggling it produced no behavior change, which mis-led operators who
+# assumed --https was a one-flag switch. The flag is now dropped; the
+# real HTTPS activation steps are printed below (and live in
+# docker/certs/README.md). No-op preserved as a comment so a reader
+# diffing against R6 sees the intentional removal.
+# (was: sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=...|" ...)
 
 # Summary setting
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
@@ -1188,9 +1208,9 @@ if [[ "${EXTERNAL_IP}" != "127.0.0.1" ]] || [[ "${DOMAIN}" != "octo.local" ]]; t
 fi
 
 if [[ "${ENABLE_HTTPS}" == "true" ]]; then
-  warn "HTTPS preparation flag set (OCTO_TLS_ENABLED=true)."
-  warn "HTTPS is NOT yet active — --https only flips one env var. To actually"
-  warn "serve HTTPS you still need the following manual steps:"
+  warn "HTTPS preparation flag set."
+  warn "HTTPS is NOT yet active — --https only prints the activation steps."
+  warn "To actually serve HTTPS you still need the following manual steps:"
   echo "  1. Place certificates in docker/certs/:"
   echo "       - docker/certs/fullchain.pem"
   echo "       - docker/certs/privkey.pem"

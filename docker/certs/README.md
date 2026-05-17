@@ -46,8 +46,7 @@ After placing certificates here:
    HTTP block before adding a separate redirect block.
 2. Uncomment the `443` port mapping in `docker/docker-compose.yaml`
 3. Uncomment the certs volume mount in `docker/docker-compose.yaml`
-4. Set `OCTO_TLS_ENABLED=true` in `docker/.env`
-5. Restart: `docker compose up -d`
+4. Restart: `docker compose up -d`
 
 > **Note:** The `.gitignore` excludes `*.pem` files from version control.
 > Never commit private keys to the repository.

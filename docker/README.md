@@ -113,7 +113,11 @@ and confirm the output only references the stack you mean to wipe:
 ```bash
 # 1. List Docker volumes that would be removed (must all belong to YOUR project)
 docker compose config --volumes        # the volume keys this file declares
-docker volume ls | grep -E '^octo([-_]|$)' # the actual on-disk volumes touched
+# Pin the scan to YOUR project — use literal prefix (grep -F), not the broad
+# `^octo([-_]|$)` regex which matches every OCTO stack on this host.
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env 2>/dev/null | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_" # actual volumes touched
 
 # 2. List containers in the OCTO namespace (must all belong to YOUR project)
 docker ps --filter 'name=octo' --format '{{.Names}}'
@@ -271,26 +275,49 @@ Pick teardown granularity:
 
 Option 1 is destructive — the script prints the volumes about to be
 removed and requires you to type `YES` to confirm. Before running
-option 1 or 2, verify the volumes belong to YOUR stack:
+option 1 or 2, verify the volumes belong to YOUR stack. Always pin the
+match to your literal project prefix (`${COMPOSE_PROJECT_NAME}_`), NOT
+the broad `^octo([-_]|$)` regex — that regex matches every OCTO stack
+on the host (e.g. `octo`, `octo-fz`, `octo-prod`) and can mask
+neighboring-stack volumes that you do NOT want to remove.
 
 ```bash
-# List the volumes that would be removed for your project name
-docker volume ls | grep -E '^octo([-_]|$)'
-# If COMPOSE_PROJECT_NAME=octo-fz, the volumes are octo-fz_mysql-data, etc.
-docker volume ls | grep -E '^octo-fz([-_]|$)'
+# Read your project name from docker/.env (setup.sh persists it there)
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+
+# List the volumes that would be removed for THIS project only
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_"
 ```
 
-Manual equivalents (if you prefer raw compose):
+**🟢 Recommended:** use `./setup.sh --uninstall` — it validates the
+project name against the Compose pattern, builds the volume list with
+literal-prefix matching, previews exactly what will be deleted, and
+requires a `YES` confirmation. The manual `docker compose` / `docker
+volume rm` commands below are provided only for operators who already
+know which project they are tearing down and prefer raw tooling.
+
+Manual equivalents (raw compose — only after the project-name probe above):
 
 ```bash
 # Full uninstall (DATA LOSS — irreversible)
+# `docker compose down -v` only removes the volumes declared by THIS
+# compose project (resolved from COMPOSE_PROJECT_NAME in docker/.env),
+# so it is safe across multiple OCTO stacks as long as your project
+# name is set correctly.
 cd docker && docker compose down -v --remove-orphans
 
-# Data-only reset
-cd docker && docker compose down
-docker volume ls --format '{{.Name}}' | grep -E '^octo([-_]|$)' | xargs -r docker volume rm
+# Data-only reset — keep containers' images, drop only this project's volumes.
+# `compose down` first, then literal-prefix volume removal (grep -F, not -E,
+# so a project name like `octo-fz` will NOT also match `octo-fz-prod_*`).
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker compose down
+docker volume ls --format '{{.Name}}' \
+  | grep -F "${PROJECT}_" \
+  | xargs -r docker volume rm
 
-# Containers only — safe restart prep
+# Containers only — safe restart prep (volumes preserved)
 cd docker && docker compose down --remove-orphans
 ```
 

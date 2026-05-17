@@ -58,7 +58,11 @@ docker compose up -d                  # 卷名：octo-fz_mysql-data, …
 ```bash
 # 1. 列出要删的 Docker volume（必须都属于你的项目）
 docker compose config --volumes        # 本文件声明的卷 key
-docker volume ls | grep -E '^octo([-_]|$)' # 磁盘上实际会动的卷
+# 用字面前缀（grep -F）pin 死你这份项目，不要用宽松的 `^octo([-_]|$)` 正则
+# ——后者会匹配本机所有 OCTO 栈（`octo` / `octo-fz` / `octo-prod`...）。
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env 2>/dev/null | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_" # 磁盘上实际会动的卷
 
 # 2. 列出 OCTO 命名空间下的容器（必须都属于你的项目）
 docker ps --filter 'name=octo' --format '{{.Names}}'
@@ -174,24 +178,37 @@ Pick teardown granularity:
   q) Quit
 ```
 
-选项 1 是破坏性的——脚本会先打印要删的 volume 列表，要求你打 `YES` 才执行。选项 1 或 2 之前先确认 volume 属于你这份栈：
+选项 1 是破坏性的——脚本会先打印要删的 volume 列表，要求你打 `YES` 才执行。选项 1 或 2 之前先确认 volume 属于你这份栈。**始终用字面项目前缀（`${COMPOSE_PROJECT_NAME}_`）来匹配，不要用宽松的 `^octo([-_]|$)` 正则**——后者会把本机所有 OCTO 栈（`octo`、`octo-fz`、`octo-prod` 等）一起捞出来，可能误删别人的卷。
 
 ```bash
-# 列出你当前项目名下会被删的卷
-docker volume ls | grep -E '^octo([-_]|$)'
-# 如果 COMPOSE_PROJECT_NAME=octo-fz，卷是 octo-fz_mysql-data 之类的
-docker volume ls | grep -E '^octo-fz([-_]|$)'
+# 从 docker/.env 读出你的项目名（setup.sh 写到那里）
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+
+# 只列出当前项目下会被删的卷
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_"
 ```
 
-手动等价（如果你想直接 compose）：
+**🟢 推荐：** 用 `./setup.sh --uninstall`——它会按 Compose 规范校验项目名、用字面前缀算出待删卷列表、列出预览、并强制 `YES` 确认。下面的手工 `docker compose` / `docker volume rm` 命令仅供已经清楚自己在拆哪份栈、又偏好原始工具的操作员参考。
+
+手动等价（raw compose——先跑上面的项目名 probe）：
 
 ```bash
 # 完全卸载（数据全丢，不可逆）
+# `docker compose down -v` 只删本 compose project 声明的卷
+# （从 docker/.env 里的 COMPOSE_PROJECT_NAME 解析），所以只要项目名
+# 设对了，多份 OCTO 栈并存也是安全的。
 cd docker && docker compose down -v --remove-orphans
 
-# 只重置数据
-cd docker && docker compose down
-docker volume ls --format '{{.Name}}' | grep -E '^octo([-_]|$)' | xargs -r docker volume rm
+# 只重置数据——保留镜像，仅删本项目的卷。
+# 先 `compose down`，再按字面前缀删卷（grep -F，不是 -E，
+# 这样 project name 是 `octo-fz` 时不会把 `octo-fz-prod_*` 也一起匹掉）。
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker compose down
+docker volume ls --format '{{.Name}}' \
+  | grep -F "${PROJECT}_" \
+  | xargs -r docker volume rm
 
 # 只重启（保留 volume）
 cd docker && docker compose down --remove-orphans
