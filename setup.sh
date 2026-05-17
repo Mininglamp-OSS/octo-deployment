@@ -272,12 +272,26 @@ validate_compose_project_name() {
 }
 
 # Default wait timeout (seconds) for `compose up -d --wait` and the
-# manual-poll fallback. Aligned at 120s after PR#30 public-IP E2E
-# (YUJ-1019 / GH#32) exposed that the previous 60s ceiling tripped on a
-# cold MySQL boot on small GCP instances. 120s comfortably covers the
-# first-time pull-and-init path on a freshly built host while still being
-# short enough to surface a stuck container instead of waiting forever.
-COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
+# manual-poll fallback. Raised from 120s → 240s after PR#30 GCP E2E
+# (YUJ-1059 / GH#42) showed a cold-boot timing window the previous
+# ceiling could not cover:
+#
+#   t=0    docker compose up -d
+#   t≈20s  mysql container becomes (healthy) — image's init scripts STILL
+#          running inside the container (create user, grant, init-extra-dbs.sh)
+#   t≈25s  octo-server starts (depends_on mysql healthy) and panic-restarts
+#          on "access denied" because the user it tries does not exist yet
+#   t≈45s  mysql init scripts finish; octo-server's next restart connects
+#   t≈90s  octo-server finally (healthy); admin / web / nginx unblock
+#
+# Empirically the entire chain reaches healthy in ~110s on a fresh GCP
+# small instance, so 120s sits right on the edge and routinely tripped.
+# 240s gives the cold-boot path comfortable headroom (mysql init +
+# octo-server panic-recover + dependent services come up) while still
+# surfacing genuinely stuck containers within a reasonable wall clock.
+# Hot reruns of `--up` on the same volume set complete in ~10s, well
+# under either ceiling, so the budget only matters on first boot.
+COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=240
 
 # Cleanup helper for `compose_up_and_wait`: idempotently kill the dots
 # subshell, reap it, and clear the EXIT trap. Used both from the normal
@@ -322,20 +336,21 @@ _compose_on_signal() {
 # falling back to a manual health poll on older Compose so users on
 # legacy installs do not see a hard failure. While we wait, a background
 # subshell prints a `.` every 5 seconds so the operator can SEE the
-# script is still alive on slow hosts (cold MySQL init can take 60-90s
-# during which compose itself prints nothing).
+# script is still alive on slow hosts (cold MySQL init + octo-server
+# panic-recover can take 90-110s during which compose itself prints
+# nothing).
 #
-# On failure (timeout, hard error, or one or more containers ending in a
-# fatal state) we dump `compose ps`, list the specific failing service
-# names, and print a `logs <svc>` hint for each so the operator has an
-# immediate next step instead of a bare non-zero exit. Returns the exit
-# code of the compose call (or the poll) so callers can fail-fast.
-compose_up_and_wait() {
+# This is the INNER "one attempt" helper used by `compose_up_and_wait`.
+# It does NOT emit diagnostics on failure — the wrapper decides whether
+# to retry first (silent) or surface the failure (with diagnostics).
+# `log_file` is filled with the compose stdout/stderr so the wrapper can
+# tail it on the final failure path. Returns the exit code of the
+# compose call (or the poll) so callers can fail-fast.
+_compose_up_and_wait_once() {
   local cc="$1"
-  local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
-  local rc=0 log_file ps_snapshot failing_svcs
-
-  log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
+  local timeout="$2"
+  local log_file="$3"
+  local rc=0
 
   # Start the dots ticker. Sleep first so we do not print a leading dot
   # before compose has even forked. Output to stderr so it stays
@@ -374,9 +389,58 @@ compose_up_and_wait() {
   _compose_dots_stop
   trap - EXIT INT TERM
 
+  return "${rc}"
+}
+
+# Public wrapper around `_compose_up_and_wait_once` with retry-once on
+# the first timeout. GH#42 (YUJ-1059) rationale:
+#
+# Coda's OOTB Phase 2 from-zero E2E on GCP repeatedly hit a cold-boot
+# race where mysql becomes healthy (~20s) but its init scripts are
+# still running for another ~25s. octo-server starts during that
+# window (depends_on mysql healthy), panics on "access denied", and
+# restarts 5+ times before mysql is actually accepting connections.
+# A subsequent manual `docker compose up -d --wait` from the same
+# directory completes in <10s because mysql init is finished and
+# octo-server connects cleanly. We codify that observation: if the
+# first wait timed out, retry once with the same timeout — the
+# second pass rides the now-warm state and usually clears in seconds.
+# Hard-failure modes (Restarting, Dead, Exited non-zero) are not
+# affected: the second attempt sees the same fatal state and fails
+# again, at which point we surface the full diagnostics. This is
+# strictly additive: a stack that came up cleanly on the first try
+# pays nothing.
+compose_up_and_wait() {
+  local cc="$1"
+  local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local rc=0 log_file ps_snapshot failing_svcs
+
+  log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
+
+  set +e
+  _compose_up_and_wait_once "${cc}" "${timeout}" "${log_file}"
+  rc=$?
+  set -e
+
+  if (( rc != 0 )); then
+    warn ""
+    warn "First wait did not reach healthy within ${timeout}s (rc=${rc})."
+    warn "Retrying once — cold-boot races (mysql init still running while"
+    warn "octo-server panic-restarts on 'access denied') typically clear"
+    warn "on the second pass once the upstream finishes warming."
+    set +e
+    _compose_up_and_wait_once "${cc}" "${timeout}" "${log_file}"
+    rc=$?
+    set -e
+    if (( rc == 0 )); then
+      info "Second wait succeeded — stack now healthy."
+    fi
+  fi
+
   if (( rc != 0 )); then
     err ""
     err "compose up did not reach a healthy state within ${timeout}s (or compose itself failed; rc=${rc})."
+    err "(Both the initial wait and the one retry timed out / failed.)"
     if [[ -s "${log_file}" ]]; then
       err "── Last compose output (tail) ────────────────────────────────"
       tail -n 40 "${log_file}" | sed 's/^/    /' >&2 || true
@@ -557,15 +621,17 @@ Generation:
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
   --up                After writing .env, run `docker compose up -d --wait
-                      --wait-timeout 120` and block until every long-
+                      --wait-timeout 240` and block until every long-
                       running service is healthy AND every one-shot init
                       job (preflight / minio-init) exited 0. On timeout
                       or startup failure: print `compose ps`, list the
                       specific failing service names, and emit one
                       `logs <svc>` hint for each before exit 1. A '.'
                       prints every 5 seconds while waiting so the run is
-                      visibly alive on slow hosts (cold MySQL init can
-                      take 60-90s).
+                      visibly alive on slow hosts (cold MySQL init +
+                      octo-server panic-recover takes ~90-110s on small
+                      GCP instances; retries once on the first timeout
+                      to ride out transient cold-boot races).
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --verify            Probe nginx / octo-server / matter / object-store
@@ -604,9 +670,28 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     fatal "curl is required for --verify (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --verify\`."
   fi
   CC="$(compose_cmd)"
+  # GH#40 (YUJ-1059): probe host precedence is OCTO_EXTERNAL_IP > OCTO_DOMAIN.
+  #
+  # Previously `--verify` always built `BASE_URL=http://${OCTO_DOMAIN}:...`.
+  # On a typical public-IP deployment the operator runs
+  #     setup.sh --non-interactive --ip <public-IP>
+  # which writes `.env` with the supplied IP into OCTO_EXTERNAL_IP but leaves
+  # OCTO_DOMAIN at its `octo.local` default (no DNS). `--verify` then probed
+  # `http://octo.local:28080` which does not resolve from the host itself,
+  # so 8/11 steps reported FAIL while `curl http://127.0.0.1:28080` and
+  # `curl http://<public-IP>:28080` both PASSed — the stack was healthy,
+  # only the probe URL was wrong (octo-deployment GH#40, surfaced by Coda's
+  # OOTB Phase 2 from-zero E2E on GCP octo-ootb-e2e-v12).
+  #
+  # Fix: prefer OCTO_EXTERNAL_IP when set; fall back to OCTO_DOMAIN so the
+  # DNS-configured deployment path (octo.example.com → public IP) keeps
+  # working unchanged. Empty OCTO_EXTERNAL_IP means "no explicit IP" and
+  # the historical OCTO_DOMAIN-only path is preserved.
+  EXT_IP="$(env_get OCTO_EXTERNAL_IP "")"
   DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-  BASE_URL="http://${DOMAIN}:${HTTP_PORT}"
+  PROBE_HOST="${EXT_IP:-${DOMAIN}}"
+  BASE_URL="http://${PROBE_HOST}:${HTTP_PORT}"
   fails=0
 
   step "container health (${CC} ps)"
@@ -786,7 +871,11 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # syntax / runtime error inside the heredoc body (e.g. a typo turning a
   # name-resolution failure into a silent pass). The explicit `if` keeps
   # the intent ("python3 exit code drives WS_STATUS, nothing more") legible.
-  if WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
+  # GH#40 (YUJ-1059): probe host must match BASE_URL host above
+  # (OCTO_EXTERNAL_IP > OCTO_DOMAIN). Otherwise on a GCP-style
+  # public-IP-only deploy the WS probe tries to resolve `octo.local`
+  # while the rest of `--verify` correctly hits the public IP.
+  if WS_OUT="$(python3 - "${PROBE_HOST}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
 import base64, os, re, socket, sys
 host, port = sys.argv[1], int(sys.argv[2])
 key = base64.b64encode(os.urandom(16)).decode()
@@ -1515,6 +1604,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
   echo ""
   info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
   info "A '.' will print every 5s while we wait so you know the script is still alive."
+  info "(If the first wait times out, setup.sh retries once — cold-boot races usually clear on the second pass.)"
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
   else
