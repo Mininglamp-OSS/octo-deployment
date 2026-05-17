@@ -14,6 +14,27 @@ This stack targets:
 For multi-node / production, use `kustomize/base/` and bring your own
 DB / cache / object store.
 
+> 中文版：[README.zh.md](./README.zh.md)
+
+## TL;DR — fastest path from `git clone` to a usable OCTO
+
+```bash
+git clone https://github.com/Mininglamp-OSS/octo-deployment.git
+cd octo-deployment
+./setup.sh                                  # interactive prompts
+(cd docker && docker compose up -d --wait)  # subshell: stay in repo root
+./setup.sh --verify                         # smoke test (admin login + presign PUT)
+
+# Open in browser, password printed at the end of setup.sh:
+#   Admin: http://<your-domain>:28080/admin/   (user: superAdmin)
+#   Web:   http://<your-domain>:28080/
+```
+
+The single open port for client traffic is **TCP 28080** (configurable
+via `OCTO_HTTP_PORT`). All backing services (MinIO API/console, MySQL,
+Redis, WuKongIM monitor, direct REST ports) default to loopback. See
+[Network surface](#network-surface) for the rationale.
+
 ---
 
 ## ⚠ Pre-flight: existing OCTO deployments on this host
@@ -21,13 +42,17 @@ DB / cache / object store.
 > **READ THIS BEFORE EVERY `docker compose up -d` / `docker compose down -v`
 > if there is any chance another OCTO stack already lives on this host.**
 
-`docker-compose.yaml` pins the Compose project name to `octo` (top-level
-`name: octo`). That stabilises the in-stack DNS names (`mysql`, `redis`,
-`octo-server`, …) so the rest of the config can reference them by literal
-hostname. The side effect is that **two independent clones of this repo
-on the same host default to the same project name** — meaning a
-`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase the
-named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
+`docker-compose.yaml` sets a top-level `name: octo` as the default
+project name (so a vanilla clone produces stable in-stack DNS names
+`mysql`, `redis`, `octo-server`, … referenceable by literal hostname).
+Compose v2 precedence still lets `COMPOSE_PROJECT_NAME` override that
+top-level `name:` — both for the network/container suffix AND (via the
+explicit `name:` on each volume in the `volumes:` block) for the named
+volumes themselves. The side effect of the default is that **two
+independent clones of this repo on the same host that DO NOT override
+the project name share the same volumes** — meaning a
+`docker compose down -v` from a "fresh" clone in `/tmp/foo` will erase
+the named volumes (and therefore the MySQL data, MinIO objects, WuKongIM
 message queues, etc.) belonging to a production clone in
 `/opt/octo-deployment`. That is exactly how `im-test` lost its entire
 user database on 2026-05-16 (INCIDENT-2026-05-16-001).
@@ -46,6 +71,16 @@ cd docker
 docker compose up -d                  # volumes: octo-fz_mysql-data, …
 ```
 
+> 🔒 **`setup.sh` persists `COMPOSE_PROJECT_NAME` into `docker/.env`
+> after you pick it.** Compose auto-loads `docker/.env` before reading
+> either the YAML `name:` or the calling shell's
+> `COMPOSE_PROJECT_NAME`, so a later `cd docker && docker compose up -d`
+> from a fresh shell still scopes to the chosen project — you do NOT
+> have to re-`export` the variable on every login. This also means
+> `setup.sh --uninstall` reads the persisted value to scope its volume
+> teardown grep (`^${project}_`), so it cannot silently chew through
+> volumes from a different `octo-*` stack on the same host.
+
 The two stacks then have fully separate Docker volumes
 (`octo_mysql-data` vs `octo-fz_mysql-data`), networks
 (`octo_octo-net` vs `octo-fz_octo-net`), and container names
@@ -58,8 +93,8 @@ removes its own state.
 > file still publishes the same host ports
 > (`OCTO_HTTP_PORT`, `OCTO_HTTPS_PORT`, `OCTO_MYSQL_PORT`,
 > `OCTO_REDIS_PORT`, `OCTO_MINIO_API_PORT`, `OCTO_MINIO_CONSOLE_PORT`,
-> `OCTO_WUKONGIM_PORT`, `OCTO_WUKONGIM_WS_PORT`,
-> `OCTO_WUKONGIM_TCP_PORT`, `OCTO_SUMMARY_PORT`) and uses the same
+> `OCTO_WK_API_PORT`, `OCTO_WK_WS_PORT`,
+> `OCTO_WK_TCP_PORT`, `OCTO_WK_MONITOR_PORT`, `OCTO_SUMMARY_API_PORT`) and uses the same
 > default bridge subnet (`OCTO_NETWORK_SUBNET=172.28.0.0/24`). Two
 > live stacks on one host will fail with port-bind / IPAM-overlap
 > errors unless the second stack's `.env` also overrides every
@@ -78,15 +113,23 @@ and confirm the output only references the stack you mean to wipe:
 ```bash
 # 1. List Docker volumes that would be removed (must all belong to YOUR project)
 docker compose config --volumes        # the volume keys this file declares
-docker volume ls | grep -E '^octo([-_]|$)' # the actual on-disk volumes touched
+# Pin the scan to YOUR project — use literal prefix (grep -F), not the broad
+# `^octo([-_]|$)` regex which matches every OCTO stack on this host.
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env 2>/dev/null | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_" # actual volumes touched
 
 # 2. List containers in the OCTO namespace (must all belong to YOUR project)
 docker ps --filter 'name=octo' --format '{{.Names}}'
 
 # 3. If anything in (1) or (2) is NOT yours, STOP. Set
-#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check:
-#       COMPOSE_PROJECT_NAME=octo-fz docker compose config --volumes
-#       COMPOSE_PROJECT_NAME=octo-fz docker ps
+#    COMPOSE_PROJECT_NAME to your stack's suffix and re-check.
+#    `docker ps` itself does NOT read COMPOSE_PROJECT_NAME (that env
+#    var is consumed by `docker compose` only), so the command form
+#    has to either go through `docker compose ps` OR filter by the
+#    project-name prefix directly:
+#       COMPOSE_PROJECT_NAME=octo-fz docker compose ps
+#       docker ps --filter name=octo-fz
 ```
 
 `setup.sh` runs an equivalent check at the top of each invocation and
@@ -113,10 +156,16 @@ mean to do this on this host?" gate.
   binary on `$PATH`.
 - The Docker daemon is running and the invoking user can reach it
   (`docker info` succeeds without `sudo`).
-- Ports `28080` (nginx HTTP) and `28083` (octo-web) free on the host,
-  plus `127.0.0.1:28081 / :28082 / :28086 / :23306 / :26379 / :29000 /
-  :29001` for the loopback-bound backing services. Override the port
-  numbers via `OCTO_*_PORT` in `docker/.env` if any of those clash.
+- **One open TCP port for client traffic**: `28080` (nginx HTTP,
+  `OCTO_HTTP_PORT`). When you bring up HTTPS via the certs flow, the
+  client port becomes `28443` (`OCTO_HTTPS_PORT`). All other ports
+  (MinIO, MySQL, Redis, WuKongIM monitor, direct REST) default to
+  loopback. The WuKongIM native chat transports (`25100` TCP / `25200`
+  WS) only need to be reachable if you connect **native chat clients**
+  directly to WuKongIM; browser / SPA chat traffic flows through nginx
+  `/ws`. The WuKongIM manager API on `25001` is an admin / debug
+  surface (not a chat transport) and stays on loopback regardless of
+  client kind — see the network-surface table below.
 - ≥ 4 GiB RAM, ≥ 10 GiB free disk for the named volumes.
 - Outbound network access to `docker.io` (or a configured mirror) for
   pulling the `mininglamposs/*`, `mysql:8`, `redis:7-alpine`,
@@ -130,38 +179,171 @@ Recommended (interactive setup):
 ```bash
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
-./setup.sh                          # interactive prompts
-cd docker && docker compose up -d
+./setup.sh                                  # interactive prompts
+(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
+./setup.sh --verify                         # admin login + presign PUT end-to-end
 ```
+
+`setup.sh` auto-detects the public IP via `ifconfig.me`. If you run
+on a host that has one (cloud VM, bare-metal with public IPv4), the
+prompt suggests the detected IP as your `OCTO_DOMAIN` default —
+override with a real DNS name when you have one, or accept the IP
+for an IP-only deployment.
 
 Or non-interactive:
 
 ```bash
 ./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d
+(cd docker && docker compose up -d --wait)
+./setup.sh --verify
 ```
 
 To enable the optional LLM summary services, add `--summary`:
 
 ```bash
 ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-cd docker && docker compose up -d
+(cd docker && docker compose up -d --wait)
 ```
 
 `setup.sh` writes `docker/.env` with rotated random secrets and a
-generated `OCTO_ADMIN_PWD`. It is the only path that gets a fresh
-checkout to a `(healthy)` stack without manual editing.
+generated `OCTO_ADMIN_PWD`, then **prints the admin URL + password at
+the end of the run** so you do not have to grep `.env` for them. It is
+the only path that gets a fresh checkout to a `(healthy)` stack
+without manual editing.
 
 Once healthy, the stack is reachable through nginx on
 `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (default `http://octo.local:28080`).
 Add an `/etc/hosts` entry for `octo.local` if you keep the default domain.
 
-Tear-down (drops the named volumes too — destructive):
+### `setup.sh --verify` smoke test
+
+After `docker compose up -d --wait` reports all services healthy, run
+the smoke test to confirm the *external* surface actually works:
 
 ```bash
-# ⚠ Read "Pre-flight: existing OCTO deployments on this host" above first.
-docker compose down -v
+./setup.sh --verify
 ```
+
+The script probes (and prints PASS/FAIL for each):
+
+1. `docker compose ps` reports no `(unhealthy)` containers, no fatal
+   states (`Exited (1)` / `Restarting` / `Dead`), and no expected
+   service that is missing or cleanly stopped
+2. nginx vhost up (`GET /_nginx_up`)
+3. octo-server REST (`GET /api/v1/health`)
+4. octo-matter (`GET /matter/health`) — **counted** toward failures
+5. MinIO via nginx (`GET /minio/health/live`)
+6. admin SPA reachable (`GET /admin/`)
+7. web SPA reachable (`GET /`) — confirms the user-facing SPA is
+   served end-to-end through the same nginx vhost as `/api/` and `/ws`
+8. WuKongIM `/ws` upgrade probe (`GET /ws` with a real RFC 6455
+   WebSocket-upgrade handshake via `python3` raw socket) — catches a
+   `docker stop wukongim` that leaves the container in `Exited (0)`
+   and slips past `(unhealthy)` and the fatal-state set; accepts
+   `101` / `400` / `426` as healthy and treats `502` / `503` / `504`
+   / `000` / other 4xx-5xx as failure
+9. **admin login** (`POST /api/v1/manager/login` as `superAdmin` with
+   `OCTO_ADMIN_PWD` from `.env`) — exercises the octo-server + MySQL +
+   bcrypt + Redis-cache chain
+10. **presigned PUT issuance** (`GET /api/v1/file/upload/credentials`) —
+    exercises octo-server's MinIO IAM credential path
+11. **1-byte PUT to the signed URL** — exercises nginx forwarding the
+    SigV4 path verbatim AND MinIO accepting the signature (this is the
+    exact code path that silently dropped image messages on the dual-port
+    form before single-port reverse-proxy landed; see
+    OOTB-BUG-2026-05-17-001).
+
+Exit code is non-zero on any failure. `python3` is a **hard
+prerequisite** of `--verify` — step 8 (WuKongIM `/ws` upgrade probe)
+opens a raw socket from python3, and steps 9-11 (admin login, presign
+issuance, SigV4 PUT) parse JSON via `python3 -c 'import json'`.
+Silently skipping the JSON-parse steps was the gap that hid
+OOTB-BUG-2026-05-17-001. Missing `python3` now fails fast with a
+non-zero exit; install it (every modern Linux distro ships it in the
+base image) and re-run. This is what to run on a new host to confirm
+"deployment actually works end-to-end" — separate from "containers
+booted".
+
+Step 11 leaves a 1-byte sentinel object in the `file` bucket
+(`octo-verify-<timestamp>-<pid>.txt`). It is intentionally left in
+place — the bundled `minio/minio` image does NOT ship the `mc` client
+(`mc` lives in the separate `minio/mc` image, which is only used by the
+one-shot `minio-init` container), so the obvious
+`docker exec <project>-minio-1 mc rm ...` command would always fail. A
+single byte per `--verify` run is well below noise; if you absolutely
+need a clean bucket, run `mc` from its own image against the bucket via
+the project's docker network, or hit MinIO's S3 DELETE API with the
+admin credentials in `docker/.env`.
+
+### Uninstall / reset
+
+The `setup.sh --uninstall` subcommand walks you through teardown with
+three granularity levels:
+
+```bash
+./setup.sh --uninstall
+```
+
+```
+Pick teardown granularity:
+  1) Full uninstall   — stop containers AND remove named volumes (DATA LOSS)
+  2) Data-only reset  — remove named volumes only (containers will be recreated next up)
+  3) Containers only  — stop + remove containers, keep volumes (safe restart prep)
+  q) Quit
+```
+
+Option 1 is destructive — the script prints the volumes about to be
+removed and requires you to type `YES` to confirm. Before running
+option 1 or 2, verify the volumes belong to YOUR stack. Always pin the
+match to your literal project prefix (`${COMPOSE_PROJECT_NAME}_`), NOT
+the broad `^octo([-_]|$)` regex — that regex matches every OCTO stack
+on the host (e.g. `octo`, `octo-fz`, `octo-prod`) and can mask
+neighboring-stack volumes that you do NOT want to remove.
+
+```bash
+# Read your project name from docker/.env (setup.sh persists it there)
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' docker/.env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+
+# List the volumes that would be removed for THIS project only
+docker volume ls --format '{{.Name}}' | grep -F "${PROJECT}_"
+```
+
+**🟢 Recommended:** use `./setup.sh --uninstall` — it validates the
+project name against the Compose pattern, builds the volume list with
+literal-prefix matching, previews exactly what will be deleted, and
+requires a `YES` confirmation. The manual `docker compose` / `docker
+volume rm` commands below are provided only for operators who already
+know which project they are tearing down and prefer raw tooling.
+
+Manual equivalents (raw compose — only after the project-name probe above):
+
+```bash
+# Full uninstall (DATA LOSS — irreversible)
+# `docker compose down -v` only removes the volumes declared by THIS
+# compose project (resolved from COMPOSE_PROJECT_NAME in docker/.env),
+# so it is safe across multiple OCTO stacks as long as your project
+# name is set correctly.
+cd docker && docker compose down -v --remove-orphans
+
+# Data-only reset — keep containers' images, drop only this project's volumes.
+# `compose down` first, then literal-prefix volume removal (grep -F, not -E,
+# so a project name like `octo-fz` will NOT also match `octo-fz-prod_*`).
+PROJECT="$(grep -E '^COMPOSE_PROJECT_NAME=' .env | cut -d= -f2)"
+PROJECT="${PROJECT:-octo}"
+docker compose down
+docker volume ls --format '{{.Name}}' \
+  | grep -F "${PROJECT}_" \
+  | xargs -r docker volume rm
+
+# Containers only — safe restart prep (volumes preserved)
+cd docker && docker compose down --remove-orphans
+```
+
+**⚠ Before any `docker compose down -v`** read
+[Pre-flight: existing OCTO deployments on this host](#-pre-flight-existing-octo-deployments-on-this-host)
+above — if you have multiple OCTO stacks on this host with the same
+project name, `down -v` from any clone will wipe the shared volumes.
 
 ### Manual setup (advanced)
 
@@ -225,13 +407,15 @@ Everything else has sane defaults documented inline in
 
 ### Backing-service host bindings
 
-`OCTO_MYSQL_BIND`, `OCTO_REDIS_BIND`, `OCTO_MINIO_CONSOLE_BIND`
-default to `127.0.0.1`. This means MySQL (`23306`), Redis (`26379`)
-and the MinIO console (`29001`) are **only reachable from the host
-loopback**. The nginx-proxied paths (`/`, `/api/`, `/v1/`, `/admin/`,
-`/matter/`, `/summary/`, `/ws`, `/minio/`) remain public — note that
-`/minio-console/` is **not** in that list (see "Network surface"
-below).
+`OCTO_MYSQL_BIND`, `OCTO_REDIS_BIND`, `OCTO_MINIO_API_BIND`,
+`OCTO_MINIO_CONSOLE_BIND` default to `127.0.0.1`. This means MySQL
+(`23306`), Redis (`26379`), MinIO API (`29000`) and the MinIO console
+(`29001`) are **only reachable from the host loopback**. The
+nginx-proxied paths (`/`, `/api/`, `/v1/`, `/admin/`, `/matter/`,
+`/summary/`, `/ws`, and the bucket-name routes
+`/file|chat|moment|sticker|report|chatbg|common|download|group|avatar`)
+remain public — note that `/minio-console/` is **not** in that list
+(see "Network surface" below).
 
 The same loopback default applies to the direct ports for
 `octo-server` (`OCTO_SERVER_BIND`), `octo-matter` (`OCTO_MATTER_BIND`),
@@ -241,11 +425,15 @@ monitor port (`OCTO_WK_MONITOR_BIND`). The first three skip the
 `/api/`, `/v1/`, `/matter/`, and `/summary/`, so leaving them
 loopback-only keeps an operator-debug port from becoming a
 rate-limit-free production path. The WuKongIM monitor port is an
-admin surface, not a chat transport — chat clients reach WuKongIM via
-the user-facing API/TCP/WS ports, which stay on `0.0.0.0`.
-
-`OCTO_MINIO_API_BIND` is the asymmetric case — see "Network surface"
-below for the rationale.
+admin surface, not a chat transport. The user-facing WuKongIM ports
+(API `25001` / TCP `25100` / WS `25200`) **also default to
+`127.0.0.1`** — browser / SPA chat traffic reaches WuKongIM through
+nginx `/ws`, and the manager API on `25001` is reached via
+`docker exec` or an `ssh -L` tunnel against the loopback bind. Flip
+`OCTO_WK_TCP_BIND` / `OCTO_WK_WS_BIND` to `0.0.0.0` only if you run
+a native mobile / desktop IM client that dials WuKongIM directly
+(see [Advanced: direct WuKongIM transports](#advanced-direct-wukongim-transports)
+below); the manager-API bind should stay loopback in OOTB deploys.
 
 Override the loopback defaults only if you have rotated all
 credentials and placed the host behind a firewall. **Redis runs
@@ -257,20 +445,27 @@ into the redis service. See the "Hardening checklist" for the steps.
 
 ## Network surface
 
-The stack exposes two distinct sets of host ports. Operators should
-know which is which before changing any `OCTO_*_BIND` value.
+The OOTB stack is **single-port for client traffic**. Browser / mobile
+clients only need to reach the nginx vhost on `OCTO_HTTP_PORT` (default
+`28080`); everything else — MinIO API, MinIO console, MySQL, Redis,
+WuKongIM monitor, and the direct REST ports for octo-server / matter /
+summary-api — defaults to loopback. **Operators only need to open one
+TCP port (28080) in their firewall.**
 
 | Service | Port (default) | Default bind | Why |
 | --- | --- | --- | --- |
-| nginx (HTTP) | `28080` | `0.0.0.0` | user-facing entrypoint |
+| **nginx (HTTP)** | **`28080`** | **`0.0.0.0`** | **user-facing entrypoint — the single open port** |
+| nginx (HTTPS) | `28443` (placeholder) | `0.0.0.0` | HTTPS form; disabled by default — see "HTTPS" section below |
+| octo-admin | `28082` | `127.0.0.1` | admin SPA — reached via nginx `/admin/` on `28080`. Direct port stays loopback so the admin UI is never on the public IP. Override `OCTO_ADMIN_BIND` only for short-lived diagnostics behind a private network / VPN. |
+| octo-web | `28083` | `127.0.0.1` | user SPA — reached via nginx `/` on `28080`. Direct port stays loopback. Override `OCTO_WEB_BIND` only for diagnostics. |
+| WuKongIM API | `25001` | `127.0.0.1` | **internal manager / debug API — NOT exposed through nginx**. There is no manager-API location in `docker/nginx/conf.d/octo.conf.template`; OOTB the API is reachable only from the host loopback. Reach it via `docker exec -it <wukongim-container> sh` for diagnostics, or — for short-lived remote access — `ssh -L 5001:127.0.0.1:25001 user@host` and hit `http://localhost:5001/`. Flip `OCTO_WK_API_BIND=0.0.0.0` only on a private network / VPN AFTER you have an auth proxy in front; the manager API has no built-in token gateway. |
+| WuKongIM TCP | `25100` | `127.0.0.1` | **native IM transport** — required ONLY if you run a mobile / desktop app that dials WuKongIM over native TCP (browser / SPA traffic uses `/ws` via nginx). To enable: set `OCTO_WK_TCP_BIND=0.0.0.0` in `.env` AND open TCP `25100` on your firewall — see [Advanced: direct WuKongIM transports](#advanced-direct-wukongim-transports). |
+| WuKongIM WS | `25200` | `127.0.0.1` | direct WebSocket port — same story as TCP above; browsers go through nginx `/ws`. Override `OCTO_WK_WS_BIND=0.0.0.0` only for native clients that bypass the nginx ingress. |
 | octo-server REST | `28081` | `127.0.0.1` | direct REST port for operator smoke tests; production traffic uses nginx `/api/` + `/v1/` (rate-limited via `octo_api`/`octo_auth` zones in `nginx.conf`). Override `OCTO_SERVER_BIND` to widen. |
-| octo-admin | `28082` | `0.0.0.0` | admin SPA (also reachable via `/admin/`) |
-| octo-web | `28083` | `0.0.0.0` | user SPA (also reachable via `/`) |
-| octo-matter | `28086` | `127.0.0.1` | direct matter port for operator smoke tests; production traffic uses nginx `/matter/`. Override `OCTO_MATTER_BIND` to widen. |
-| smart-summary API | `28087` | `127.0.0.1` | direct summary-api port for operator smoke tests; production traffic uses nginx `/summary/`. Override `OCTO_SUMMARY_API_BIND` to widen. |
-| WuKongIM API / TCP / WS | `25001` / `25100` / `25200` | `0.0.0.0` | chat client transports |
-| WuKongIM monitor | `25300` | `127.0.0.1` | observability / `/route` admin surface — not a user-facing transport. Override `OCTO_WK_MONITOR_BIND` for cross-host operator access. |
-| **MinIO API** | **`29000`** | **`0.0.0.0`** | **presigned URLs — see below** |
+| octo-matter | `28086` | `127.0.0.1` | direct matter port; production traffic via nginx `/matter/`. Override `OCTO_MATTER_BIND`. |
+| smart-summary API | `28087` | `127.0.0.1` | direct summary-api port; production traffic via nginx `/summary/`. Override `OCTO_SUMMARY_API_BIND`. |
+| WuKongIM monitor | `25300` | `127.0.0.1` | observability / `/route` admin surface — not a user-facing transport. |
+| MinIO API | `29000` | `127.0.0.1` | **single-port form**: object traffic flows through nginx bucket-name routing (`/{bucket}/{key}`). Widen `OCTO_MINIO_API_BIND` only for the legacy dual-port form (see [Dual-port advanced override](#dual-port-advanced-override) below). |
 | MinIO console | `29001` | `127.0.0.1` | admin only; reach via SSH tunnel (see below) |
 | MySQL | `23306` | `127.0.0.1` | backing service |
 | Redis | `26379` | `127.0.0.1` | backing service |
@@ -294,17 +489,28 @@ uncomment the commented-out `octo_minio_console` upstream and
 `/minio-console/` location block at the top of
 `docker/nginx/conf.d/octo.conf.template`.
 
-### Why the MinIO API port is public by design
+### Why single-port works for MinIO presigned URLs
 
 octo-server's `/api/v1/file/*` responses contain **presigned (SigV4)
-URLs that point at the MinIO API directly** — not through nginx. SigV4
-signs the canonical request path; any nginx rewrite (`/minio/...` ->
-`/...`) breaks the signature, so the browser must reach MinIO's `9000`
-port over the same hostname octo-server signed against. That is the
-value of `TS_MINIO_DOWNLOADURL`, which is fixed to host:port form (no
-path prefix) in `docker-compose.yaml`.
+URLs**. SigV4 signs the canonical request path, so any nginx path
+rewrite breaks the signature — but the nginx config does NOT rewrite.
+The bucket-name regex location in
+`docker/nginx/conf.d/octo.conf.template`:
 
-The data is protected by:
+```nginx
+location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
+    proxy_pass http://octo_minio_api;   # NO trailing slash — preserve SigV4 path
+    proxy_set_header Host $http_host;
+    ...
+}
+```
+
+forwards `/{bucket}/{key}` requests to MinIO as-is. The client signs
+against `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}/{bucket}/{key}` and
+MinIO verifies against the same canonical path. Both
+`TS_MINIO_DOWNLOADURL` (octo-server side) and `MINIO_SERVER_URL` (MinIO
+side) default to `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` so the two
+ends stay in sync. The data is protected by:
 
 - the **application-scoped IAM credentials** (`OCTO_MINIO_APP_*`) that
   octo-server signs with — provisioned by the one-shot `minio-init`
@@ -315,50 +521,112 @@ The data is protected by:
 - the **short TTL** of every presigned URL (minutes, not days),
 - octo-server's authorisation layer in front of `/api/v1/file/*`.
 
-Closing the port closes valid uploads / downloads. If you want a
-firewall-restricted deployment, restrict `29000` to the same client
-range that can reach `28080` — do not block it.
+A diagnostics-only `/minio/` location stays in nginx for sidecar
+probes (e.g. `curl http://host:28080/minio/health/live`); it is
+NOT used for client object traffic.
 
-If you absolutely need every public port to live behind nginx, you'd
-need a SigV4-aware proxy (e.g. one that re-signs each request) — that
-is out of scope for this compose stack.
+### Dual-port advanced override
 
-### Reverse-proxying MinIO behind a host nginx (TLS termination)
+The previous dual-port form — clients reaching MinIO directly on
+`OCTO_MINIO_API_PORT` (29000) — still works for operators who want it
+(sidecar diagnostics from another host, very high object throughput
+that wants to skip nginx, etc.). To use it:
 
-When a *host* nginx terminates TLS and proxies `https://your.host/`
-back to the compose stack on `OCTO_HTTP_PORT`, the SPA also needs
-`https://your.host/{bucket}/…` to reach MinIO. The in-compose nginx
-template ships with a bucket-name location that forwards those paths
-to `minio:9000` without rewriting the URI (SigV4 signs the canonical
-path):
-
-```nginx
-# in docker/nginx/conf.d/octo.conf.template, before `location /`
-location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
-    proxy_pass http://octo_minio_api;   # NO trailing slash — preserve SigV4 path
-    proxy_set_header Host $http_host;
-    ...
-}
+```bash
+# in docker/.env
+OCTO_MINIO_API_BIND=0.0.0.0
+TS_MINIO_DOWNLOADURL=http://<your-host>:29000
+MINIO_SERVER_URL=http://<your-host>:29000
 ```
 
-In that topology, **both** `MINIO_SERVER_URL` (consumed by MinIO itself
-for absolute redirects, multipart hints, and federated bucket
-discovery) **and** `TS_MINIO_DOWNLOADURL` (consumed by octo-server when
-it hands presigned URLs to browser clients) must point at the same
-client-facing host:
+…and open TCP `29000` in your firewall in addition to `28080`. There
+is no architectural reason to do this on a single-host deployment;
+the single-port default is the recommended path.
+
+### Advanced: direct WuKongIM transports
+
+The OOTB stack keeps WuKongIM's TCP (`25100`) and WebSocket (`25200`)
+ports bound to `127.0.0.1`. Browser / SPA chat traffic reaches
+WuKongIM through nginx's `/ws` location on `OCTO_HTTP_PORT` (`28080`)
+— that single open port covers the default user experience.
+
+A **native IM client** (mobile or desktop app that speaks WuKongIM's
+own framing instead of the nginx-proxied WebSocket) needs to dial
+those transports directly. In that case:
+
+```bash
+# in docker/.env
+OCTO_WK_TCP_BIND=0.0.0.0   # native TCP transport
+OCTO_WK_WS_BIND=0.0.0.0    # raw WebSocket without nginx in the middle
+# OCTO_WK_API_BIND=0.0.0.0 # debug / manager surface only — see note in "Network surface" above before opening this on a public IP (no nginx auth gateway in front).
+```
+
+Then open the matching host ports on your firewall **in addition to
+`28080`**:
+
+```bash
+sudo ufw allow 25100/tcp     # WuKongIM native TCP (only if needed)
+sudo ufw allow 25200/tcp     # WuKongIM direct WebSocket (only if needed)
+```
+
+Pure browser / web deployments do not need this and should keep the
+loopback defaults.
+
+### HTTPS form (TLS termination)
+
+`OCTO_HTTPS_PORT` (default `28443`) is the placeholder for the
+single-port-plus-TLS form. The cert wiring is NOT automated in this
+stack — see [`docker/certs/README.md`](certs/README.md) for the manual
+procedure (Let's Encrypt or self-signed). Once certs are in place,
+uncomment the 443 port mapping in `docker-compose.yaml`, the certs
+volume mount, and the HTTPS server block in
+`docker/nginx/conf.d/octo.conf.template`. Same single-port story —
+clients only need `OCTO_HTTPS_PORT` open; MinIO traffic still flows
+through nginx bucket-name routing under TLS.
+
+> ⚠️ **HTTPS env override required** — the compose defaults for
+> `MINIO_SERVER_URL`, `TS_MINIO_DOWNLOADURL`, and `TS_EXTERNAL_BASEURL`
+> all expand to `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`. The HTTPS
+> server block in nginx terminates TLS, but octo-server still hands
+> clients absolute URLs (presigned MinIO PUT/GET, base URLs in admin
+> responses) built from these three env vars. If you leave them at the
+> defaults, clients receive `http://…:28080` URLs and either get mixed
+> content errors or fall back through the HTTP listener. Until
+> [YUJ-984](https://github.com/Mininglamp-OSS/octo-deployment/issues) (`OCTO_PUBLIC_SCHEME` auto-derivation) lands, set the three
+> values explicitly in `docker/.env`:
+>
+> ```bash
+> # docker/.env — required when HTTPS server block is enabled
+> MINIO_SERVER_URL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_MINIO_DOWNLOADURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> TS_EXTERNAL_BASEURL=https://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}
+> ```
+>
+> Substitute the literal hostname and port (`.env` does not interpolate
+> `${...}` inside values: each value above must be the resolved string,
+> e.g. `https://octo.example.com:28443`). All three must agree on
+> scheme + host + port — SigV4 signs against this exact URL and
+> octo-server validates `TS_MINIO_DOWNLOADURL` as host:port-only on
+> startup (no path prefix). Also point `OCTO_WK_WSS_ADDR` at
+> `wss://${OCTO_DOMAIN}:${OCTO_HTTPS_PORT}/ws` if your clients should
+> open the WebSocket over TLS.
+
+### Reverse-proxying behind a host nginx (TLS termination at a different hostname)
+
+When a *host* nginx (different from the in-compose one) terminates TLS
+and proxies `https://your.host/` back to the compose stack on
+`OCTO_HTTP_PORT`, point both env vars at the public host:
 
 ```
 MINIO_SERVER_URL=https://your.host
 TS_MINIO_DOWNLOADURL=https://your.host
 ```
 
-Leaving either at the legacy `host:port` default while flipping the
-other will produce mixed-content failures (browser blocks HTTP redirect
-from HTTPS page) or SigV4 signature mismatches (signature signed for
-one host:scheme will not validate when MinIO re-emits the request
-against the other). The `docker-compose.yaml` defaults wire both to
-`http://${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}` so the single-host
-direct-MinIO mode keeps working without either override.
+Both must use the **same scheme + host:port** (no path prefix —
+`TS_MINIO_DOWNLOADURL` is validated host:port-only at octo-server
+startup). The bucket-name regex location in the in-compose nginx will
+still route `/{bucket}/{key}` to MinIO; just make sure the host nginx
+forwards those paths through to the compose stack.
 
 ---
 
@@ -547,8 +815,8 @@ Before exposing the stack beyond a developer laptop:
   still at their literal-string defaults. There is no longer a path
   for the OOTB stack to come up with placeholder credentials in
   place.
-- Keep `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` /
-  `OCTO_MINIO_CONSOLE_BIND` at `127.0.0.1`. Only widen after rotating
+- Keep `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` / `OCTO_MINIO_API_BIND`
+  / `OCTO_MINIO_CONSOLE_BIND` at `127.0.0.1`. Only widen after rotating
   credentials and placing the host behind a firewall.
 - Redis runs **without authentication** in this stack — there is no
   `--requirepass` on the `redis` service `command:`. Flipping
@@ -566,9 +834,10 @@ Before exposing the stack beyond a developer laptop:
   block in `nginx/conf.d/octo.conf.template`, treat
   `MINIO_ROOT_PASSWORD` rotation as a precondition — the public
   `OCTO_HTTP_PORT` then becomes a path to `mc admin`.
-- `OCTO_MINIO_API_BIND` stays `0.0.0.0` — see "Network surface · Why
-  the MinIO API port is public by design". Restrict the port at the
-  firewall layer if you need to limit reach, do not close it.
+- `OCTO_MINIO_API_BIND` is `127.0.0.1` in the single-port default —
+  client object traffic goes through nginx bucket-name routing. Only
+  widen if you have explicitly opted in to the dual-port advanced
+  override (see Network surface · Dual-port).
 - Narrow `OCTO_NETWORK_SUBNET` further (already defaults to `/24`) if
   it overlaps an existing VPN / VPC range.
 - `OCTO_MASTER_KEY` rotation gotcha: the master key is what
@@ -663,29 +932,39 @@ that fix (or `:latest` once it ships).
 ### Presigned URL access fails with "connection refused" / "name resolution"
 
 Symptom: image / file upload returns 200 from `/api/v1/file/*`, but
-the browser then hangs or 0-bytes when fetching the presigned URL.
+the browser then hangs or 0-bytes when fetching the presigned URL,
+**or** the chat UI shows an `[image]` chip but the receiver sees an
+empty bubble.
 
-The presigned URL points at `${OCTO_DOMAIN}:${OCTO_MINIO_API_PORT}`
-(default `http://octo.local:29000`), bypassing nginx. Check, in
-order:
+In the single-port form (default), presigned URLs point at the nginx
+vhost (`${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) and the bucket-name regex
+location forwards the request to MinIO. Check, in order:
 
-1. `OCTO_MINIO_API_BIND` is `0.0.0.0` (default). If you narrowed it
-   to `127.0.0.1`, only the host itself can reach the port — LAN /
-   browser clients on other machines will fail.
-2. `OCTO_MINIO_API_PORT` (default `29000`) is reachable from the
-   client's network — `curl -v http://${OCTO_DOMAIN}:29000/minio/health/live`
-   should return `200`.
-3. `${OCTO_DOMAIN}` resolves on the client (the `/etc/hosts` entry
+1. `OCTO_HTTP_PORT` (default `28080`) is reachable from the client
+   network — `curl -v http://${OCTO_DOMAIN}:28080/_nginx_up` should
+   return `200`.
+2. `${OCTO_DOMAIN}` resolves on the client (the `/etc/hosts` entry
    for `octo.local` has to exist on every machine that hits the UI,
    not just the host).
-4. `TS_MINIO_DOWNLOADURL` in the rendered config has **no path
-   component** — `docker compose config | grep TS_MINIO_DOWNLOADURL`
-   should print exactly `http://<host>:<port>`. octo-server PR#50 R4
-   rejects path-prefixed values at startup.
+3. `TS_MINIO_DOWNLOADURL` and `MINIO_SERVER_URL` agree — both should
+   default to `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (no path
+   prefix). Verify with `docker compose config | grep -E
+   '(TS_MINIO_DOWNLOADURL|MINIO_SERVER_URL)'`. octo-server rejects
+   path-prefixed download URLs at startup.
+4. The bucket-name regex location is present in
+   `docker/nginx/conf.d/octo.conf.template`:
+   `^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+`.
+   If you have customised the nginx config, make sure that block is
+   preserved.
 
-Do **not** "fix" this by routing the URL through nginx (`/minio/...`)
-— SigV4 signatures break under any path rewrite. See "Network surface
-· Why the MinIO API port is public by design" above.
+If you have explicitly opted in to the legacy dual-port form
+(`OCTO_MINIO_API_BIND=0.0.0.0` + `TS_MINIO_DOWNLOADURL=...:29000`),
+also confirm TCP `29000` is open to the client network. The
+single-port form does NOT need port `29000` open.
+
+Do **not** "fix" this by adding an nginx rewrite that strips
+`/{bucket}/` from the URI — SigV4 signatures break under any path
+rewrite. See "Why single-port works for MinIO presigned URLs" above.
 
 ### `WuKongIM /route` returns the literal string `${OCTO_DOMAIN}`
 
@@ -695,6 +974,37 @@ recursively expand `${...}` inside a `.env` value. Leave
 `docker-compose.yaml` builds the address from `OCTO_DOMAIN` /
 `OCTO_HTTP_PORT`. Set a literal value (e.g. `ws://1.2.3.4:28080/ws`)
 only when you want to override the auto-built default.
+
+### SPA route names that collide with MinIO bucket names
+
+The single-port reverse proxy routes any URL matching
+`^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+`
+to MinIO without rewriting the path (presigned URLs depend on the URI
+being byte-identical to what SigV4 signed). If you fork `octo-web` and
+add a frontend route that happens to land under one of these prefixes
+**and** the route's first path segment looks like a MinIO object key
+(`/chat/some-key`, `/group/some-id`, …), nginx will dispatch it to
+MinIO and the browser will see MinIO's XML `NoSuchKey` error instead of
+the SPA.
+
+Mitigations:
+
+- **Prefer SPA prefixes that are NOT in the bucket whitelist** —
+  `/conversations/`, `/teams/`, `/spaces/` are all collision-free.
+- **If you must keep a colliding prefix**, ensure the SPA segments
+  after it cannot be confused with object keys (e.g. namespace them
+  under `/chat/_app/<id>` so the regex still matches but the key is
+  guaranteed to be a 404 you can detect and bounce back to the SPA).
+- **Or**: tighten the bucket-name regex in
+  `docker/nginx/conf.d/octo.conf.template` to require the object-key
+  shape octo-server emits (currently `<bucket>/<unix-timestamp>/<uuid>/<uuid>.<ext>`
+  or `<bucket>/<sanitised-path>` for the upload-path form). The default
+  regex was deliberately kept permissive because the upload-path form
+  has no fixed prefix; narrowing it requires auditing every call site
+  of `getUploadCredentials` in `octo-server` first.
+
+The OOTB SPA shipped in this repo does not collide with any of these
+prefixes, so the default regex is safe out of the box.
 
 ### MySQL refuses to start with "ERROR 1396 (HY000): Operation CREATE USER failed"
 

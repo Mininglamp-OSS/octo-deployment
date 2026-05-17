@@ -52,8 +52,39 @@ See [LICENSE](./LICENSE) for the full Apache 2.0 license terms.
 > this repository — it brings up the full OCTO stack (server + admin + web +
 > matter + smart-summary + WuKongIM + MySQL + Redis + MinIO + nginx) with one
 > `docker compose up -d`. See [`docker/README.md`](./docker/README.md) for the
-> walkthrough. This `kustomize/` tree remains the canonical reference for
-> multi-node Kubernetes deployment.
+> walkthrough (中文版 [`docker/README.zh.md`](./docker/README.zh.md)). This
+> `kustomize/` tree remains the canonical reference for multi-node Kubernetes
+> deployment.
+
+## Single-host Docker Compose trial (shortest path)
+
+```bash
+git clone https://github.com/Mininglamp-OSS/octo-deployment.git
+cd octo-deployment
+./setup.sh                                  # interactive: auto-detects public IP, generates all secrets
+(cd docker && docker compose up -d --wait)  # subshell — keeps you in repo root
+./setup.sh --verify                         # admin login + presign PUT end-to-end
+```
+
+`setup.sh` prints the admin URL + superAdmin password at the end of
+the run. The password is also persisted to `docker/.env` (mode 600) —
+treat that file as a secret and rotate the password from the admin UI
+after first login (see `docker/README.md` "First-admin bootstrap").
+The OOTB stack is
+single-port for clients: only **TCP 28080** (`OCTO_HTTP_PORT`, the
+nginx HTTP vhost) needs to be open. With HTTPS the client port becomes
+`28443` (`OCTO_HTTPS_PORT`). All other ports (MinIO, MySQL, Redis,
+WuKongIM monitor, direct REST) default to loopback.
+
+Uninstall / reset is interactive:
+
+```bash
+./setup.sh --uninstall
+# Three granularity levels: 1) full   2) data-only   3) containers only
+```
+
+Full docs: [`docker/README.md`](./docker/README.md) (Uninstall / Reset,
+Network surface, MinIO bootstrap, Hardening checklist, troubleshooting).
 
 ## Components
 

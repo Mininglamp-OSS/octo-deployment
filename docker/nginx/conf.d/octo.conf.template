@@ -147,16 +147,30 @@ server {
         proxy_send_timeout  3600s;
     }
 
+    # /minio/ is a diagnostics / sidecar passthrough to the MinIO API.
+    # NOT used by clients for presigned-URL traffic — those flow through
+    # the bucket-name regex location below, which preserves the SigV4
+    # canonical path verbatim. The `proxy_pass` here intentionally has
+    # NO trailing slash and NO rewrite so any request that does land on
+    # `/minio/<anything>` is forwarded as-is (preserves any SigV4 path
+    # the caller may have signed against this prefix). Operators reach
+    # this for `curl -fsS http://host:28080/minio/health/live`-style
+    # probes (MinIO's built-in liveness endpoint) without opening port
+    # 29000. Note the SINGLE `/minio/` — the first segment is the nginx
+    # location, the rest (`health/live`) is MinIO's own path. Doubling
+    # to `/minio/minio/health/live` would make MinIO parse `minio` as a
+    # bucket name and return 404.
     location /minio/ {
-        proxy_pass         http://octo_minio_api/;
+        proxy_pass         http://octo_minio_api;
         proxy_http_version 1.1;
-        proxy_set_header   Host              $host;
+        proxy_set_header   Host              $http_host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
         proxy_set_header   Connection        "";
         proxy_read_timeout 600s;
         proxy_request_buffering off;
+        proxy_buffering off;
     }
 
     # /minio-console/ is intentionally NOT exposed here — see the comment
@@ -402,15 +416,17 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #     }
 #
 #     location /minio/ {
-#         proxy_pass         http://octo_minio_api/;
+#         # See HTTP server above — diagnostics passthrough, no path rewrite.
+#         proxy_pass         http://octo_minio_api;
 #         proxy_http_version 1.1;
-#         proxy_set_header   Host              $host;
+#         proxy_set_header   Host              $http_host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
 #         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
 #         proxy_set_header   X-Forwarded-Proto $scheme;
 #         proxy_set_header   Connection        "";
 #         proxy_read_timeout 600s;
 #         proxy_request_buffering off;
+#         proxy_buffering off;
 #     }
 #
 #     location = /admin {
