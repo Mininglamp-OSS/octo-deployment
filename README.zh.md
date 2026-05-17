@@ -54,7 +54,7 @@ cd octo-deployment
 ./setup.sh --verify                         # admin login + presign PUT 端到端检查
 ```
 
-在全新机器上想一条命令搞定，用 `--up`（GH#32）—— `setup.sh` 写完 `docker/.env` 之后自己起栈，**阻塞直到每个容器都 `(healthy)`**（超时则打印 `compose ps` + `logs <unhealthy-svc>` 提示并 exit 1）。等待期间每 5 秒打一个 `.`，方便看到脚本还活着：
+在全新机器上想一条命令搞定，用 `--up`（GH#32）—— `setup.sh` 写完 `docker/.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。等待期间每 5 秒打一个 `.`，方便看到脚本还活着：
 
 ```bash
 ./setup.sh --non-interactive --ip <PUBLIC_IP> --up   # 写 .env + 起栈 + 等齐 healthy

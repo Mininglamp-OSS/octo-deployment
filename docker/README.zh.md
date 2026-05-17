@@ -113,7 +113,7 @@ cd octo-deployment
 ./setup.sh --verify
 ```
 
-或者，在全新机器上想一条命令搞定 `.env` 生成 + 起栈，用 `--up`（GH#32 引入）——`setup.sh` 会写完 `.env` 之后自己起栈，**阻塞直到每个容器都 `(healthy)`**（或在超时后打印 `compose ps` + `logs <unhealthy-svc>` 提示并 exit 1）：
+或者，在全新机器上想一条命令搞定 `.env` 生成 + 起栈，用 `--up`（GH#32 引入）——`setup.sh` 会写完 `.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1：
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4 --up

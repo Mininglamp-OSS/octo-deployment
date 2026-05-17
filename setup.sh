@@ -164,15 +164,24 @@ compose_poll_healthy() {
     # to a single `compose ps` call per iteration keeps the poll cheap.
     statuses="$(cd "${DOCKER_DIR}" && ${cc} ps --format '{{.Name}} {{.Status}}' 2>/dev/null || true)"
     if [[ -n "${statuses}" ]]; then
+      # Hard-fail only on terminal states (Exited(non-zero) / Restarting / Dead).
+      # `(unhealthy)` is intentionally NOT a hard fail here: per
+      # `docker compose up --wait --wait-timeout` semantics (which this
+      # fallback mirrors for Compose < 2.20), a single `(unhealthy)`
+      # snapshot does not end the wait — the container may flap back to
+      # `(healthy)` once its upstream finishes booting (mysql is the
+      # canonical example). Only a `Restarting` / non-zero `Exited`
+      # state — or running out the timeout — ends the wait with a
+      # failure. YUJ-1019 codex review P1 #2.
       if ! failed="$(check_compose_running_states "${statuses}")"; then
         echo "FATAL: service(s) in failed state:" >&2
         printf '%s\n' "${failed}" | sed 's/^/    /' >&2
         return 1
       fi
-      if echo "${statuses}" | grep -q '(unhealthy)'; then
-        return 1
-      fi
-      if ! echo "${statuses}" | grep -q '(health: starting)'; then
+      # Healthy iff there is no `(unhealthy)` AND no `(health: starting)`
+      # in the snapshot. If either is present, keep polling until the
+      # timeout expires (do NOT early-return).
+      if ! echo "${statuses}" | grep -qE '\(unhealthy\)|\(health: starting\)'; then
         return 0
       fi
     fi
@@ -218,6 +227,45 @@ validate_compose_project_name() {
 # short enough to surface a stuck container instead of waiting forever.
 COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
 
+# Cleanup helper for `compose_up_and_wait`: idempotently kill the dots
+# subshell, reap it, and clear the EXIT trap. Used both from the normal
+# return path and from the INT/TERM trap, so it must tolerate being
+# called twice. The dots PID is read from a script-global so the INT/TERM
+# handler can see it (a `local` in the function would be invisible to the
+# trap).
+_COMPOSE_DOTS_PID=""
+_compose_dots_stop() {
+  if [[ -n "${_COMPOSE_DOTS_PID}" ]]; then
+    kill "${_COMPOSE_DOTS_PID}" 2>/dev/null || true
+    wait "${_COMPOSE_DOTS_PID}" 2>/dev/null || true
+    _COMPOSE_DOTS_PID=""
+    printf '\n' >&2
+  fi
+}
+# Signal-specific handler: stop the dots, then exit with the canonical
+# 128+SIGNUM code so the script terminates cleanly instead of silently
+# continuing into the success/diagnostic path. Without this, an operator
+# Ctrl-C during `compose up --wait` would clean the dots and then fall
+# through into the success banner. Codex review P1 #1.
+#
+# Note: we `exit` rather than `kill -s "${sig}" "$$"` because the latter
+# is unreliable here — bash only delivers the re-raised signal at the
+# next "safe" point, and by then the trap has already returned and the
+# script may have moved past the `compose_up_and_wait` invocation. A
+# direct `exit 128+SIGNUM` gives operators and CI wrappers a predictable
+# exit status.
+_compose_on_signal() {
+  local sig="$1" code
+  case "${sig}" in
+    INT)  code=130 ;;
+    TERM) code=143 ;;
+    *)    code=1   ;;
+  esac
+  _compose_dots_stop
+  trap - EXIT INT TERM
+  exit "${code}"
+}
+
 # Run `up -d`, preferring `--wait --wait-timeout` on Compose ≥ 2.20 and
 # falling back to a manual health poll on older Compose so users on
 # legacy installs do not see a hard failure. While we wait, a background
@@ -226,14 +274,14 @@ COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
 # during which compose itself prints nothing).
 #
 # On failure (timeout, hard error, or one or more containers ending in a
-# fatal state) we dump `compose ps` and a `logs <unhealthy-svc>` hint so
-# the operator has an immediate next step instead of a bare non-zero
-# exit. Returns the exit code of the compose call (or the poll) so
-# callers can fail-fast.
+# fatal state) we dump `compose ps`, list the specific failing service
+# names, and print a `logs <svc>` hint for each so the operator has an
+# immediate next step instead of a bare non-zero exit. Returns the exit
+# code of the compose call (or the poll) so callers can fail-fast.
 compose_up_and_wait() {
   local cc="$1"
   local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
-  local rc=0 log_file dots_pid
+  local rc=0 log_file ps_snapshot failing_svcs
 
   log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
 
@@ -241,9 +289,13 @@ compose_up_and_wait() {
   # before compose has even forked. Output to stderr so it stays
   # visible even when stdout is being captured by a CI wrapper.
   ( while :; do sleep 5; printf '.' >&2; done ) &
-  dots_pid=$!
-  # Guarantee the ticker is reaped on any exit path, including Ctrl-C.
-  trap 'kill "'"${dots_pid}"'" 2>/dev/null || true; wait "'"${dots_pid}"'" 2>/dev/null || true' EXIT INT TERM
+  _COMPOSE_DOTS_PID=$!
+  # Guarantee the ticker is reaped on any exit path. EXIT runs the
+  # plain cleanup; INT/TERM re-raise the signal so the script exits
+  # with the canonical 128+SIGNUM instead of silently continuing.
+  trap '_compose_dots_stop' EXIT
+  trap '_compose_on_signal INT'  INT
+  trap '_compose_on_signal TERM' TERM
 
   if compose_supports_wait "${cc}"; then
     set +e
@@ -264,27 +316,50 @@ compose_up_and_wait() {
     fi
   fi
 
-  # Stop the ticker, terminate the dots line, and clear the EXIT trap so
-  # it does not double-fire (or hide a later real error) on the next
+  # Stop the ticker, terminate the dots line, and clear the traps so
+  # they do not double-fire (or hide a later real error) on the next
   # script-level exit.
-  kill "${dots_pid}" 2>/dev/null || true
-  wait "${dots_pid}" 2>/dev/null || true
+  _compose_dots_stop
   trap - EXIT INT TERM
-  printf '\n' >&2
 
   if (( rc != 0 )); then
     err ""
-    err "compose up did not reach healthy within ${timeout}s (rc=${rc})."
+    err "compose up did not reach a healthy state within ${timeout}s (or compose itself failed; rc=${rc})."
     if [[ -s "${log_file}" ]]; then
       err "── Last compose output (tail) ────────────────────────────────"
       tail -n 40 "${log_file}" | sed 's/^/    /' >&2 || true
     fi
     err "── Current service state (docker compose ps) ────────────────"
-    ( cd "${DOCKER_DIR}" && ${cc} ps ) >&2 || true
+    ps_snapshot="$(cd "${DOCKER_DIR}" && ${cc} ps --all 2>/dev/null || true)"
+    if [[ -n "${ps_snapshot}" ]]; then
+      printf '%s\n' "${ps_snapshot}" | sed 's/^/    /' >&2
+    else
+      err "    (docker compose ps produced no output — is the docker daemon reachable?)"
+    fi
+    # Extract concrete failing service names from
+    # `ps --format '{{.Service}}\t{{.Status}}'`. We flag anything that
+    # is (unhealthy), Restarting, Dead, or Exited(non-zero). One-shot
+    # services (preflight / minio-init) are excluded the same way
+    # `check_compose_running_states` excludes them, so we do not falsely
+    # tell the operator "look at minio-init logs" when minio-init
+    # correctly Exited (0). Codex review P2 #1.
+    failing_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
+                      | grep -vE '^(preflight|minio-init)	' \
+                      | grep -E '	.*((unhealthy)|Restarting|Dead|Exited \([1-9])' \
+                      | awk -F'	' '{print $1}' | sort -u || true)"
     err ""
-    err "Inspect the failing services' logs, e.g.:"
-    err "    (cd docker && ${cc} logs --tail 200 <unhealthy-service>)"
-    err "Common culprits on a cold boot are mysql / wukongim / minio."
+    if [[ -n "${failing_svcs}" ]]; then
+      err "Failing services — inspect each one's logs:"
+      while IFS= read -r svc; do
+        [[ -z "${svc}" ]] && continue
+        err "    (cd docker && ${cc} logs --tail 200 ${svc})"
+      done <<< "${failing_svcs}"
+    else
+      err "No service is in a hard-fail state — at least one is still in"
+      err "(health: starting) at the ${timeout}s mark. Re-check shortly, or:"
+      err "    (cd docker && ${cc} logs --tail 200 <still-starting-service>)"
+      err "Common culprits on a cold boot are mysql / wukongim / minio."
+    fi
   fi
   rm -f "${log_file}" 2>/dev/null || true
   return "${rc}"
@@ -414,11 +489,15 @@ Generation:
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
   --up                After writing .env, run `docker compose up -d --wait
-                      --wait-timeout 120` and block until every service is
-                      healthy (or print `compose ps` + a `logs <svc>` hint
-                      and exit 1 on timeout). A '.' prints every 5 seconds
-                      while waiting so the run is visibly alive on slow
-                      hosts (cold MySQL init can take 60-90s).
+                      --wait-timeout 120` and block until every long-
+                      running service is healthy AND every one-shot init
+                      job (preflight / minio-init) exited 0. On timeout
+                      or startup failure: print `compose ps`, list the
+                      specific failing service names, and emit one
+                      `logs <svc>` hint for each before exit 1. A '.'
+                      prints every 5 seconds while waiting so the run is
+                      visibly alive on slow hosts (cold MySQL init can
+                      take 60-90s).
 
 Smoke test / tear-down (work against an already-existing docker/.env):
   --verify            Probe nginx / octo-server / matter / object-store

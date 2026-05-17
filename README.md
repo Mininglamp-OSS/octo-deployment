@@ -68,8 +68,10 @@ cd octo-deployment
 
 Or, on a fresh host, fold the two steps into one with `--up` (GH#32) —
 `setup.sh` writes `docker/.env` AND brings the stack up, blocking
-until every container is `(healthy)` (or printing `compose ps` + a
-`logs <unhealthy-svc>` hint and exiting 1 on timeout). It prints a
+until every long-running service reports `(healthy)` and every
+one-shot init job (`preflight`, `minio-init`) exits 0. On timeout or
+startup failure it prints `compose ps`, the specific failing service
+names, and a `logs <svc>` hint for each, then exits 1. It prints a
 `.` every 5 seconds while waiting so you can see the run is alive:
 
 ```bash

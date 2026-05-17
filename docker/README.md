@@ -200,8 +200,11 @@ Or non-interactive:
 
 Or, on a fresh host where you want a single command to do both, use
 `--up` (added for GH#32) — `setup.sh` writes `.env` AND brings the
-stack up itself, blocking until every container is `(healthy)` (or
-exits 1 with `compose ps` + a `logs <unhealthy-svc>` hint on timeout):
+stack up itself, blocking until every long-running service reports
+`(healthy)` and every one-shot init job (`preflight`, `minio-init`)
+exits 0. On timeout or startup failure it prints `compose ps`,
+lists the specific failing service names, and emits a
+`logs <svc>` hint for each before exiting 1:
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4 --up
