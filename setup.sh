@@ -643,7 +643,8 @@ nudge_octo_local_migration() {
   d="$(env_get OCTO_DOMAIN "")" || d=""
   if [[ "${d}" == "octo.local" ]]; then
     info "Heads-up: OCTO_DOMAIN=octo.local is no longer a placeholder (see GH#49 / PR#50)."
-    info "If IM WebSocket or smoke-test breaks, run './setup.sh --domain localhost' or set a real DNS name."
+    info "If IM WebSocket or smoke-test breaks, edit docker/.env (change OCTO_DOMAIN=octo.local to OCTO_DOMAIN=localhost or a real DNS name), then rerun --up."
+    info "Quick one-liner: sed -i.bak 's/^OCTO_DOMAIN=octo\.local\$/OCTO_DOMAIN=localhost/' docker/.env"
     NUDGE_OCTO_LOCAL_SHOWN=true
   fi
 }
