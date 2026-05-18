@@ -51,6 +51,18 @@ ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
 ENV_OUT="${SCRIPT_DIR}/docker/.env"
 DOCKER_DIR="${SCRIPT_DIR}/docker"
 
+# YUJ-1084 / GH#46: root's primary group differs by OS — Linux uses `root`,
+# macOS (BSD) uses `wheel`. Hard-coding `chown root:root` aborts on macOS
+# with `chown: root: illegal group name`, which leaves docker/.env half-
+# chowned (root user, original group) and breaks every subsequent
+# `--smoke-test` / `--uninstall` invocation. Detect once at startup and
+# reuse via ${ROOT_GROUP} at every chown call-site below.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  ROOT_GROUP="wheel"
+else
+  ROOT_GROUP="root"
+fi
+
 # ── Colours / helpers ────────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
   GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; CYAN='\033[0;36m'; RESET='\033[0m'
@@ -560,7 +572,7 @@ env_get() {
   if [[ ! -r "${ENV_OUT}" ]]; then
     fatal "docker/.env exists but is not readable by user $(id -un).
 Either re-run as root: sudo ./setup.sh --smoke-test
-Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.env (restore default)"
+Or adjust ownership: sudo chown root:${ROOT_GROUP} docker/.env && sudo chmod 600 docker/.env (restore default)"
   fi
   local v
   v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
@@ -1646,9 +1658,9 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # fatal — operators on read-only / unusual filesystems will see the
     # exact reason and can rerun on a writable mount.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
       chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
-      info "docker/.env now owned by root:root (mode 600)."
+      info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
     fi
 
     DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
@@ -2132,9 +2144,9 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # warn-then-continue here would leave a user-writable .env behind
     # the next `sudo compose` run.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
       chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
-      info "docker/.env now owned by root:root (mode 600)."
+      info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
     fi
     echo ""
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
