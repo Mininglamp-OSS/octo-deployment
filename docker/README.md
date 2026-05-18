@@ -186,9 +186,10 @@ sudo ./setup.sh --smoke-test                # admin login + presign PUT end-to-e
 
 `setup.sh` auto-detects the public IP via `ifconfig.me`. If you run
 on a host that has one (cloud VM, bare-metal with public IPv4), the
-prompt suggests the detected IP as your `OCTO_DOMAIN` default —
-override with a real DNS name when you have one, or accept the IP
-for an IP-only deployment.
+prompt prints the detected IP for reference but **defaults to
+`localhost`** (Enter → local-only on this host). Type the detected
+IP, or a real DNS name your clients can resolve, only when you want
+the stack reachable from outside this host.
 
 Or non-interactive:
 

@@ -70,8 +70,15 @@ else
 fi
 
 # ── Colours / helpers ────────────────────────────────────────────────────────
+# GH#56 bug 1: use $'…' ANSI-C quoting so the variables hold actual ESC
+# bytes. Single-quoted '\033…' is just a literal backslash-0-3-3 string;
+# when fed to `printf '%s'` (no escape interpretation in arguments) it
+# round-trips verbatim and the terminal prints `\033[0;32m[setup]…`
+# instead of a green `[setup]`. This bit macOS users first (bash/zsh
+# default `/bin/echo` POSIX behaviour amplifies it) but the same literal
+# leaked on Linux too — $'…' makes printf '%s' work as intended on both.
 if [[ -t 1 ]]; then
-  GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; BOLD='\033[1m'; CYAN='\033[0;36m'; RESET='\033[0m'
+  GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'; BOLD=$'\033[1m'; CYAN=$'\033[0;36m'; RESET=$'\033[0m'
 else
   GREEN=''; YELLOW=''; RED=''; BOLD=''; CYAN=''; RESET=''
 fi
@@ -1829,10 +1836,17 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN}" == "localhost" || -z "${DOMAIN}" ]] \
      && [[ "${detected_ip}" != "127.0.0.1" ]]; then
     info "Detected public IP: ${detected_ip}"
-    info "For a deployment reachable from outside this host, set OCTO_DOMAIN to a name"
-    info "your clients can resolve (or use the detected IP directly)."
-    read -rp "Domain name [${detected_ip}] (Enter to use detected IP, type 'localhost' for local-only): " user_domain
-    DOMAIN="${user_domain:-${detected_ip}}"
+    info "For a deployment reachable from outside this host, type the detected IP"
+    info "(or a real DNS name your clients can resolve)."
+    # GH#56 bug 2: default to `localhost` even when a public IP is
+    # detected. Mac / laptop users — by far the most common OOTB
+    # audience — hit Enter expecting a local-only stack; the previous
+    # default silently pinned OCTO_DOMAIN to a public IP and broke
+    # browser access through `http://localhost:28080`. External-reach
+    # operators are the minority; they can explicitly type the IP
+    # (printed above) or a hostname.
+    read -rp "Domain name [localhost] (Enter for local-only on this host, type '${detected_ip}' or a custom domain for external access): " user_domain
+    DOMAIN="${user_domain:-localhost}"
   else
     read -rp "Domain name [${DOMAIN}]: " user_domain
     DOMAIN="${user_domain:-${DOMAIN}}"

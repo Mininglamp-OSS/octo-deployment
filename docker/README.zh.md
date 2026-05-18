@@ -103,7 +103,7 @@ sudo ./setup.sh --up                        # 起栈
 sudo ./setup.sh --smoke-test                # admin login + presign PUT 端到端检查（旧名 --verify 仍可用，已 deprecated）
 ```
 
-`setup.sh` 通过 `ifconfig.me` 自动探测公网 IP。如果主机有公网 IP（云 VM、有公网 IPv4 的裸金属），交互向导会把探测到的 IP 作为 `OCTO_DOMAIN` 的默认建议——有真正的 DNS 名时填进去，没有就直接用 IP 跑「纯 IP」部署。
+`setup.sh` 通过 `ifconfig.me` 自动探测公网 IP。如果主机有公网 IP（云 VM、有公网 IPv4 的裸金属），交互向导会**打印**探测到的 IP 供参考，但 `OCTO_DOMAIN` 的**默认值是 `localhost`**（回车 = 仅在本机访问）。只有当你确实要让栈对外可达时，才在 prompt 里手动输入探测到的 IP，或者输入一个客户端能解析的真实 DNS 名。
 
 非交互：
 
