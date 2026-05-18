@@ -228,8 +228,10 @@ Without `--force`, a missing `docker/.env` is a fatal error — that
 is the R8 (PR#36 Jerry-Xin CR) fix: "--up never regenerates secrets"
 is now enforced by code, not just promised by docs.
 
-`--up` uses `docker compose up -d --wait --wait-timeout 120` under
-the hood (with a manual health-poll fallback on Compose < v2.20). It
+`--up` uses `docker compose up -d --wait --wait-timeout 240` under
+the hood (with a manual health-poll fallback on Compose < v2.20). The
+wrapper retries once on a soft timeout (warm caches make the second
+attempt typically <10s), so worst-case wall-clock is 2 × 240s. It
 prints a `.` every 5 seconds while waiting so the run is visibly
 alive on slow hosts (cold MySQL init can take 60-90s).
 

@@ -129,7 +129,7 @@ sudo ./setup.sh --non-interactive --ip 1.2.3.4 --up --force   # 显式 one-shot 
 
 不带 `--force` 时，`docker/.env` 缺失就是 fatal——这是 R8（PR#36 Jerry-Xin CR）修的契约一致性问题：「`--up` 永远不会重新生成密钥」从「文档承诺」升级为「代码强制」。
 
-`--up` 底层调 `docker compose up -d --wait --wait-timeout 120`（Compose < v2.20 上自动 fallback 到手动 health poll）。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
+`--up` 底层调 `docker compose up -d --wait --wait-timeout 240`（Compose < v2.20 上自动 fallback 到手动 health poll）。soft timeout 时 wrapper 自动重试一次（缓存已热，第二次通常 <10s），最坏情况是 2 × 240s。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
 
 启用可选的 LLM summary 服务加 `--summary`：
 

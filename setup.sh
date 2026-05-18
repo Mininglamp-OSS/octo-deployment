@@ -1636,18 +1636,35 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # it (user-owned), which then surprised operators who expected the
     # documented `-rw------- root root` state. We are already root here
     # (S4 EUID guard above), so chown/chmod cannot fail under normal
-    # conditions; tolerate a missing `.env` (cannot happen — guarded
-    # above — but defensive) and a chown error on read-only filesystems
-    # so a transient FS condition does not mask a healthy compose.
+    # conditions.
+    #
+    # R9 (YUJ-1068 / Jerry-Xin PR#36 W2): a SILENT chown/chmod failure
+    # here is worse than a noisy abort. If chown does not stick, the
+    # next `sudo compose` reads a user-writable `.env` and we have
+    # quietly broken the "secrets file is root:root 600" contract the
+    # rest of the script (and docs) lean on. Treat any failure as
+    # fatal — operators on read-only / unusual filesystems will see the
+    # exact reason and can rerun on a writable mount.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown root:root "${ENV_OUT}" 2>/dev/null || warn "could not chown docker/.env to root:root (read-only FS?)."
-      chmod 600 "${ENV_OUT}" 2>/dev/null || warn "could not chmod docker/.env to 600."
+      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
       info "docker/.env now owned by root:root (mode 600)."
     fi
 
     DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
     HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-    ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+    # R9 (YUJ-1068 / yujiawei PR#36 F1): same S1 placeholder rule —
+    # printing `http://octo.local:28080/admin/` in the success banner
+    # when the operator picked the placeholder domain hands them a URL
+    # their browser cannot resolve (no DNS pointed at the host). When
+    # OCTO_DOMAIN is a placeholder AND OCTO_EXTERNAL_IP is concrete,
+    # mint the admin URL off the IP so it is actually click-through.
+    EXTERNAL_IP_ENV="$(env_get OCTO_EXTERNAL_IP "")"
+    if is_placeholder_domain && [[ -n "${EXTERNAL_IP_ENV}" ]]; then
+      ADMIN_URL="http://${EXTERNAL_IP_ENV}:${HTTP_PORT}/admin/"
+    else
+      ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+    fi
 
     echo ""
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
@@ -1725,8 +1742,23 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   fi
 
   # External IP
-  read -rp "External IP [${detected_ip}]: " user_ip
-  EXTERNAL_IP="${user_ip:-${detected_ip}}"
+  # R9 (YUJ-1068 / lml2468 PR#36 CR): when the operator picked a
+  # placeholder domain (empty or `octo.local`) the deployment is
+  # local-only by contract — S1 will materialise IP-based URL
+  # overrides off whatever EXTERNAL_IP we accept here, and feeding it
+  # `detect_ip`'s public address would silently mint
+  # `http://<public-ip>:28080` overrides that contradict the
+  # local-only promise the operator just made at the domain prompt.
+  # Default to `127.0.0.1` in that case; the operator can still type
+  # a public IP explicitly if they actually want external reach (in
+  # which case they should also pick a non-placeholder domain).
+  if [[ -z "${DOMAIN}" || "${DOMAIN}" == "octo.local" ]]; then
+    ip_default="127.0.0.1"
+  else
+    ip_default="${detected_ip}"
+  fi
+  read -rp "External IP [${ip_default}]: " user_ip
+  EXTERNAL_IP="${user_ip:-${ip_default}}"
 
   # HTTPS
   read -rp "Enable HTTPS preparation flag? [y/N]: " user_https
@@ -1894,7 +1926,19 @@ fi
 
 # ── Compute admin URL for the post-generation summary ─────────────────────
 HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+# R9 (YUJ-1068 / yujiawei PR#36 F1): mirror the S1 placeholder rule on
+# the ADMIN_URL we print in the post-generation summary banner (and the
+# --up --force success banner below). When the operator picked a
+# placeholder domain we already mint IP-based MinIO / TS overrides
+# below; printing `http://octo.local:28080/admin/` here would be the
+# odd one out and have the operator's browser DNS-fail on click. Use
+# the in-memory DOMAIN / EXTERNAL_IP here because the .env we just
+# wrote already reflects them and these are still in scope.
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+  ADMIN_URL="http://${EXTERNAL_IP}:${HTTP_PORT}/admin/"
+else
+  ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+fi
 
 # S1 (R7 / YUJ-1020 / GH#41): placeholder-aware materialisation of
 # MinIO / TS URL overrides.
@@ -1925,7 +1969,7 @@ if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
   info "OCTO_DOMAIN is a placeholder (${DOMAIN}); materialising IP-based URL overrides so presigned PUT / TS callback URLs are browser-reachable from ${EXTERNAL_IP}."
   cat >> "${ENV_OUT}" <<URLS
 
-# S1 (R7 / YUJ-1020 / GH#41): MaterialiseD because OCTO_DOMAIN=${DOMAIN}
+# S1 (R7 / YUJ-1020 / GH#41): Materialised because OCTO_DOMAIN=${DOMAIN}
 # (placeholder) and --ip ${EXTERNAL_IP} was supplied. Without these three
 # overrides the compose defaults would sign presigned PUT URLs against
 # http://${DOMAIN}:${HTTP_PORT}, which does not resolve from a client
@@ -1993,13 +2037,23 @@ fi
 # R6 (YUJ-1020): we are always on the generation path here (--up exits
 # earlier as a start-only subcommand). Print the canonical 3-step next-
 # steps list so the operator never has to guess the workflow.
-echo ""
-info "Next steps:"
-echo "  1. Review docker/.env and adjust as needed"
-echo "  2. sudo ./setup.sh --up           # start the stack (Docker + .env both need root)"
-echo "  3. sudo ./setup.sh --smoke-test   # admin login + presign PUT end-to-end check"
-echo "  4. Visit ${ADMIN_URL}"
-echo ""
+#
+# R9 (YUJ-1068 / yujiawei PR#36 F3): suppress the "Next steps" footer
+# when the operator passed `--up --force`. The R8 post-generation hook
+# (below) is about to run compose_up_and_wait + print its OWN success
+# banner with a "sudo ./setup.sh --smoke-test" pointer, so emitting
+# "2. sudo ./setup.sh --up" here is misleading — the stack is being
+# started in this same invocation. Skip the next-steps block in that
+# case; the post-gen hook owns the operator-facing UX.
+if [[ "${RUN_UP}" != "true" ]]; then
+  echo ""
+  info "Next steps:"
+  echo "  1. Review docker/.env and adjust as needed"
+  echo "  2. sudo ./setup.sh --up           # start the stack (Docker + .env both need root)"
+  echo "  3. sudo ./setup.sh --smoke-test   # admin login + presign PUT end-to-end check"
+  echo "  4. Visit ${ADMIN_URL}"
+  echo ""
+fi
 
 # R6 Nit 1 (Jerry-Xin W2): post-gen message must match what the file
 # actually looks like on disk. `./setup.sh` (non-sudo) writes the file
@@ -2043,9 +2097,13 @@ if [[ "${RUN_UP}" == "true" ]]; then
 
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
+    # R9 (YUJ-1068 / Jerry-Xin PR#36 W2): same fatal-on-failure
+    # treatment as the existing-.env --up branch above — silent
+    # warn-then-continue here would leave a user-writable .env behind
+    # the next `sudo compose` run.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown root:root "${ENV_OUT}" 2>/dev/null || warn "could not chown docker/.env to root:root (read-only FS?)."
-      chmod 600 "${ENV_OUT}" 2>/dev/null || warn "could not chmod docker/.env to 600."
+      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
       info "docker/.env now owned by root:root (mode 600)."
     fi
     echo ""

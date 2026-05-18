@@ -78,14 +78,16 @@ command (generating fresh secrets), pass `--up --force` explicitly:
 sudo ./setup.sh --non-interactive --ip <PUBLIC_IP> --up --force   # explicit one-shot bootstrap (writes new secrets)
 ```
 
-`--up` runs `docker compose up -d --wait --wait-timeout 120` and
+`--up` runs `docker compose up -d --wait --wait-timeout 240` and
 blocks until every long-running service reports `(healthy)` and every
 one-shot init job (`preflight`, `minio-init`) exits 0. On timeout or
 startup failure it prints `compose ps`, the specific failing service
-names, and a `logs <svc>` hint for each, then exits 1. It prints a
-`.` every 5 seconds while waiting so you can see the run is alive.
-`--up` (without `--force`) will never touch `docker/.env` — that file
-is owned by step 1's caller.
+names, and a `logs <svc>` hint for each, then exits 1. The wrapper
+retries once on a soft timeout (warm mysql / image caches make the
+second attempt typically <10s), so worst-case wall-clock is 2 × 240s.
+It prints a `.` every 5 seconds while waiting so you can see the run
+is alive. `--up` (without `--force`) will never touch `docker/.env`
+— that file is owned by step 1's caller.
 
 For unattended provisioning, do step 1 non-interactively and chain
 into step 2:
