@@ -21,7 +21,13 @@
 set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-DOMAIN="octo.local"
+# GH#49 (2026-05-18): default OCTO_DOMAIN is `localhost` (not `octo.local`).
+# `octo.local` does not resolve on a fresh Mac / Windows / Linux install
+# without an /etc/hosts entry, so the IM WebSocket flips to readyState=3
+# (close code 1006) the moment the browser tries
+# `ws://octo.local:28080/ws`. `localhost` resolves out of the box on
+# every supported host and keeps the loopback-only contract intact.
+DOMAIN="localhost"
 EXTERNAL_IP=""
 ENABLE_HTTPS=false
 ENABLE_SUMMARY=false
@@ -540,7 +546,7 @@ env_get() {
   # `-rw------- root:root`, then a non-root user runs --smoke-test /
   # --verify) makes the `grep` below silently emit empty output. Every
   # downstream env_get call returns its default, and the smoke test
-  # then exercises octo.local:28080 with an empty admin password and
+  # then exercises localhost:28080 with an empty admin password and
   # nine probes FAIL with cryptic "no token in login response" /
   # "no uploadUrl in credentials response" messages that send the
   # operator hunting for a stack problem that does not exist.
@@ -584,7 +590,7 @@ Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.
 #
 # Rule:
 #   - `OCTO_DOMAIN` is a PLACEHOLDER (empty or the literal default
-#     `octo.local` — operator never put real DNS in front of the VM) →
+#     `localhost` — operator never put real DNS in front of the VM) →
 #     `OCTO_EXTERNAL_IP` is the authoritative host. setup.sh
 #     materialises explicit `MINIO_SERVER_URL` / `TS_MINIO_DOWNLOADURL`
 #     / `TS_EXTERNAL_BASEURL` overrides pointing at the IP (S1 below),
@@ -592,11 +598,16 @@ Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.
 #     URL the server returns therefore uses the IP and the browser /
 #     curl can actually reach it.
 #   - `OCTO_DOMAIN` is a REAL domain (anything other than empty /
-#     `octo.local`) → `OCTO_DOMAIN` is the authoritative host. Compose
+#     `localhost`) → `OCTO_DOMAIN` is the authoritative host. Compose
 #     defaults (`${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) take effect, the
 #     three URL overrides are NOT written into `.env`, and the
 #     `--smoke-test` probes the DOMAIN. `OCTO_EXTERNAL_IP` keeps its
 #     existing role for internal binding / firewall guidance only.
+#
+# Historical note (GH#49, 2026-05-18): the placeholder used to be
+# `octo.local`, which does not resolve on a fresh Mac install and
+# caused IM WebSocket close code 1006. The placeholder is now
+# `localhost` everywhere; the rule above is unchanged.
 #
 # Returns 0 (true) if OCTO_DOMAIN is a placeholder, 1 (false) otherwise.
 # Reads strictly from `.env` (via env_get) so the same answer is given
@@ -604,7 +615,7 @@ Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.
 is_placeholder_domain() {
   local d
   d="$(env_get OCTO_DOMAIN "")"
-  [[ -z "${d}" || "${d}" == "octo.local" ]]
+  [[ -z "${d}" || "${d}" == "localhost" ]]
 }
 
 # Resolve the project name the way Compose does — but for the script's own
@@ -704,7 +715,7 @@ Generation:
   --non-interactive   Skip prompts; use defaults + auto-detect for anything
                       not provided via flags.
   --force             Overwrite an existing docker/.env without prompting.
-  --domain <d>        Set OCTO_DOMAIN (default: octo.local).
+  --domain <d>        Set OCTO_DOMAIN (default: localhost).
   --ip <ip>           Set OCTO_EXTERNAL_IP (skip auto-detect).
   --https             HTTPS preparation flag. Prints the manual
                       activation steps. This does NOT fully enable
@@ -831,17 +842,18 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     fatal "curl is required for --smoke-test (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
   fi
   CC="$(compose_cmd)"
-  DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
+  DOMAIN="$(env_get OCTO_DOMAIN localhost)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
   # S2 (R7 / GH#40): placeholder-aware probe-host selection. When OCTO_DOMAIN
-  # is a placeholder (empty or `octo.local`), `--smoke-test` must talk to the
-  # public IP — `octo.local` does not resolve from a GCP host without DNS, so
-  # the old `http://octo.local:28080` BASE_URL flatlined 8/11 probes on a
-  # healthy stack (PR#30 GCP E2E). When OCTO_DOMAIN is a real domain, we
-  # respect it (browsers go via DNS; the IP is only for internal binding /
-  # firewall). The presigned PUT URL the server returns is consumed verbatim
-  # by step 11 — S1 below pins the server to the same IP/DOMAIN choice when
-  # it writes `.env`, so step 11's URL matches BASE_URL automatically.
+  # is a placeholder (empty or `localhost`), `--smoke-test` must talk to the
+  # public IP when the operator gave us one — `localhost` only routes to the
+  # host the script is running on, so a remote --smoke-test (or one launched
+  # against a published deployment) needs OCTO_EXTERNAL_IP to reach the
+  # stack. When OCTO_DOMAIN is a real domain, we respect it (browsers go via
+  # DNS; the IP is only for internal binding / firewall). The presigned PUT
+  # URL the server returns is consumed verbatim by step 11 — S1 below pins
+  # the server to the same IP/DOMAIN choice when it writes `.env`, so step
+  # 11's URL matches BASE_URL automatically.
   if is_placeholder_domain; then
     PROBE_HOST="$(env_get OCTO_EXTERNAL_IP "${DOMAIN}")"
   else
@@ -1651,14 +1663,15 @@ if [[ "${RUN_UP}" == "true" ]]; then
       info "docker/.env now owned by root:root (mode 600)."
     fi
 
-    DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
+    DOMAIN="$(env_get OCTO_DOMAIN localhost)"
     HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
     # R9 (YUJ-1068 / yujiawei PR#36 F1): same S1 placeholder rule —
-    # printing `http://octo.local:28080/admin/` in the success banner
-    # when the operator picked the placeholder domain hands them a URL
-    # their browser cannot resolve (no DNS pointed at the host). When
-    # OCTO_DOMAIN is a placeholder AND OCTO_EXTERNAL_IP is concrete,
-    # mint the admin URL off the IP so it is actually click-through.
+    # printing `http://localhost:28080/admin/` in the success banner
+    # when the operator picked the placeholder domain and is running
+    # the stack on a remote host hands them a URL their browser cannot
+    # resolve back to the deployment. When OCTO_DOMAIN is a placeholder
+    # AND OCTO_EXTERNAL_IP is concrete, mint the admin URL off the IP
+    # so it is actually click-through.
     EXTERNAL_IP_ENV="$(env_get OCTO_EXTERNAL_IP "")"
     if is_placeholder_domain && [[ -n "${EXTERNAL_IP_ENV}" ]]; then
       ADMIN_URL="http://${EXTERNAL_IP_ENV}:${HTTP_PORT}/admin/"
@@ -1729,12 +1742,12 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
 
   # Domain
   detected_ip="$(detect_ip)"
-  if [[ "${DOMAIN}" == "octo.local" || -z "${DOMAIN}" ]] \
+  if [[ "${DOMAIN}" == "localhost" || -z "${DOMAIN}" ]] \
      && [[ "${detected_ip}" != "127.0.0.1" ]]; then
     info "Detected public IP: ${detected_ip}"
     info "For a deployment reachable from outside this host, set OCTO_DOMAIN to a name"
     info "your clients can resolve (or use the detected IP directly)."
-    read -rp "Domain name [${detected_ip}] (Enter to use detected IP, type 'octo.local' for local-only): " user_domain
+    read -rp "Domain name [${detected_ip}] (Enter to use detected IP, type 'localhost' for local-only): " user_domain
     DOMAIN="${user_domain:-${detected_ip}}"
   else
     read -rp "Domain name [${DOMAIN}]: " user_domain
@@ -1743,7 +1756,7 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
 
   # External IP
   # R9 (YUJ-1068 / lml2468 PR#36 CR): when the operator picked a
-  # placeholder domain (empty or `octo.local`) the deployment is
+  # placeholder domain (empty or `localhost`) the deployment is
   # local-only by contract — S1 will materialise IP-based URL
   # overrides off whatever EXTERNAL_IP we accept here, and feeding it
   # `detect_ip`'s public address would silently mint
@@ -1752,7 +1765,7 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   # Default to `127.0.0.1` in that case; the operator can still type
   # a public IP explicitly if they actually want external reach (in
   # which case they should also pick a non-placeholder domain).
-  if [[ -z "${DOMAIN}" || "${DOMAIN}" == "octo.local" ]]; then
+  if [[ -z "${DOMAIN}" || "${DOMAIN}" == "localhost" ]]; then
     ip_default="127.0.0.1"
   else
     ip_default="${detected_ip}"
@@ -1930,10 +1943,11 @@ HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
 # the ADMIN_URL we print in the post-generation summary banner (and the
 # --up --force success banner below). When the operator picked a
 # placeholder domain we already mint IP-based MinIO / TS overrides
-# below; printing `http://octo.local:28080/admin/` here would be the
-# odd one out and have the operator's browser DNS-fail on click. Use
-# the in-memory DOMAIN / EXTERNAL_IP here because the .env we just
-# wrote already reflects them and these are still in scope.
+# below; printing `http://localhost:28080/admin/` here would be the
+# odd one out and have the operator's browser miss the deployment
+# entirely if they hit the URL from a different machine. Use the
+# in-memory DOMAIN / EXTERNAL_IP here because the .env we just wrote
+# already reflects them and these are still in scope.
 if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
   ADMIN_URL="http://${EXTERNAL_IP}:${HTTP_PORT}/admin/"
 else
@@ -1944,21 +1958,22 @@ fi
 # MinIO / TS URL overrides.
 #
 # When the operator uses `--ip <public-IP>` WITHOUT a real `--domain`,
-# `OCTO_DOMAIN` stays at its placeholder `octo.local` and the compose
+# `OCTO_DOMAIN` stays at its placeholder `localhost` and the compose
 # defaults (`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) end up signing
-# presigned PUT URLs against `http://octo.local:28080/...`. The
-# operator's browser cannot resolve `octo.local` (no DNS pointed at the
-# VM), and every image / file message silently breaks at the upload
-# step — exactly the GH#41 failure mode caught on Coda E2E v12.
+# presigned PUT URLs against `http://localhost:28080/...`. A remote
+# browser sees `localhost` and tries its OWN loopback (not the VM),
+# and every image / file message silently breaks at the upload step —
+# the same failure mode caught on Coda E2E v12 (GH#41) and on the
+# fresh-Mac install reported in GH#49.
 #
 # When `OCTO_DOMAIN` IS a real domain (anything other than empty /
-# `octo.local`), the compose defaults already do the right thing and
+# `localhost`), the compose defaults already do the right thing and
 # rely on DNS — writing IP-based overrides here would break that DNS
 # topology (`--domain octo.example.com --ip 1.2.3.4` would have client
 # browsers calling the IP instead of the documented domain).
 #
 # So S1 materialises three lockstep overrides ONLY when both:
-#   (1) OCTO_DOMAIN is placeholder (empty or `octo.local`), AND
+#   (1) OCTO_DOMAIN is placeholder (empty or `localhost`), AND
 #   (2) OCTO_EXTERNAL_IP is set (operator gave us something concrete).
 # All three URLs must agree (SigV4 rejects every PUT with `403
 # SignatureDoesNotMatch` if MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
@@ -2018,7 +2033,7 @@ printf '  Admin password: %s%s%s\n' "${BOLD}" "${OCTO_ADMIN_PWD}" "${RESET}"
 echo ""
 
 # Firewall guidance — single-port deployment only needs OCTO_HTTP_PORT.
-if [[ "${EXTERNAL_IP}" != "127.0.0.1" ]] || [[ "${DOMAIN}" != "octo.local" ]]; then
+if [[ "${EXTERNAL_IP}" != "127.0.0.1" ]] || [[ "${DOMAIN}" != "localhost" ]]; then
   printf '%s  Firewall:%s\n' "${BOLD}" "${RESET}"
   printf '    The OOTB stack is single-port — only open TCP %s%s%s to clients.\n' "${BOLD}" "${HTTP_PORT}" "${RESET}"
   printf '    All other services (MinIO API/console, MySQL, Redis, WuKongIM monitor,\n'

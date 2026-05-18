@@ -2,7 +2,7 @@
 # OCTO Server · one-shot deployment stack (OSS)
 # -----------------------------------------------------------------------------
 # Brings up OCTO Server + all required dependencies behind an nginx reverse
-# proxy that serves a user-chosen domain (default: octo.local). Everything is
+# proxy that serves a user-chosen domain (default: localhost). Everything is
 # scoped under a dedicated Docker bridge so it does not collide with other
 # stacks on the host.
 #
@@ -256,7 +256,7 @@ services:
       # `:29000`), override MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
       # in .env. See docker/README.md "Network surface" for the
       # rationale and trade-offs.
-      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-localhost}:${OCTO_HTTP_PORT:-28080}}
       # MINIO_BROWSER_REDIRECT_URL is the canonical URL MinIO redirects
       # the console to after auth. The previous default pointed at the
       # nginx /minio-console/ route, but that route is no longer exposed
@@ -472,7 +472,7 @@ services:
       # `${...}` once on parse — values that come out of .env do NOT get a
       # second pass. Putting the default expression here lets operators set
       # OCTO_WK_WS_ADDR to a literal in .env when they want to override.
-      WK_EXTERNAL_WSADDR:  ${OCTO_WK_WS_ADDR:-ws://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}/ws}
+      WK_EXTERNAL_WSADDR:  ${OCTO_WK_WS_ADDR:-ws://${OCTO_DOMAIN:-localhost}:${OCTO_HTTP_PORT:-28080}/ws}
       WK_EXTERNAL_WSSADDR: ${OCTO_WK_WSS_ADDR:-}
       # Shared admin token. WuKongIM binds env vars to YAML keys via Viper's
       # default key replacer (`.` -> `_`, upper-cased, prefix `WK_`), so the
@@ -659,7 +659,7 @@ services:
       # --- terminating TLS at a different hostname), set
       # --- TS_MINIO_DOWNLOADURL in .env to the public URL of YOUR
       # --- nginx — still host:port only, no path.
-      TS_MINIO_DOWNLOADURL: "${TS_MINIO_DOWNLOADURL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}"
+      TS_MINIO_DOWNLOADURL: "${TS_MINIO_DOWNLOADURL:-http://${OCTO_DOMAIN:-localhost}:${OCTO_HTTP_PORT:-28080}}"
       # --- octo-server's own external URL (the value it returns to
       # --- clients in places that need an absolute URL — e.g. login
       # --- redirects, OIDC callback hints, public asset links). The
@@ -679,7 +679,7 @@ services:
       # --- `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` and ignored any
       # --- `.env` override — clients then received `http://…:28080`
       # --- back from /api responses behind an HTTPS-fronted stack.
-      TS_EXTERNAL_BASEURL: "${TS_EXTERNAL_BASEURL:-http://${OCTO_DOMAIN:-octo.local}:${OCTO_HTTP_PORT:-28080}}"
+      TS_EXTERNAL_BASEURL: "${TS_EXTERNAL_BASEURL:-http://${OCTO_DOMAIN:-localhost}:${OCTO_HTTP_PORT:-28080}}"
       TS_EXTERNAL_IP: "${OCTO_EXTERNAL_IP:-127.0.0.1}"
       # No `:-` default — an empty value here would silently drop
       # /internal/* callback HMAC verification on the octo-server side
@@ -743,7 +743,7 @@ services:
       octo-server:
         condition: service_healthy
     environment:
-      OCTO_DOMAIN: ${OCTO_DOMAIN:-octo.local}
+      OCTO_DOMAIN: ${OCTO_DOMAIN:-localhost}
     ports:
       - "${OCTO_NGINX_BIND:-0.0.0.0}:${OCTO_HTTP_PORT:-28080}:80"
       # HTTPS placeholder — single-port plus TLS form (architecture only,

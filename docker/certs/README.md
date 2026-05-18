@@ -23,7 +23,7 @@ sudo chown $(id -u):$(id -g) docker/certs/*.pem
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout docker/certs/privkey.pem \
   -out docker/certs/fullchain.pem \
-  -subj "/CN=octo.local"
+  -subj "/CN=localhost"
 ```
 
 ## Enabling HTTPS

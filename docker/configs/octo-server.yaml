@@ -22,7 +22,7 @@ mode: "release"
 #   TS_EXTERNAL_IP      = ${OCTO_EXTERNAL_IP}
 # Those values are the single source of truth — change them in `.env`,
 # not here. Hard-coding them in this file shadows the env vars and
-# silently strands operators on `octo.local:28080` no matter what they
+# silently strands operators on `localhost:28080` no matter what they
 # put in `.env`.
 external:
   ip: ""
