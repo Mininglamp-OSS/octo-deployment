@@ -71,8 +71,9 @@ sudo ./setup.sh --non-interactive --ip <PUBLIC_IP> --up --force   # 显式 one-s
 问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。
 soft timeout 时 wrapper 自动重试一次（mysql / image cache 已热，第二次
 通常 <10s），最坏情况是 2 × 240s。等待期间每 5 秒打一个 `.`，方便看到
-脚本还活着。`--up`（不带 `--force`）永远不会动 `docker/.env`——那个文
-件属于跑步骤 1 的用户。
+脚本还活着。`--up`（不带 `--force`）永远不会改写/重新生成
+`docker/.env` 中的密钥——那个文件属于跑步骤 1 的用户，`--up` 只会
+`chown root:root` + `chmod 600`（owner/权限收紧，永远不改内容）。
 
 要一条命令搞定（无人值守场景），步骤 1 用 `--non-interactive` 跑、再接
 步骤 2：

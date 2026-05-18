@@ -86,8 +86,10 @@ names, and a `logs <svc>` hint for each, then exits 1. The wrapper
 retries once on a soft timeout (warm mysql / image caches make the
 second attempt typically <10s), so worst-case wall-clock is 2 × 240s.
 It prints a `.` every 5 seconds while waiting so you can see the run
-is alive. `--up` (without `--force`) will never touch `docker/.env`
-— that file is owned by step 1's caller.
+is alive. `--up` (without `--force`) will never rewrite/regenerate
+secrets in `docker/.env` — that file is owned by step 1's caller, and
+`--up` only `chown root:root` + `chmod 600` it (ownership hardening,
+never a content change).
 
 For unattended provisioning, do step 1 non-interactively and chain
 into step 2:

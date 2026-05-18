@@ -1989,9 +1989,23 @@ fi
 # and tell the operator to run `sudo ./setup.sh --up` next.
 
 # ── Print summary ───────────────────────────────────────────────────────────
+# R10 (YUJ-1071 / Jerry-Xin PR#36 R9 F3): gate the "stack NOT started
+# yet" banner so it only fires on the generation-only path (`./setup.sh`
+# / `./setup.sh --non-interactive` without --up). On the `--up --force`
+# bootstrap path the R8 post-generation RUN_UP hook below is about to
+# run compose_up_and_wait in this same invocation, so calling the stack
+# "NOT started yet" here is misleading — and historically caused the
+# Jerry-Xin R9 F3 confusion ("operator sees generation-only banner,
+# then stack starts anyway"). Print a bootstrap-specific banner in
+# that case ("Stack starting now — run --smoke-test once healthy") so
+# the banner matches the actual control flow.
 echo ""
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
+if [[ "${RUN_UP}" != "true" ]]; then
+  printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
+else
+  printf '%s  docker/.env generated — stack starting now (run --smoke-test once healthy).%s\n' "${GREEN}" "${RESET}"
+fi
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
 echo ""
 printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
@@ -2061,13 +2075,29 @@ fi
 # branches keep the security framing identical (mode 600 + secrets +
 # sudo needed for subsequent --up/--smoke-test because Docker needs
 # root either way), just with the correct owner string.
+#
+# R10 (YUJ-1071 / Jerry-Xin PR#36 R9 F3): gate the "Next: sudo
+# ./setup.sh --up" hint the same way the Next-steps footer above is
+# gated. On the `--up --force` bootstrap path, the post-gen RUN_UP
+# hook below is about to start the stack in this same invocation, so
+# pointing at "--up" as the next operator action is wrong. Substitute
+# the smoke-test pointer in that case to match the post-gen success
+# banner's call-to-action.
 if [[ "$(id -u)" -eq 0 ]]; then
   printf '%s  ⚠  docker/.env (mode 600, owned by root) — contains all admin/DB/MinIO secrets.%s\n' "${YELLOW}" "${RESET}"
-  printf '%s     Next: sudo ./setup.sh --up%s\n' "${YELLOW}" "${RESET}"
+  if [[ "${RUN_UP}" != "true" ]]; then
+    printf '%s     Next: sudo ./setup.sh --up%s\n' "${YELLOW}" "${RESET}"
+  else
+    printf '%s     Next: sudo ./setup.sh --smoke-test  (after the post-gen up reports healthy below)%s\n' "${YELLOW}" "${RESET}"
+  fi
   printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 else
   printf '%s  ⚠  docker/.env (mode 600, owned by %s) — contains all admin/DB/MinIO secrets, readable by you.%s\n' "${YELLOW}" "$(id -un)" "${RESET}"
-  printf '%s     Next: sudo ./setup.sh --up  (sudo needed for Docker; --up will not touch this file)%s\n' "${YELLOW}" "${RESET}"
+  if [[ "${RUN_UP}" != "true" ]]; then
+    printf '%s     Next: sudo ./setup.sh --up  (sudo needed for Docker; --up will not rewrite/regenerate secrets in this file)%s\n' "${YELLOW}" "${RESET}"
+  else
+    printf '%s     Next: sudo ./setup.sh --smoke-test  (after the post-gen up reports healthy below)%s\n' "${YELLOW}" "${RESET}"
+  fi
   printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 fi
 echo ""

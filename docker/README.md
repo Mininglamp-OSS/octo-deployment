@@ -205,10 +205,11 @@ blocking until every long-running service reports `(healthy)` and
 every one-shot init job (`preflight`, `minio-init`) exits 0. On
 timeout or startup failure it prints `compose ps`, lists the
 specific failing service names, and emits a `logs <svc>` hint for
-each before exiting 1. `--up` never touches the `.env` step 1 wrote
-— it is a start-only subcommand and, if `docker/.env` is missing,
-exits 1 with a concrete remediation pointer instead of silently
-regenerating secrets:
+each before exiting 1. `--up` never rewrites/regenerates the secrets
+in the `.env` step 1 wrote (it only `chown root:root` + `chmod 600`
+that file for ownership hardening) — it is a start-only subcommand
+and, if `docker/.env` is missing, exits 1 with a concrete remediation
+pointer instead of silently regenerating secrets:
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4         # step 1: gen .env, no prompts (no sudo)

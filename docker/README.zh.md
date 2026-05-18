@@ -113,7 +113,7 @@ sudo ./setup.sh --up
 sudo ./setup.sh --smoke-test
 ```
 
-或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入，R8 / GH#43 加固契约）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会动步骤 1 写出的 `.env`，它是 start-only 子命令；如果 `docker/.env` 不存在，`--up` 会直接 exit 1 并给出具体的补救命令，**绝不会**默默重新生成密钥：
+或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入，R8 / GH#43 加固契约）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会改写/重新生成步骤 1 写出的 `.env` 中的密钥（只会 `chown root:root` + `chmod 600`，做 owner/权限收紧），它是 start-only 子命令；如果 `docker/.env` 不存在，`--up` 会直接 exit 1 并给出具体的补救命令，**绝不会**默默重新生成密钥：
 
 ```bash
 ./setup.sh --non-interactive --ip 1.2.3.4         # 步骤 1：gen .env，不提示，无需 sudo
