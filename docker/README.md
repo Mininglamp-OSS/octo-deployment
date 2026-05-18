@@ -250,8 +250,12 @@ the only path that gets a fresh checkout to a `(healthy)` stack
 without manual editing.
 
 Once healthy, the stack is reachable through nginx on
-`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (default `http://octo.local:28080`).
-Add an `/etc/hosts` entry for `octo.local` if you keep the default domain.
+`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (default `http://localhost:28080`).
+With the default `localhost` no extra DNS / `/etc/hosts` configuration
+is required on the host running the stack. If you set
+`OCTO_DOMAIN=<a real hostname>`, make sure that name resolves on every
+machine that hits the UI (either through real DNS or via an
+`/etc/hosts` entry pointing at this host's IP).
 
 ### `setup.sh --smoke-test` smoke test
 
@@ -1473,9 +1477,11 @@ location forwards the request to MinIO. Check, in order:
 1. `OCTO_HTTP_PORT` (default `28080`) is reachable from the client
    network — `curl -v http://${OCTO_DOMAIN}:28080/_nginx_up` should
    return `200`.
-2. `${OCTO_DOMAIN}` resolves on the client (the `/etc/hosts` entry
-   for `octo.local` has to exist on every machine that hits the UI,
-   not just the host).
+2. `${OCTO_DOMAIN}` resolves on the client. With the OOTB default
+   (`localhost`) this is automatic on the same host the stack is
+   running on. If you set OCTO_DOMAIN to a real hostname, that name
+   has to resolve on every machine that hits the UI (real DNS or a
+   matching `/etc/hosts` entry).
 3. `TS_MINIO_DOWNLOADURL` and `MINIO_SERVER_URL` agree — both should
    default to `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` (no path
    prefix). Verify with `docker compose config | grep -E

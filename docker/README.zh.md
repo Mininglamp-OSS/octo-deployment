@@ -140,7 +140,7 @@ sudo ./setup.sh --up
 
 `setup.sh` 写出含轮换随机密钥的 `docker/.env` 和自动生成的 `OCTO_ADMIN_PWD`，并**在最后打印 admin URL + 密码**，免得你回头去 grep `.env`。这是从空 checkout 到 `(healthy)` 栈无需手改任何东西的唯一路径。
 
-栈起来后，通过 nginx 访问：`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`（默认 `http://octo.local:28080`）。继续用默认域名 `octo.local` 的话需要在客户端 `/etc/hosts` 里加一条解析。
+栈起来后，通过 nginx 访问：`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`（默认 `http://localhost:28080`）。默认 `localhost` 在运行栈的主机上不需要任何额外的 DNS / `/etc/hosts` 配置。如果你把 `OCTO_DOMAIN` 改成真实域名，则每台访问 UI 的客户端机器都要能解析这个域名（真实 DNS，或者 `/etc/hosts` 里指向本机 IP）。
 
 ### `setup.sh --smoke-test` 自检命令
 
@@ -957,7 +957,7 @@ OCTO 图片上传依赖 [`Mininglamp-OSS/octo-server#24`](https://github.com/Min
 单端口形态（默认）下，预签名 URL 指向 nginx vhost（`${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`），bucket-name 正则 location 转发到 MinIO。按顺序检查：
 
 1. 客户端网络能到 `OCTO_HTTP_PORT`（默认 `28080`）——`curl -v http://${OCTO_DOMAIN}:28080/_nginx_up` 应返回 `200`。
-2. 客户端能解析 `${OCTO_DOMAIN}`（继续用 `octo.local` 的话，每台访问 UI 的机器都要有 `/etc/hosts` 条目，不只是 server 自己）。
+2. 客户端能解析 `${OCTO_DOMAIN}`。OOTB 默认（`localhost`）在运行栈的同一台机器上自动可用；如果你把 `OCTO_DOMAIN` 改成真实域名，则每台访问 UI 的客户端都要能解析这个域名（真实 DNS 或 `/etc/hosts` 条目）。
 3. `TS_MINIO_DOWNLOADURL` 和 `MINIO_SERVER_URL` 一致——都应默认 `http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`（无 path 前缀）。验证：`docker compose config | grep -E '(TS_MINIO_DOWNLOADURL|MINIO_SERVER_URL)'`。octo-server 在启动时拒绝带 path 前缀的 download URL。
 4. nginx 配置里 bucket-name 正则 location 还在：`docker/nginx/conf.d/octo.conf.template` 中 `^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+`。如果你定制了 nginx，确认这一块没被删。
 
