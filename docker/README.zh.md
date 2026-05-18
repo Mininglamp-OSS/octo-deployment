@@ -18,8 +18,8 @@ OCTO 全栈一键部署 —— server、admin console、web UI、matter、smart-
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                         # 交互式向导
-(cd docker && docker compose up -d --wait)         # subshell：起完仍回到原目录
-./setup.sh --verify                                # 端到端自检（admin 登录 + 文件预签名 PUT）
+sudo ./setup.sh --up                               # 起栈
+sudo ./setup.sh --smoke-test                       # 端到端自检（admin 登录 + 文件预签名 PUT）。旧名 --verify 仍可用（deprecated）。
 
 # 浏览器打开（密码在 setup.sh 末尾打印）：
 #   Admin: http://<你的域名>:28080/admin/   (用户：superAdmin)
@@ -99,8 +99,8 @@ docker ps --filter 'name=octo' --format '{{.Names}}'
 git clone https://github.com/Mininglamp-OSS/octo-deployment.git
 cd octo-deployment
 ./setup.sh                                  # 交互式向导
-(cd docker && docker compose up -d --wait)  # subshell：保持在 repo 根目录
-./setup.sh --verify                         # admin login + presign PUT 端到端检查
+sudo ./setup.sh --up                        # 起栈
+sudo ./setup.sh --smoke-test                # admin login + presign PUT 端到端检查（旧名 --verify 仍可用，已 deprecated）
 ```
 
 `setup.sh` 通过 `ifconfig.me` 自动探测公网 IP。如果主机有公网 IP（云 VM、有公网 IPv4 的裸金属），交互向导会把探测到的 IP 作为 `OCTO_DOMAIN` 的默认建议——有真正的 DNS 名时填进去，没有就直接用 IP 跑「纯 IP」部署。
@@ -109,39 +109,59 @@ cd octo-deployment
 
 ```bash
 ./setup.sh --non-interactive --domain octo.example.com --ip 1.2.3.4
-(cd docker && docker compose up -d --wait)
-./setup.sh --verify
+sudo ./setup.sh --up
+sudo ./setup.sh --smoke-test
 ```
 
-或者，在全新机器上想一条命令搞定 `.env` 生成 + 起栈，用 `--up`（GH#32 引入）——`setup.sh` 会写完 `.env` 之后自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1：
+或者，在全新机器上想最快跑通三步，把步骤 1 `--non-interactive` 跑、再接 start-only 的 `--up`（R6 / GH#33 引入，R8 / GH#43 加固契约）——`--up` 自己起栈，**阻塞直到每个长跑服务都 `(healthy)`、每个一次性 init job（`preflight`、`minio-init`）干净退出**。超时或启动失败时打印 `compose ps`、列出具体出问题的服务名、对每个失败服务给一条 `logs <svc>` 排查命令，然后 exit 1。`--up` 永远不会改写/重新生成步骤 1 写出的 `.env` 中的密钥（只会 `chown root:root` + `chmod 600`，做 owner/权限收紧），它是 start-only 子命令；如果 `docker/.env` 不存在，`--up` 会直接 exit 1 并给出具体的补救命令，**绝不会**默默重新生成密钥：
 
 ```bash
-./setup.sh --non-interactive --ip 1.2.3.4 --up
-./setup.sh --verify
+./setup.sh --non-interactive --ip 1.2.3.4         # 步骤 1：gen .env，不提示，无需 sudo
+sudo ./setup.sh --up                              # 步骤 2：启栈（start-only）
+sudo ./setup.sh --smoke-test                      # 步骤 3：端到端 verify
 ```
 
-`--up` 底层调 `docker compose up -d --wait --wait-timeout 120`（Compose < v2.20 上自动 fallback 到手动 health poll）。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
+如果确实想用单条命令同时完成 bootstrap + 启栈（**会生成新密钥**——绝对不要在已经在生产里跑的 `.env` 主机上用），必须显式传 `--up --force`：
+
+```bash
+sudo ./setup.sh --non-interactive --ip 1.2.3.4 --up --force   # 显式 one-shot bootstrap
+```
+
+不带 `--force` 时，`docker/.env` 缺失就是 fatal——这是 R8（PR#36 Jerry-Xin CR）修的契约一致性问题：「`--up` 永远不会重新生成密钥」从「文档承诺」升级为「代码强制」。
+
+`--up` 底层调 `docker compose up -d --wait --wait-timeout 240`（Compose < v2.20 上自动 fallback 到手动 health poll）。soft timeout 时 wrapper 自动重试一次（缓存已热，第二次通常 <10s），最坏情况是 2 × 240s。等待期间每 5 秒打一个 `.`，方便操作者看到脚本还活着——慢主机上 MySQL 冷启动可能要 60-90 秒。
 
 启用可选的 LLM summary 服务加 `--summary`：
 
 ```bash
 ./setup.sh --summary --domain octo.example.com --ip 1.2.3.4
-(cd docker && docker compose up -d --wait)
+sudo ./setup.sh --up
 ```
 
 `setup.sh` 写出含轮换随机密钥的 `docker/.env` 和自动生成的 `OCTO_ADMIN_PWD`，并**在最后打印 admin URL + 密码**，免得你回头去 grep `.env`。这是从空 checkout 到 `(healthy)` 栈无需手改任何东西的唯一路径。
 
 栈起来后，通过 nginx 访问：`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`（默认 `http://octo.local:28080`）。继续用默认域名 `octo.local` 的话需要在客户端 `/etc/hosts` 里加一条解析。
 
-### `setup.sh --verify` 自检命令
+### `setup.sh --smoke-test` 自检命令
 
-`docker compose up -d --wait` 报告所有服务 healthy 之后，跑自检命令确认**外部表面**确实能用：
+`sudo ./setup.sh --up` 报告所有服务 healthy 之后，跑自检命令确认**外部表面**确实能用：
 
 ```bash
-./setup.sh --verify
+sudo ./setup.sh --smoke-test
 ```
 
-脚本会探测（每步打印 PASS/FAIL）：
+> **为什么要 sudo？** `docker/.env` 由步骤 1（`./setup.sh`）生成。步骤 1 不带 sudo 跑时，文件 owner 是当前用户（mode 600）；带 sudo 跑时，owner 是 root。无论哪种，步骤 2（`sudo ./setup.sh --up`）需要 sudo 是因为要连 Docker daemon socket，而步骤 2 跑完后文件 owner 都会变成 root。`--up`（start-only 子命令，永远不会重新生成密钥）和 `--smoke-test` 都需要 sudo，因为这个文件装着全栈的高价值密钥——`MYSQL_ROOT_PASSWORD`、`MINIO_ROOT_PASSWORD`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD`、`OCTO_NOTIFY_INTERNAL_TOKEN`、`OCTO_WUKONGIM_MANAGER_TOKEN`——再加上 `COMPOSE_PROJECT_NAME` 这种会被下一次特权 `docker compose` 直接 consume 的 Compose 控制项。早先几轮 R1-R4 试过 chmod / chown / groupadd 让普通用户能跑 `--smoke-test`，但都会**扩大写权限**到一个 Compose 视为权威部署配置的文件上——R5 改成最简方案：".env 保持 root:600，`--up` 和 `--smoke-test` 都要 sudo，因为文件里全是 MySQL / MinIO / admin 凭据和 Compose 控制项"。忘 sudo 时 `env_get()` 会给一行清晰的 remediation（`Re-run as: sudo ./setup.sh --smoke-test`），而不是过去那 9 条让人摸不到头脑的 FAIL。
+
+> **命名说明** —— 原拼写是 `--verify`，作为 deprecated alias 保留（跑起来会先打印一行黄色 deprecation note，行为与 `--smoke-test` 完全一致），至少保留 2 个 release，预计 v2.0+ 删除。新写的自动化优先用 `--smoke-test`。
+>
+> **为什么不是 "dry-run"？** 这条命令**不是只读的**：会发 1 POST（admin 登录）+ 1 GET（presign 签发）+ 1 PUT（在 MinIO `common` bucket 留下一个 1 字节哨兵对象 `octo-verify-<timestamp>-<pid>.txt`，因为 presign 请求带的是 `type=common`）。它走的是真实的 auth + 真实的 storage 路径，叫成 "verify" / "dry-run" 会低估副作用。
+
+输出按失败域分组打印两个 banner，FAIL 时一眼能看出该排查哪一层：
+
+- `[infra] container + nginx routing (step 1-7)` —— 容器健康、nginx vhost、octo-server REST、matter、MinIO health、admin SPA、web SPA。这一段 FAIL 是**平台问题**：某个容器掉了、nginx 没在反代、宿主端口被防火墙挡住——先看 `docker compose ps` / `docker compose logs`。
+- `[user-path] auth + WS + presigned PUT (step 8-11)` —— WuKongIM `/ws`、admin 登录、presign 签发、签名 PUT。这一段 FAIL 是**契约问题**：平台是活的，但 auth 接错、MinIO IAM 凭据 desync、SigV4 签名对不上——看 octo-server + MinIO 这条线，别再去查 nginx。
+
+11 个探测步骤（每步打印 PASS/FAIL）：
 
 1. `docker compose ps` 没有 `(unhealthy)` 容器，也没有致命状态（`Exited (1)` / `Restarting` / `Dead`），且没有任何 expected service 缺失或已被 cleanly stop
 2. nginx vhost up（`GET /_nginx_up`）
@@ -160,7 +180,7 @@ cd octo-deployment
     MinIO 接受签名（双端口形态下 29000 被防火墙挡时图片消息静默丢失走
     的就是这条路径，见 OOTB-BUG-2026-05-17-001）。
 
-任何步骤失败 exit code 非 0。`python3` 是 `--verify` 的**硬前置依赖**——
+任何步骤失败 exit code 非 0。`python3` 是 `--smoke-test` 的**硬前置依赖**——
 第 8 步（WuKongIM `/ws` 探测）用 python3 打 raw socket，第 9-11 步
 （admin 登录、presign 签发、SigV4 PUT）用 `python3 -c 'import json'`
 解析 JSON，过去 silently skip 这些 JSON 步骤正是 OOTB-BUG-2026-05-17-001
@@ -168,12 +188,17 @@ cd octo-deployment
 （所有 modern Linux 发行版 base image 都自带）再重跑。这是用来在新机器
 上确认「端到端真的能用」的命令——区别于「容器起来了」。
 
-第 11 步会在 `file` bucket 留下一个 1 字节哨兵对象
-（`octo-verify-<timestamp>-<pid>.txt`）。这是故意留下的——本仓库使用
-的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的 `minio/mc`
-镜像里，只被一次性的 `minio-init` 容器用到），所以
+第 11 步会在 `common` bucket 留下一个 1 字节哨兵对象
+（`octo-verify-<timestamp>-<pid>.txt`）。bucket 由第 10 步发给
+`GET /api/v1/file/upload/credentials` 的 `type=common` 决定 —— octo-server
+的 MinIO 后端把 `type=` 映射到对象路径首段，再由 `splitBucketAndObject`
+（octo-server `modules/file/helpers.go`）按 allow-list（`file`/`chat`/
+`moment`/`sticker`/`report`/`chatbg`/`common`/`download`/`group`/`avatar`）
+路由到对应 bucket，所以 `type=common` 就落在 `common`。哨兵对象是故意留下
+的——本仓库使用的 `minio/minio` 镜像 **不带** `mc` 客户端（`mc` 在独立的
+`minio/mc` 镜像里，只被一次性的 `minio-init` 容器用到），所以
 `docker exec <project>-minio-1 mc rm ...` 这种命令必然报
-`mc: executable file not found`。每次 `--verify` 多 1 字节远低于噪声；
+`mc: executable file not found`。每次 `--smoke-test` 多 1 字节远低于噪声；
 真要清干净请单独跑 `minio/mc` 镜像接入项目的 docker 网络，或者拿
 `docker/.env` 里的管理员凭据直接调 MinIO S3 DELETE API。
 

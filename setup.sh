@@ -4,14 +4,16 @@
 # -----------------------------------------------------------------------------
 # Generates docker/.env from docker/.env.example with rotated secrets,
 # user-chosen domain/IP, and optional TLS / LLM summary toggles. Also
-# offers post-deploy smoke test (`--verify`) and clean uninstall
-# (`--uninstall`) subcommands.
+# offers post-deploy smoke test (`--smoke-test`, with `--verify` kept
+# as a deprecated alias) and clean uninstall (`--uninstall`)
+# subcommands.
 #
 # Usage:
 #   ./setup.sh                        # interactive mode
 #   ./setup.sh --non-interactive      # all defaults + auto-detect
 #   ./setup.sh --domain octo.example.com --ip 1.2.3.4 --https --summary
-#   ./setup.sh --verify               # smoke-test an already-up stack
+#   ./setup.sh --smoke-test           # smoke-test an already-up stack
+#   ./setup.sh --verify               # deprecated alias for --smoke-test
 #   ./setup.sh --uninstall            # tear down the stack (interactive)
 #
 # Requires: bash ≥4, openssl, docker, docker compose
@@ -28,6 +30,13 @@ FORCE_OVERWRITE=false
 RUN_UP=false
 RUN_VERIFY=false
 RUN_UNINSTALL=false
+# Track whether --verify (the deprecated alias) was the flag that enabled
+# the smoke test, so the run can print a one-time yellow deprecation notice
+# while still doing the exact same work as --smoke-test. RUN_VERIFY remains
+# the single source of truth for "should we run the smoke test" — both
+# --smoke-test and --verify set it true, so existing automation keeps
+# working unchanged.
+VERIFY_ALIAS_USED=false
 
 # Track which configuration values were supplied explicitly via CLI flags
 # so the interactive prompts (when invoked without --non-interactive)
@@ -56,6 +65,30 @@ fatal() { err "$@"; exit 1; }
 step()  { printf '%s[verify]%s %s ... ' "${CYAN}" "${RESET}" "$*"; }
 ok()    { printf '%sPASS%s\n' "${GREEN}" "${RESET}"; }
 fail()  { printf '%sFAIL%s — %s\n' "${RED}" "${RESET}" "${1:-}"; }
+
+# Group banner printed inside --smoke-test / --verify to visually segment
+# the 11 probes into two failure-domain buckets:
+#
+#   [infra]     — steps 1-7: container health + nginx routing + SPA reachability.
+#                 Failures here mean the platform itself is unhealthy (a
+#                 container is down, nginx isn't reverse-proxying, or a
+#                 host port is firewalled). The operator should look at
+#                 `docker compose ps` / `docker compose logs` first.
+#   [user-path] — steps 8-11: WuKongIM /ws upgrade + admin login + presign
+#                 issuance + signed PUT. Failures here mean the platform
+#                 is up but the end-to-end business contract is broken
+#                 (auth wired wrong, MinIO IAM creds desynced, SigV4
+#                 signing mismatch). The operator should look at
+#                 octo-server + MinIO together, not at nginx.
+#
+# This split lets a `[user-path]` FAIL with all `[infra]` PASS short-circuit
+# the "is it a deployment problem or a contract problem" question that
+# every PR#30 review round had to re-answer.
+banner() {
+  printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+  printf '%s  %s%s\n' "${BOLD}" "$*" "${RESET}"
+  printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+}
 
 # Portable in-place sed (GNU + BSD/macOS compatible).
 sed_inplace() {
@@ -272,12 +305,20 @@ validate_compose_project_name() {
 }
 
 # Default wait timeout (seconds) for `compose up -d --wait` and the
-# manual-poll fallback. Aligned at 120s after PR#30 public-IP E2E
-# (YUJ-1019 / GH#32) exposed that the previous 60s ceiling tripped on a
-# cold MySQL boot on small GCP instances. 120s comfortably covers the
-# first-time pull-and-init path on a freshly built host while still being
-# short enough to surface a stuck container instead of waiting forever.
-COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=120
+# manual-poll fallback. R7 (YUJ-1020 / GH#42): bumped 120 → 240 after the
+# fresh-host empirical cold-boot timeline showed the chain only reaches
+# healthy at ~110s on a small GCP instance (mysql init ~20s; octo-server
+# panic-and-recover after mysql warms 25-45s; dependents unblock another
+# ~50s). 120s sat exactly on that edge and flapped on the first boot.
+# 240s gives roughly 2x headroom for mysql init + the octo-server panic-
+# recover loop + every dependent's own healthcheck, without letting a
+# truly stuck container hang the script forever (the manual-poll
+# fallback also escalates `FATAL` rows to immediate fail). Combined
+# with the retry-once wrapper around `_compose_up_and_wait_once`, a
+# clean first boot pays nothing extra and a flap on the cold-boot edge
+# recovers on the warm second attempt (mysql/init/image cache already
+# hot, dependents reach healthy in <10s).
+COMPOSE_UP_WAIT_TIMEOUT_DEFAULT=240
 
 # Cleanup helper for `compose_up_and_wait`: idempotently kill the dots
 # subshell, reap it, and clear the EXIT trap. Used both from the normal
@@ -330,9 +371,24 @@ _compose_on_signal() {
 # names, and print a `logs <svc>` hint for each so the operator has an
 # immediate next step instead of a bare non-zero exit. Returns the exit
 # code of the compose call (or the poll) so callers can fail-fast.
-compose_up_and_wait() {
+# R7 (YUJ-1020 / GH#42): split into a private `_compose_up_and_wait_once`
+# (one cold/warm attempt) and a public `compose_up_and_wait` wrapper that
+# retries once on a soft timeout. Rationale: even with the 240s budget
+# above, a fresh GCP small instance can flap on the cold-boot edge when
+# mysql init + the octo-server panic-recover loop run back-to-back. A
+# second invocation rides the warm mysql / image cache and completes in
+# <10s, so retry-once is effectively free on the clean first run and
+# turns a known-transient flap into a single-pass `--up`. We retry ONLY
+# when no service has actually died (hard-failure rows — Restarting /
+# Dead / Exited(non-zero) — short-circuit straight to the diagnostic
+# dump on the first attempt). To keep the failure narrative readable,
+# the diagnostic dump (`ps`, failing-services log hints) is suppressed
+# on the first attempt and only printed when the SECOND attempt also
+# fails.
+_compose_up_and_wait_once() {
   local cc="$1"
   local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local suppress_diagnostics="${3:-false}"
   local rc=0 log_file ps_snapshot failing_svcs
 
   log_file="$(mktemp 2>/dev/null || echo "/tmp/octo-compose-up.$$")"
@@ -375,6 +431,13 @@ compose_up_and_wait() {
   trap - EXIT INT TERM
 
   if (( rc != 0 )); then
+    if [[ "${suppress_diagnostics}" == "true" ]]; then
+      # First attempt under retry-once: stay quiet so the wrapper can
+      # decide whether to retry or escalate. Still clean up the log file
+      # before returning.
+      rm -f "${log_file}" 2>/dev/null || true
+      return "${rc}"
+    fi
     err ""
     err "compose up did not reach a healthy state within ${timeout}s (or compose itself failed; rc=${rc})."
     if [[ -s "${log_file}" ]]; then
@@ -433,6 +496,32 @@ compose_up_and_wait() {
   return "${rc}"
 }
 
+# R7 (YUJ-1020 / GH#42) public wrapper: retry-once on transient cold-boot
+# flap. First attempt runs with `suppress_diagnostics=true` so we do not
+# spam the operator with `ps` / `logs <svc>` hints for a flap that the
+# second attempt is about to recover from. If the first attempt fails we
+# print a one-line info, retry once with diagnostics enabled, and return
+# the second attempt's exit code. Hard-failure rows (Restarting / Dead /
+# Exited(n>0)) still surface on the second attempt — they would not
+# recover on the retry anyway, so escalating with the full dump is the
+# right behaviour. Clean first runs pay nothing.
+compose_up_and_wait() {
+  local cc="$1"
+  local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
+  local rc=0
+
+  set +e
+  _compose_up_and_wait_once "${cc}" "${timeout}" true
+  rc=$?
+  set -e
+  if (( rc == 0 )); then
+    return 0
+  fi
+
+  warn "First wait did not reach healthy within ${timeout}s (rc=${rc}). Retrying once — the warm mysql / image cache typically recovers in <10s."
+  _compose_up_and_wait_once "${cc}" "${timeout}" false
+}
+
 # Read a value from docker/.env (defaults if missing). Used by --verify
 # / --uninstall / post-deploy admin-credentials echo.
 #
@@ -446,6 +535,33 @@ env_get() {
   if [[ ! -f "${ENV_OUT}" ]]; then
     echo "${default}"; return 0
   fi
+  # Bug 2B (YUJ-1020): a `.env` that exists but is unreadable by the
+  # current user (typical when --up ran under sudo and left the file
+  # `-rw------- root:root`, then a non-root user runs --smoke-test /
+  # --verify) makes the `grep` below silently emit empty output. Every
+  # downstream env_get call returns its default, and the smoke test
+  # then exercises octo.local:28080 with an empty admin password and
+  # nine probes FAIL with cryptic "no token in login response" /
+  # "no uploadUrl in credentials response" messages that send the
+  # operator hunting for a stack problem that does not exist.
+  # Detect EACCES once, up front, and surface a single actionable
+  # remediation line instead.
+  #
+  # R5 (YUJ-1020 / Jerry-Xin): the previous remediation suggested
+  # `chown` to the current user, which widened *write* authority on a
+  # file Compose treats as authoritative deployment config (silent
+  # user-edits to COMPOSE_PROJECT_NAME / MYSQL_ROOT_PASSWORD /
+  # MINIO_ROOT_PASSWORD / OCTO_MASTER_KEY would be consumed by the
+  # next privileged `docker compose` run). Final resolution: keep
+  # .env at root:600 (the default) and require sudo for --smoke-test,
+  # mirroring the sudo requirement of --up. Point the operator at the
+  # one-line `sudo ./setup.sh --smoke-test` fix; document the
+  # ownership-restore command as a fallback only.
+  if [[ ! -r "${ENV_OUT}" ]]; then
+    fatal "docker/.env exists but is not readable by user $(id -un).
+Either re-run as root: sudo ./setup.sh --smoke-test
+Or adjust ownership: sudo chown root:root docker/.env && sudo chmod 600 docker/.env (restore default)"
+  fi
   local v
   v="$(grep -E "^${key}=" "${ENV_OUT}" | head -1 | cut -d= -f2-)" || true
   # Strip one matched pair of surrounding "" or '' (no nesting / no escape
@@ -456,6 +572,39 @@ env_get() {
     v="${v#\'}"; v="${v%\'}"
   fi
   echo "${v:-${default}}"
+}
+
+# R7 (YUJ-1020 / GH#40+41): placeholder-aware host selection helper.
+#
+# The OOTB deployment has TWO independent host knobs that until R7 were
+# never reconciled at the system layer (the per-PR fixes in PR#43 / PR#44
+# disagreed on which one was authoritative for which path — see the R7
+# decision context). This helper makes the system decision explicit and
+# the rest of the script reads it.
+#
+# Rule:
+#   - `OCTO_DOMAIN` is a PLACEHOLDER (empty or the literal default
+#     `octo.local` — operator never put real DNS in front of the VM) →
+#     `OCTO_EXTERNAL_IP` is the authoritative host. setup.sh
+#     materialises explicit `MINIO_SERVER_URL` / `TS_MINIO_DOWNLOADURL`
+#     / `TS_EXTERNAL_BASEURL` overrides pointing at the IP (S1 below),
+#     and `--smoke-test` probes the IP (S2 below). The presigned PUT
+#     URL the server returns therefore uses the IP and the browser /
+#     curl can actually reach it.
+#   - `OCTO_DOMAIN` is a REAL domain (anything other than empty /
+#     `octo.local`) → `OCTO_DOMAIN` is the authoritative host. Compose
+#     defaults (`${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) take effect, the
+#     three URL overrides are NOT written into `.env`, and the
+#     `--smoke-test` probes the DOMAIN. `OCTO_EXTERNAL_IP` keeps its
+#     existing role for internal binding / firewall guidance only.
+#
+# Returns 0 (true) if OCTO_DOMAIN is a placeholder, 1 (false) otherwise.
+# Reads strictly from `.env` (via env_get) so the same answer is given
+# from --up / --smoke-test / .env-generation paths.
+is_placeholder_domain() {
+  local d
+  d="$(env_get OCTO_DOMAIN "")"
+  [[ -z "${d}" || "${d}" == "octo.local" ]]
 }
 
 # Resolve the project name the way Compose does — but for the script's own
@@ -533,14 +682,22 @@ while [[ $# -gt 0 ]]; do
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
     --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
-    --up)        RUN_UP=true; shift ;;
-    --verify)    RUN_VERIFY=true; shift ;;
-    --uninstall) RUN_UNINSTALL=true; shift ;;
+    --up)         RUN_UP=true; shift ;;
+    --smoke-test) RUN_VERIFY=true; shift ;;
+    # `--verify` is the original spelling, retained as a deprecated alias
+    # so existing automation / docs / muscle-memory keep working. Sets
+    # RUN_VERIFY exactly like --smoke-test does; the only behavioural
+    # difference is a one-line yellow deprecation notice printed at the
+    # very top of the smoke-test run (see VERIFY_ALIAS_USED below). The
+    # alias is contracted to stay for at least 2 releases (v1.x line)
+    # and is slated for removal in v2.0+.
+    --verify)     RUN_VERIFY=true; VERIFY_ALIAS_USED=true; shift ;;
+    --uninstall)  RUN_UNINSTALL=true; shift ;;
     -h|--help)
       cat <<'USAGE'
 Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>]
                 [--https] [--summary] [--up]
-       setup.sh --verify
+       setup.sh --smoke-test (or --verify, deprecated alias)
        setup.sh --uninstall
 
 Generation:
@@ -556,27 +713,63 @@ Generation:
                       See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
-  --up                After writing .env, run `docker compose up -d --wait
-                      --wait-timeout 120` and block until every long-
-                      running service is healthy AND every one-shot init
-                      job (preflight / minio-init) exited 0. On timeout
-                      or startup failure: print `compose ps`, list the
-                      specific failing service names, and emit one
-                      `logs <svc>` hint for each before exit 1. A '.'
-                      prints every 5 seconds while waiting so the run is
-                      visibly alive on slow hosts (cold MySQL init can
-                      take 60-90s).
+  --up                START-ONLY subcommand (peer of --smoke-test /
+                      --uninstall): requires an existing docker/.env and
+                      runs `docker compose up -d --wait --wait-timeout
+                      240`, blocking until every long-running service is
+                      healthy AND every one-shot init job (preflight /
+                      minio-init) exited 0. On a cold-boot soft timeout
+                      the wait retries ONCE on the warm mysql / image
+                      cache (typically <10s). NEVER regenerates secrets
+                      — run `./setup.sh` first to create docker/.env, or
+                      pass `--up --force` to explicitly bootstrap +
+                      start in one shot (the only path that generates
+                      fresh secrets from a `--up` invocation; see
+                      `--force` below).
+                      On a second-attempt failure: print `compose ps`,
+                      list the specific failing service names, and emit
+                      one `logs <svc>` hint for each before exit 1. A
+                      '.' prints every 5 seconds while waiting so the
+                      run is visibly alive on slow hosts (cold MySQL
+                      init can take 60-90s). Requires sudo: the Docker
+                      daemon socket needs root, and --up chowns
+                      docker/.env back to root:root 600 once the stack
+                      is healthy so --smoke-test can read it.
+  --up --force        EXPLICIT bootstrap + start in one command. Only
+                      meaningful when docker/.env is missing: generate
+                      all secrets, then start the stack and wait for
+                      healthy. Equivalent to running step 1 + step 2
+                      back-to-back. Will refuse to overwrite an
+                      existing docker/.env on the generation path (the
+                      .env-overwrite prompt / non-interactive guard
+                      still applies — see `--force` below). This is the
+                      ONLY way `--up` is allowed to write secrets;
+                      without --force, a missing docker/.env is a fatal
+                      error with concrete remediation.
 
 Smoke test / tear-down (work against an already-existing docker/.env):
-  --verify            Probe nginx / octo-server / matter / object-store
+  --smoke-test        Probe nginx / octo-server / matter / object-store
                       paths end-to-end. Exits non-zero on any failure.
+                      Output is grouped into [infra] (steps 1-7) and
+                      [user-path] (steps 8-11) so a failure tells you
+                      immediately which failure-domain to investigate.
+                      Real side-effects: 1 POST (admin login), 1 GET
+                      (presign issuance), 1 PUT (1-byte sentinel object
+                      left in the MinIO `common` bucket, since the
+                      probe issues credentials for type=common). Not a
+                      dry-run.
+  --verify            Deprecated alias for --smoke-test. Prints a yellow
+                      deprecation notice and otherwise runs identically.
+                      Kept for at least 2 releases; slated for removal
+                      in v2.0+. Prefer --smoke-test in new automation.
   --uninstall         Tear down the stack. Interactively offers three
                       granularity levels (full / data-only / containers-only).
 
-When any of --domain / --ip / --https / --summary / --up is given without
+When any of --domain / --ip / --https / --summary is given without
 --non-interactive, setup.sh treats the flags as your decisions and runs
 non-interactively so the documented one-liner forms (see docker/README.md)
-work as written.
+work as written. --up is a start-only subcommand (peer of --smoke-test
+/ --uninstall) and never participates in the decision-flag handling.
 USAGE
       exit 0
       ;;
@@ -584,8 +777,42 @@ USAGE
   esac
 done
 
+# S4 (R7 / YUJ-1020) early EUID guard for --up: enforce sudo BEFORE
+# `preflight_existing_octo` runs (it shells out to docker, which itself
+# needs the root-owned daemon socket, so a non-sudo --up would emit a
+# confusing docker permission error in the middle of the preflight
+# instead of the clean S4 message). The --smoke-test EUID guard is
+# already early (inside the RUN_VERIFY short-circuit a few lines below,
+# which exits well before preflight).
+if [[ "${RUN_UP}" == "true" ]] && [[ ${EUID} -ne 0 ]]; then
+  fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
+fi
+
 # Subcommand short-circuits — run and exit before the generation path.
 if [[ "${RUN_VERIFY}" == "true" ]]; then
+  # Scope 3.1 (YUJ-1020) — R5 nit (Jerry-Xin): print the --verify
+  # deprecation note BEFORE any check that can fatal-exit (file
+  # existence, EACCES preflight, curl prereq). Otherwise an operator
+  # running the deprecated `--verify` against a root:600 .env without
+  # sudo would fatal in env_get() and never see the deprecation
+  # signal, prolonging the rename rollout. The note only prints when
+  # the alias was actually used, so the canonical `--smoke-test` path
+  # is unaffected.
+  if [[ "${VERIFY_ALIAS_USED}" == "true" ]]; then
+    printf '%snote: --verify is an alias for --smoke-test (will be removed in v2.0+).%s\n\n' "${YELLOW}" "${RESET}"
+  fi
+  # S4 (R7 / YUJ-1020): hard EUID guard. After R7, `--up` chowns `.env`
+  # back to `root:root 600` once compose is healthy, so `--smoke-test`
+  # MUST run as root to read the file. Fail fast at the top of the block
+  # with a one-line actionable error — without this guard the env_get
+  # EACCES preflight further down still surfaces the issue, but the
+  # remediation message ("Or adjust ownership: chown root:root + chmod
+  # 600 to restore the default") is a fallback for legacy `.env` states,
+  # not the canonical path. The canonical path for an R7 stack is
+  # exactly `sudo ./setup.sh --smoke-test`.
+  if [[ ${EUID} -ne 0 ]]; then
+    fatal "sudo required for --smoke-test (needs to read root-owned .env). Re-run as 'sudo ./setup.sh --smoke-test'."
+  fi
   if [[ ! -f "${ENV_OUT}" ]]; then
     fatal "docker/.env not found. Run setup.sh first to generate it."
   fi
@@ -601,13 +828,33 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # auto-detection has a 127.0.0.1 fallback; --verify has no such
   # fallback.
   if ! command -v curl >/dev/null 2>&1; then
-    fatal "curl is required for --verify (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --verify\`."
+    fatal "curl is required for --smoke-test (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
   fi
   CC="$(compose_cmd)"
   DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-  BASE_URL="http://${DOMAIN}:${HTTP_PORT}"
+  # S2 (R7 / GH#40): placeholder-aware probe-host selection. When OCTO_DOMAIN
+  # is a placeholder (empty or `octo.local`), `--smoke-test` must talk to the
+  # public IP — `octo.local` does not resolve from a GCP host without DNS, so
+  # the old `http://octo.local:28080` BASE_URL flatlined 8/11 probes on a
+  # healthy stack (PR#30 GCP E2E). When OCTO_DOMAIN is a real domain, we
+  # respect it (browsers go via DNS; the IP is only for internal binding /
+  # firewall). The presigned PUT URL the server returns is consumed verbatim
+  # by step 11 — S1 below pins the server to the same IP/DOMAIN choice when
+  # it writes `.env`, so step 11's URL matches BASE_URL automatically.
+  if is_placeholder_domain; then
+    PROBE_HOST="$(env_get OCTO_EXTERNAL_IP "${DOMAIN}")"
+  else
+    PROBE_HOST="${DOMAIN}"
+  fi
+  BASE_URL="http://${PROBE_HOST}:${HTTP_PORT}"
   fails=0
+
+  # Scope 3.2 (YUJ-1020): segment the 11 probes into [infra] (1-7) and
+  # [user-path] (8-11). See the `banner()` docstring above the helper
+  # for the failure-domain rationale. Inserted purely as printf banners
+  # so the existing step counters / fail accounting are untouched.
+  banner "[infra] container + nginx routing (step 1-7)"
 
   step "container health (${CC} ps)"
   if ! ( cd "${DOCKER_DIR}" && ${CC} ps --all >/dev/null 2>&1 ); then
@@ -744,6 +991,8 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # on weird WuKongIM upgrades than to false-negative on a stopped
   # container. openssl is already a hard prereq (checked above), so the
   # base64-random WS key generation is always available.
+  echo ""
+  banner "[user-path] auth + WS + presigned PUT (step 8-11)"
   step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
   # R8 (YUJ-1002 / ReviewBot P0): replace curl with a python3 socket
   # probe. The R7 form looked like
@@ -786,7 +1035,7 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # syntax / runtime error inside the heredoc body (e.g. a typo turning a
   # name-resolution failure into a silent pass). The explicit `if` keeps
   # the intent ("python3 exit code drives WS_STATUS, nothing more") legible.
-  if WS_OUT="$(python3 - "${DOMAIN}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
+  if WS_OUT="$(python3 - "${PROBE_HOST}" "${HTTP_PORT}" <<'PYEOF' 2>/dev/null
 import base64, os, re, socket, sys
 host, port = sys.argv[1], int(sys.argv[2])
 key = base64.b64encode(os.urandom(16)).decode()
@@ -860,7 +1109,7 @@ PYEOF
     # caller cannot mistake reachability-only coverage for the full
     # contract test.
     step "python3 prerequisite (admin login + presign PUT)"
-    fail "python3 is required for --verify (admin login JSON encoding + presign response parsing). Install python3 — every modern Linux distro ships it in the base image — and re-run \`setup.sh --verify\`."
+    fail "python3 is required for --smoke-test (admin login JSON encoding + presign response parsing). Install python3 — every modern Linux distro ships it in the base image — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
     ((fails++)) || true
   else
     ADMIN_USER="$(env_get OCTO_ADMIN_NAME superAdmin)"
@@ -921,7 +1170,20 @@ print(tok or "")
     if [[ -n "${TOKEN}" ]]; then
       step "issue presigned PUT (GET /api/v1/file/upload/credentials)"
       TEST_FILE="octo-verify-$(date +%s)-$$.txt"
-      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=file&filename=${TEST_FILE}&fileSize=1"
+      # Bug 1 (YUJ-1020): octo-server `modules/file/api.go:checkReq()` only
+      # accepts a fixed whitelist of `type=` values — chat / moment /
+      # momentcover / sticker / report / common / chatbg / download /
+      # workplacebanner / workplaceappicon. The old probe used `type=file`,
+      # which is NOT in the whitelist, so the server short-circuited with
+      # `{"status":400,"msg":"文件类型错误"}` (api.go:730) and the smoke
+      # test FAIL-ed at "no uploadUrl in credentials response" 100% of
+      # the time — never proving the SigV4 PUT path at all. `common`
+      # is the most generic / least-attribute-coupled type in the
+      # whitelist (no special bucket / no special path-shape requirement),
+      # so it is the right choice for a synthetic 1-byte sentinel.
+      # Verified: `grep -n "TypeCommon" octo-server/modules/file/const.go`
+      # → `TypeCommon Type = "common"`.
+      CRED_URL="${BASE_URL}/api/v1/file/upload/credentials?type=common&filename=${TEST_FILE}&fileSize=1"
       CRED_RESP="$(curl -sS --max-time 10 -H "token: ${TOKEN}" "${CRED_URL}" 2>/dev/null || true)"
       # Parse uploadUrl / contentType / contentDisposition out of the JSON.
       # Use a single python3 invocation so we can shell-eval the three
@@ -996,12 +1258,12 @@ print("UPLOAD_CD="  + shlex.quote(unwrap(d, "contentDisposition") or ""))
   echo ""
   if [[ "${fails}" -eq 0 ]]; then
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-    printf '%s  setup.sh --verify: end-to-end smoke test PASSED ✅%s\n' "${GREEN}" "${RESET}"
+    printf '%s  setup.sh --smoke-test: end-to-end smoke test PASSED ✅%s\n' "${GREEN}" "${RESET}"
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
     exit 0
   else
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-    printf '%s  setup.sh --verify: %d step(s) failed ❌%s\n' "${RED}" "${fails}" "${RESET}"
+    printf '%s  setup.sh --smoke-test: %d step(s) failed ❌%s\n' "${RED}" "${fails}" "${RESET}"
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
     err "Tail logs with: cd docker && ${CC} logs --tail 100"
     exit 1
@@ -1137,14 +1399,14 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
 fi
 
 # If the operator supplied any "decision" flag (--domain / --ip / --https
-# / --summary / --up) but did not pass --non-interactive, treat those
-# flags as the decision and skip the prompts.
+# / --summary) but did not pass --non-interactive, treat those flags as
+# the decision and skip the prompts. (--up no longer participates: R6
+# made it a start-only subcommand that exits before the prompts.)
 if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
      || "${IP_SET_VIA_CLI}" == "true" \
      || "${HTTPS_SET_VIA_CLI}" == "true" \
-     || "${SUMMARY_SET_VIA_CLI}" == "true" \
-     || "${RUN_UP}" == "true" ]]; then
+     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
     info "CLI flags supplied; switching to non-interactive mode."
     info "(Pass no flags, or only --force, to get the interactive prompts.)"
     NON_INTERACTIVE=true
@@ -1286,6 +1548,150 @@ Export COMPOSE_PROJECT_NAME=octo-<suffix> before re-running, or run interactivel
 
 preflight_existing_octo
 
+# ── R6 (YUJ-1020): --up is a START-ONLY subcommand ──────────────────────────
+# lml2468 + Jerry-Xin R5 consensus (option B, architecturally cleaner):
+# `--up` is a peer of `--smoke-test` / `--uninstall`. It NEVER triggers
+# .env generation. Documented workflow:
+#
+#   ./setup.sh                    # step 1: gen .env (interactive, no sudo)
+#   sudo ./setup.sh --up          # step 2: start the stack (start-only)
+#   sudo ./setup.sh --smoke-test  # step 3: verify
+#
+# Before R6 the script forced NON_INTERACTIVE=true on --up and then hit
+# the "docker/.env already exists" guard a few lines below — fatal in
+# the exact workflow our own README documented. Adding --force would
+# have regenerated every secret and broken step 1's output. The clean
+# fix is to short-circuit here: validate that .env exists, then delegate
+# straight to compose_up_and_wait and exit. No prompt, no overwrite, no
+# secret regeneration on this code path — ever.
+if [[ "${RUN_UP}" == "true" ]]; then
+  # S4 (R7 / YUJ-1020): hard EUID guard at the top of `--up`. We chown
+  # `.env` back to `root:root 600` once compose is healthy (below), so
+  # this command must run as root. Docker itself also needs root (the
+  # daemon socket), so the sudo requirement is a single coherent
+  # constraint instead of half-failing partway through. PR#36 docs
+  # already promised "Both --up and --smoke-test require sudo"; S4
+  # actually enforces it instead of relying on Docker / chown to surface
+  # the issue later with a less actionable error.
+  if [[ ${EUID} -ne 0 ]]; then
+    fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
+  fi
+  # R8 (YUJ-1066, Jerry-Xin CR on PR#36 R7): make the --up contract
+  # honest. Help text + README have always promised "--up requires an
+  # existing docker/.env" + "NEVER regenerates secrets", so the R7
+  # Test-A fall-through (missing .env → silently generate fresh secrets
+  # → start the stack) was a doc-reality mismatch and a production
+  # footgun: a single typo in deploy automation could regenerate every
+  # MySQL/MinIO/admin secret on a live host. R8 makes the start-only
+  # semantics the default and gates auto-bootstrap behind explicit
+  # `--force` (same flag that already gates "overwrite existing .env"
+  # on the generation path, so the security framing is consistent: any
+  # --force invocation acknowledges secret writes).
+  #
+  # Existing .env → start-only (R6 semantics, unchanged).
+  # Missing .env + no --force → fatal with concrete remediation.
+  # Missing .env + --force → fall through to the generation block; the
+  # end-of-script R8 hook (search for "R8 RUN_UP post-generation hook")
+  # then runs compose_up_and_wait + chown so a single
+  #   `sudo bash setup.sh --non-interactive --ip <IP> --up --force`
+  # invocation provisions AND starts the stack in one shot. The R6
+  # anti-bug (--up silently re-running secret generation on an existing
+  # .env) is still prevented because that branch short-circuits here.
+  if [[ ! -f "${ENV_OUT}" ]]; then
+    if [[ "${FORCE_OVERWRITE}" != "true" ]]; then
+      err "docker/.env not found — --up is start-only and refuses to generate secrets implicitly."
+      err ""
+      err "First-time setup (recommended — generate, review, then start):"
+      err "  ./setup.sh                                       # interactive prompts (no sudo)"
+      err "  ./setup.sh --non-interactive --ip <PUBLIC_IP>    # unattended (no sudo)"
+      err "  sudo ./setup.sh --up                             # then start the stack"
+      err ""
+      err "Or bootstrap + start in one command (WILL generate fresh secrets):"
+      err "  sudo ./setup.sh --non-interactive --ip <PUBLIC_IP> --up --force"
+      exit 1
+    fi
+    info "docker/.env not present and --force given — will generate it first, then start the stack (single-command --up --force bootstrap)."
+  else
+
+  CC="$(compose_cmd)"
+  # Persist the project name from the existing .env (or the operator's
+  # shell env) so the child compose process sees the same value the
+  # stack was provisioned with. Mirrors the same precedence used by the
+  # generation path further down.
+  PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
+  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
+
+  echo ""
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
+  info "A '.' will print every 5s while we wait so you know the script is still alive."
+
+  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
+    info "All services reached healthy."
+
+    # S4 (R7 / YUJ-1020): after compose is healthy, lock `.env` down to
+    # `root:root 600` so subsequent `--smoke-test` can read it (and
+    # nobody else can). PR#36 docs promised this lockdown across R5/R6
+    # but no code actually did the chown — the file kept whatever
+    # ownership the prior `./setup.sh` (interactive, non-sudo) had given
+    # it (user-owned), which then surprised operators who expected the
+    # documented `-rw------- root root` state. We are already root here
+    # (S4 EUID guard above), so chown/chmod cannot fail under normal
+    # conditions.
+    #
+    # R9 (YUJ-1068 / Jerry-Xin PR#36 W2): a SILENT chown/chmod failure
+    # here is worse than a noisy abort. If chown does not stick, the
+    # next `sudo compose` reads a user-writable `.env` and we have
+    # quietly broken the "secrets file is root:root 600" contract the
+    # rest of the script (and docs) lean on. Treat any failure as
+    # fatal — operators on read-only / unusual filesystems will see the
+    # exact reason and can rerun on a writable mount.
+    if [[ -f "${ENV_OUT}" ]]; then
+      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
+      info "docker/.env now owned by root:root (mode 600)."
+    fi
+
+    DOMAIN="$(env_get OCTO_DOMAIN octo.local)"
+    HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
+    # R9 (YUJ-1068 / yujiawei PR#36 F1): same S1 placeholder rule —
+    # printing `http://octo.local:28080/admin/` in the success banner
+    # when the operator picked the placeholder domain hands them a URL
+    # their browser cannot resolve (no DNS pointed at the host). When
+    # OCTO_DOMAIN is a placeholder AND OCTO_EXTERNAL_IP is concrete,
+    # mint the admin URL off the IP so it is actually click-through.
+    EXTERNAL_IP_ENV="$(env_get OCTO_EXTERNAL_IP "")"
+    if is_placeholder_domain && [[ -n "${EXTERNAL_IP_ENV}" ]]; then
+      ADMIN_URL="http://${EXTERNAL_IP_ENV}:${HTTP_PORT}/admin/"
+    else
+      ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
+    fi
+
+    echo ""
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  Stack started successfully!%s\n' "${GREEN}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
+    printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
+    printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    info "Next step:"
+    echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"
+    echo ""
+    exit 0
+  else
+    # compose_up_and_wait already printed `ps` + a `logs <svc>` hint
+    # (YUJ-1019 / GH#32) above this line, so we only need the
+    # rerun-pointer here.
+    err "Fix the root cause and rerun 'sudo ./setup.sh --up' (or 'sudo ./setup.sh --smoke-test' once the stack is healthy)."
+    err "docker/.env is unchanged — re-running setup.sh is NOT required."
+    exit 1
+  fi
+  fi
+fi
+
 # ── Guard against overwriting an existing .env ─────────────────────────────
 if [[ -f "${ENV_OUT}" ]] && [[ "${FORCE_OVERWRITE}" != "true" ]]; then
   if [[ "${NON_INTERACTIVE}" == "true" ]]; then
@@ -1336,8 +1742,23 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   fi
 
   # External IP
-  read -rp "External IP [${detected_ip}]: " user_ip
-  EXTERNAL_IP="${user_ip:-${detected_ip}}"
+  # R9 (YUJ-1068 / lml2468 PR#36 CR): when the operator picked a
+  # placeholder domain (empty or `octo.local`) the deployment is
+  # local-only by contract — S1 will materialise IP-based URL
+  # overrides off whatever EXTERNAL_IP we accept here, and feeding it
+  # `detect_ip`'s public address would silently mint
+  # `http://<public-ip>:28080` overrides that contradict the
+  # local-only promise the operator just made at the domain prompt.
+  # Default to `127.0.0.1` in that case; the operator can still type
+  # a public IP explicitly if they actually want external reach (in
+  # which case they should also pick a non-placeholder domain).
+  if [[ -z "${DOMAIN}" || "${DOMAIN}" == "octo.local" ]]; then
+    ip_default="127.0.0.1"
+  else
+    ip_default="${detected_ip}"
+  fi
+  read -rp "External IP [${ip_default}]: " user_ip
+  EXTERNAL_IP="${user_ip:-${ip_default}}"
 
   # HTTPS
   read -rp "Enable HTTPS preparation flag? [y/N]: " user_https
@@ -1503,42 +1924,87 @@ else
   mv "${TMP_ENV}" "${ENV_OUT}"
 fi
 
-# ── Optional: bring the stack up + wait for healthy ────────────────────────
+# ── Compute admin URL for the post-generation summary ─────────────────────
 HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
-ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
-
-if [[ "${RUN_UP}" == "true" ]]; then
-  CC="$(compose_cmd)"
-  # Export the persisted project name so the child `docker compose`
-  # process sees it even if the calling shell never did.
-  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
-  echo ""
-  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
-  info "A '.' will print every 5s while we wait so you know the script is still alive."
-  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
-    info "All services reached healthy."
-  else
-    # FAIL-FAST: a compose-up failure means the stack is NOT running.
-    # Previously this was just a warning and the success banner below
-    # printed anyway, which (a) misled the operator and (b) let CI /
-    # automation see exit 0 when nothing was actually up.
-    # `compose_up_and_wait` already printed `ps` + a `logs <svc>` hint
-    # (YUJ-1019 / GH#32) above this line, so we only need the
-    # rerun-pointer here.
-    err "Fix the root cause and rerun ./setup.sh --up (or ./setup.sh --verify"
-    err "once the stack is healthy)."
-    err "docker/.env has been written — re-running setup.sh is NOT required."
-    exit 1
-  fi
+# R9 (YUJ-1068 / yujiawei PR#36 F1): mirror the S1 placeholder rule on
+# the ADMIN_URL we print in the post-generation summary banner (and the
+# --up --force success banner below). When the operator picked a
+# placeholder domain we already mint IP-based MinIO / TS overrides
+# below; printing `http://octo.local:28080/admin/` here would be the
+# odd one out and have the operator's browser DNS-fail on click. Use
+# the in-memory DOMAIN / EXTERNAL_IP here because the .env we just
+# wrote already reflects them and these are still in scope.
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+  ADMIN_URL="http://${EXTERNAL_IP}:${HTTP_PORT}/admin/"
+else
+  ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
 fi
 
+# S1 (R7 / YUJ-1020 / GH#41): placeholder-aware materialisation of
+# MinIO / TS URL overrides.
+#
+# When the operator uses `--ip <public-IP>` WITHOUT a real `--domain`,
+# `OCTO_DOMAIN` stays at its placeholder `octo.local` and the compose
+# defaults (`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`) end up signing
+# presigned PUT URLs against `http://octo.local:28080/...`. The
+# operator's browser cannot resolve `octo.local` (no DNS pointed at the
+# VM), and every image / file message silently breaks at the upload
+# step — exactly the GH#41 failure mode caught on Coda E2E v12.
+#
+# When `OCTO_DOMAIN` IS a real domain (anything other than empty /
+# `octo.local`), the compose defaults already do the right thing and
+# rely on DNS — writing IP-based overrides here would break that DNS
+# topology (`--domain octo.example.com --ip 1.2.3.4` would have client
+# browsers calling the IP instead of the documented domain).
+#
+# So S1 materialises three lockstep overrides ONLY when both:
+#   (1) OCTO_DOMAIN is placeholder (empty or `octo.local`), AND
+#   (2) OCTO_EXTERNAL_IP is set (operator gave us something concrete).
+# All three URLs must agree (SigV4 rejects every PUT with `403
+# SignatureDoesNotMatch` if MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
+# disagree on host:port), so they are written as a single block.
+# Reads/imports stay literal — Compose interpolates `.env` once into
+# YAML without recursive expansion.
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+  info "OCTO_DOMAIN is a placeholder (${DOMAIN}); materialising IP-based URL overrides so presigned PUT / TS callback URLs are browser-reachable from ${EXTERNAL_IP}."
+  cat >> "${ENV_OUT}" <<URLS
+
+# S1 (R7 / YUJ-1020 / GH#41): Materialised because OCTO_DOMAIN=${DOMAIN}
+# (placeholder) and --ip ${EXTERNAL_IP} was supplied. Without these three
+# overrides the compose defaults would sign presigned PUT URLs against
+# http://${DOMAIN}:${HTTP_PORT}, which does not resolve from a client
+# without DNS pointed at this host. Set OCTO_DOMAIN=<real DNS name>
+# and re-run setup.sh --force if you want the DNS-based topology instead.
+MINIO_SERVER_URL=http://${EXTERNAL_IP}:${HTTP_PORT}
+TS_MINIO_DOWNLOADURL=http://${EXTERNAL_IP}:${HTTP_PORT}
+TS_EXTERNAL_BASEURL=http://${EXTERNAL_IP}:${HTTP_PORT}
+URLS
+fi
+
+# R6 (YUJ-1020): the old "--up after .env generation" path is gone. `--up`
+# is now a start-only subcommand handled at the top of this script (search
+# for "R6 (YUJ-1020): --up is a START-ONLY subcommand"). Reaching this
+# line means we are on the generation path (`./setup.sh` without --up),
+# so there is no compose work to do here — just print the summary below
+# and tell the operator to run `sudo ./setup.sh --up` next.
+
 # ── Print summary ───────────────────────────────────────────────────────────
+# R10 (YUJ-1071 / Jerry-Xin PR#36 R9 F3): gate the "stack NOT started
+# yet" banner so it only fires on the generation-only path (`./setup.sh`
+# / `./setup.sh --non-interactive` without --up). On the `--up --force`
+# bootstrap path the R8 post-generation RUN_UP hook below is about to
+# run compose_up_and_wait in this same invocation, so calling the stack
+# "NOT started yet" here is misleading — and historically caused the
+# Jerry-Xin R9 F3 confusion ("operator sees generation-only banner,
+# then stack starts anyway"). Print a bootstrap-specific banner in
+# that case ("Stack starting now — run --smoke-test once healthy") so
+# the banner matches the actual control flow.
 echo ""
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
-if [[ "${RUN_UP}" == "true" ]]; then
-  printf '%s  docker/.env generated AND stack started successfully!%s\n' "${GREEN}" "${RESET}"
-else
+if [[ "${RUN_UP}" != "true" ]]; then
   printf '%s  docker/.env generated successfully — stack NOT started yet.%s\n' "${GREEN}" "${RESET}"
+else
+  printf '%s  docker/.env generated — stack starting now (run --smoke-test once healthy).%s\n' "${GREEN}" "${RESET}"
 fi
 printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
 echo ""
@@ -1582,18 +2048,112 @@ if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
 fi
 
+# R6 (YUJ-1020): we are always on the generation path here (--up exits
+# earlier as a start-only subcommand). Print the canonical 3-step next-
+# steps list so the operator never has to guess the workflow.
+#
+# R9 (YUJ-1068 / yujiawei PR#36 F3): suppress the "Next steps" footer
+# when the operator passed `--up --force`. The R8 post-generation hook
+# (below) is about to run compose_up_and_wait + print its OWN success
+# banner with a "sudo ./setup.sh --smoke-test" pointer, so emitting
+# "2. sudo ./setup.sh --up" here is misleading — the stack is being
+# started in this same invocation. Skip the next-steps block in that
+# case; the post-gen hook owns the operator-facing UX.
 if [[ "${RUN_UP}" != "true" ]]; then
   echo ""
   info "Next steps:"
   echo "  1. Review docker/.env and adjust as needed"
-  echo "  2. (cd docker && docker compose up -d --wait)   # subshell — keeps you in repo root"
-  echo "  3. ./setup.sh --verify    # admin login + presign PUT end-to-end check"
+  echo "  2. sudo ./setup.sh --up           # start the stack (Docker + .env both need root)"
+  echo "  3. sudo ./setup.sh --smoke-test   # admin login + presign PUT end-to-end check"
   echo "  4. Visit ${ADMIN_URL}"
-else
   echo ""
-  info "Smoke test:"
-  echo "  ./setup.sh --verify    # admin login + presign PUT end-to-end check"
+fi
+
+# R6 Nit 1 (Jerry-Xin W2): post-gen message must match what the file
+# actually looks like on disk. `./setup.sh` (non-sudo) writes the file
+# as the current user; `sudo ./setup.sh` writes it as root. The two
+# branches keep the security framing identical (mode 600 + secrets +
+# sudo needed for subsequent --up/--smoke-test because Docker needs
+# root either way), just with the correct owner string.
+#
+# R10 (YUJ-1071 / Jerry-Xin PR#36 R9 F3): gate the "Next: sudo
+# ./setup.sh --up" hint the same way the Next-steps footer above is
+# gated. On the `--up --force` bootstrap path, the post-gen RUN_UP
+# hook below is about to start the stack in this same invocation, so
+# pointing at "--up" as the next operator action is wrong. Substitute
+# the smoke-test pointer in that case to match the post-gen success
+# banner's call-to-action.
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf '%s  ⚠  docker/.env (mode 600, owned by root) — contains all admin/DB/MinIO secrets.%s\n' "${YELLOW}" "${RESET}"
+  if [[ "${RUN_UP}" != "true" ]]; then
+    printf '%s     Next: sudo ./setup.sh --up%s\n' "${YELLOW}" "${RESET}"
+  else
+    printf '%s     Next: sudo ./setup.sh --smoke-test  (after the post-gen up reports healthy below)%s\n' "${YELLOW}" "${RESET}"
+  fi
+  printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
+else
+  printf '%s  ⚠  docker/.env (mode 600, owned by %s) — contains all admin/DB/MinIO secrets, readable by you.%s\n' "${YELLOW}" "$(id -un)" "${RESET}"
+  if [[ "${RUN_UP}" != "true" ]]; then
+    printf '%s     Next: sudo ./setup.sh --up  (sudo needed for Docker; --up will not rewrite/regenerate secrets in this file)%s\n' "${YELLOW}" "${RESET}"
+  else
+    printf '%s     Next: sudo ./setup.sh --smoke-test  (after the post-gen up reports healthy below)%s\n' "${YELLOW}" "${RESET}"
+  fi
+  printf '%s     Rotate the admin password from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
 fi
 echo ""
-printf '%s  ⚠  Admin password is saved in docker/.env (mode 600). Treat that file as a secret and rotate from the admin UI after first login (see docker/README.md "First-admin bootstrap").%s\n' "${YELLOW}" "${RESET}"
-echo ""
+
+# R8 RUN_UP post-generation hook (YUJ-1066, supersedes the R7 hook):
+# only reachable when the operator passed `--up --force` AND no
+# pre-existing docker/.env was present. The start-only short-circuit
+# at the top of this script (search for "R8 (YUJ-1066") intentionally
+# fell through here so the generation block above could write the
+# .env. We close the loop here: do the same compose_up_and_wait +
+# chown + summary the existing-.env --up branch does, so the single
+# command
+#   `sudo bash setup.sh --non-interactive --ip <IP> --up --force`
+# provisions and starts the stack in one invocation. The S4 EUID guard
+# at the top of `--up` already enforced that we are root here. Without
+# `--force` we never get here because the start-only block fataled
+# with concrete remediation — that is the R8 doc-reality fix for the
+# Jerry-Xin CR on PR#36 R7.
+if [[ "${RUN_UP}" == "true" ]]; then
+  CC="$(compose_cmd)"
+  PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
+  export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
+
+  echo ""
+  info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
+  info "A '.' will print every 5s while we wait so you know the script is still alive."
+
+  if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
+    info "All services reached healthy."
+    # R9 (YUJ-1068 / Jerry-Xin PR#36 W2): same fatal-on-failure
+    # treatment as the existing-.env --up branch above — silent
+    # warn-then-continue here would leave a user-writable .env behind
+    # the next `sudo compose` run.
+    if [[ -f "${ENV_OUT}" ]]; then
+      chown root:root "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:root — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
+      info "docker/.env now owned by root:root (mode 600)."
+    fi
+    echo ""
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    printf '%s  Stack started successfully!%s\n' "${GREEN}" "${RESET}"
+    printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
+    printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
+    printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    echo ""
+    info "Next step:"
+    echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"
+    echo ""
+    exit 0
+  else
+    err "Fix the root cause and rerun 'sudo ./setup.sh --up' (or 'sudo ./setup.sh --smoke-test' once the stack is healthy)."
+    err "docker/.env IS already generated — re-running setup.sh is NOT required."
+    exit 1
+  fi
+fi
