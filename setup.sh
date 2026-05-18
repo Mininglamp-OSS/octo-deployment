@@ -618,6 +618,37 @@ is_placeholder_domain() {
   [[ -z "${d}" || "${d}" == "localhost" ]]
 }
 
+# GH#51 (2026-05-18, PR#50 follow-up): one-shot migration nudge for
+# operators whose existing `.env` still carries the legacy placeholder
+# `OCTO_DOMAIN=octo.local`. PR#50 demoted `octo.local` from "placeholder"
+# to "real domain" (placeholder rule above only matches empty or
+# `localhost`), so on those `.env` files the script now respects
+# `octo.local` literally: presigned URLs are minted at
+# `http://octo.local:28080/...` and `--smoke-test` probes the same. With
+# no `/etc/hosts` entry the IM WebSocket flips to close code 1006 and
+# every smoke-test probe times out — the exact failure mode GH#49
+# described, except now opt-in via stale config instead of default.
+# The nudge is purely advisory (no behaviour change) so unattended
+# automation keeps working; the remediation is a single flag.
+#
+# `NUDGE_OCTO_LOCAL_SHOWN` guards against firing twice on the
+# `--up --force` bootstrap path, which runs the `--up` block AND falls
+# through to the generation/interactive block in the same invocation.
+NUDGE_OCTO_LOCAL_SHOWN=false
+nudge_octo_local_migration() {
+  if [[ "${NUDGE_OCTO_LOCAL_SHOWN}" == "true" ]]; then
+    return 0
+  fi
+  local d=""
+  d="$(env_get OCTO_DOMAIN "")" || d=""
+  if [[ "${d}" == "octo.local" ]]; then
+    info "Heads-up: OCTO_DOMAIN=octo.local is no longer a placeholder (see GH#49 / PR#50)."
+    info "If IM WebSocket or smoke-test breaks, edit docker/.env (change OCTO_DOMAIN=octo.local to OCTO_DOMAIN=localhost or a real DNS name), then rerun --up."
+    info "Quick one-liner: sed -i.bak 's/^OCTO_DOMAIN=octo\.local\$/OCTO_DOMAIN=localhost/' docker/.env"
+    NUDGE_OCTO_LOCAL_SHOWN=true
+  fi
+}
+
 # Resolve the project name the way Compose does — but for the script's own
 # bookkeeping (uninstall volume scan, `--up` invocation, post-run admin URL).
 # Precedence:
@@ -841,6 +872,10 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   if ! command -v curl >/dev/null 2>&1; then
     fatal "curl is required for --smoke-test (every nginx / octo-server / MinIO / admin / presign probe shells out to \`curl -fsS\`). Install curl — every modern Linux distro ships it — and re-run \`setup.sh --smoke-test\` (or the deprecated \`--verify\` alias)."
   fi
+  # GH#51 (PR#50 follow-up): warn before probes run so the legacy
+  # `octo.local` config surfaces as a one-liner, not as 11 mysterious
+  # "no 200 from http://octo.local:..." failures.
+  nudge_octo_local_migration
   CC="$(compose_cmd)"
   DOMAIN="$(env_get OCTO_DOMAIN localhost)"
   HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
@@ -1425,6 +1460,13 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   fi
 fi
 
+# GH#51 (PR#50 follow-up): warn at the head of the generation /
+# interactive flow so an operator re-running setup against a legacy
+# `.env` with `OCTO_DOMAIN=octo.local` sees the migration hint BEFORE
+# any prompt or overwrite. No-op on first-time installs (no `.env`
+# means env_get returns the default empty string).
+nudge_octo_local_migration
+
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 info "Checking prerequisites…"
 
@@ -1588,6 +1630,10 @@ if [[ "${RUN_UP}" == "true" ]]; then
   if [[ ${EUID} -ne 0 ]]; then
     fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
   fi
+  # GH#51 (PR#50 follow-up): warn before compose_up_and_wait kicks off
+  # so the legacy `octo.local` config surfaces here instead of as an IM
+  # WebSocket close-1006 the operator hits 30s later.
+  nudge_octo_local_migration
   # R8 (YUJ-1066, Jerry-Xin CR on PR#36 R7): make the --up contract
   # honest. Help text + README have always promised "--up requires an
   # existing docker/.env" + "NEVER regenerates secrets", so the R7
