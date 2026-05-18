@@ -618,6 +618,27 @@ is_placeholder_domain() {
   [[ -z "${d}" || "${d}" == "localhost" ]]
 }
 
+# GH#54 (2026-05-18): companion to is_placeholder_domain — recognise IP
+# values that are same-origin with the `localhost` placeholder. The OOTB
+# defaults (OCTO_DOMAIN=localhost + OCTO_EXTERNAL_IP=127.0.0.1, see
+# docker/.env.example) used to trip the placeholder + EXTERNAL_IP guard
+# below and materialise MINIO_SERVER_URL=http://127.0.0.1:28080 (plus the
+# two TS overrides). The browser then loaded the admin page at
+# http://localhost:28080 but img src URLs pointed at 127.0.0.1:28080 —
+# the CSP `'self'` policy treats these as different origins and blocked
+# every inline image, and Set-Cookie under one host wasn't sent under
+# the other. Treat loopback IPs (and the empty string, mirroring the
+# `-z` arm of is_placeholder_domain) as "same as localhost" so the
+# override block stays a no-op on the default config. A non-loopback IP
+# (operator passed `--ip <public-IP>`) still falls through and minted
+# overrides exactly like GH#41 expected.
+is_loopback_ip() {
+  case "$1" in
+    127.0.0.1|::1|localhost|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # GH#51 (2026-05-18, PR#50 follow-up): one-shot migration nudge for
 # operators whose existing `.env` still carries the legacy placeholder
 # `OCTO_DOMAIN=octo.local`. PR#50 demoted `octo.local` from "placeholder"
@@ -1718,8 +1739,13 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # resolve back to the deployment. When OCTO_DOMAIN is a placeholder
     # AND OCTO_EXTERNAL_IP is concrete, mint the admin URL off the IP
     # so it is actually click-through.
+    # GH#54 (2026-05-18): exclude loopback IPs — see S1 block + the
+    # generation-path ADMIN_URL above for the full rationale. Loopback
+    # IP is same-origin with the `localhost` placeholder, so swapping
+    # the banner to `127.0.0.1` only re-introduces the CSP / cookie
+    # mismatch this fix is closing.
     EXTERNAL_IP_ENV="$(env_get OCTO_EXTERNAL_IP "")"
-    if is_placeholder_domain && [[ -n "${EXTERNAL_IP_ENV}" ]]; then
+    if is_placeholder_domain && [[ -n "${EXTERNAL_IP_ENV}" ]] && ! is_loopback_ip "${EXTERNAL_IP_ENV}"; then
       ADMIN_URL="http://${EXTERNAL_IP_ENV}:${HTTP_PORT}/admin/"
     else
       ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
@@ -1994,7 +2020,13 @@ HTTP_PORT="$(env_get OCTO_HTTP_PORT 28080)"
 # entirely if they hit the URL from a different machine. Use the
 # in-memory DOMAIN / EXTERNAL_IP here because the .env we just wrote
 # already reflects them and these are still in scope.
-if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+# GH#54 (2026-05-18): also gate on is_loopback_ip — if EXTERNAL_IP is
+# 127.0.0.1 / ::1 the S1 block below is now skipped, so the rest of the
+# stack stays on the `localhost` placeholder. Printing the loopback IP
+# in the banner would invite the operator to open `http://127.0.0.1:.../admin/`
+# while presigned URLs are minted at `http://localhost:.../`, re-creating
+# the exact CSP / cookie mismatch this fix is meant to close.
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]] && ! is_loopback_ip "${EXTERNAL_IP}"; then
   ADMIN_URL="http://${EXTERNAL_IP}:${HTTP_PORT}/admin/"
 else
   ADMIN_URL="http://${DOMAIN}:${HTTP_PORT}/admin/"
@@ -2018,15 +2050,24 @@ fi
 # topology (`--domain octo.example.com --ip 1.2.3.4` would have client
 # browsers calling the IP instead of the documented domain).
 #
-# So S1 materialises three lockstep overrides ONLY when both:
+# So S1 materialises three lockstep overrides ONLY when all of:
 #   (1) OCTO_DOMAIN is placeholder (empty or `localhost`), AND
-#   (2) OCTO_EXTERNAL_IP is set (operator gave us something concrete).
+#   (2) OCTO_EXTERNAL_IP is set (operator gave us something concrete), AND
+#   (3) OCTO_EXTERNAL_IP is NOT a loopback (`127.0.0.1` / `::1` / `localhost`
+#       / empty) — GH#54: when the IP is loopback it is same-origin with
+#       the `localhost` placeholder, so materialising the overrides is a
+#       no-op for reachability AND actively breaks CSP / cookies because
+#       the browser then loads the page at one of {localhost, 127.0.0.1}
+#       and the img src URLs at the other. Skip the block and let the
+#       compose defaults (`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}` =
+#       `http://localhost:28080`) take over so everything stays on a
+#       single origin.
 # All three URLs must agree (SigV4 rejects every PUT with `403
 # SignatureDoesNotMatch` if MINIO_SERVER_URL and TS_MINIO_DOWNLOADURL
 # disagree on host:port), so they are written as a single block.
 # Reads/imports stay literal — Compose interpolates `.env` once into
 # YAML without recursive expansion.
-if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]]; then
+if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]] && ! is_loopback_ip "${EXTERNAL_IP}"; then
   info "OCTO_DOMAIN is a placeholder (${DOMAIN}); materialising IP-based URL overrides so presigned PUT / TS callback URLs are browser-reachable from ${EXTERNAL_IP}."
   cat >> "${ENV_OUT}" <<URLS
 
