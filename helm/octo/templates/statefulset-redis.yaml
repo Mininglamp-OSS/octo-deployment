@@ -76,5 +76,5 @@ spec:
         {{- end }}
         resources:
           requests:
-            storage: {{ .Values.redis.storage.size | default "5Gi" }}
+            storage: {{ .Values.redis.storage.size | default "10Gi" }}
 {{- end }}

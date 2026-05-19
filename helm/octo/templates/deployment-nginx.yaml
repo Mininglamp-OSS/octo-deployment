@@ -10,7 +10,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  type: {{ .Values.nginx.service.type | default "LoadBalancer" }}
+  type: {{ .Values.nginx.service.type | default "ClusterIP" }}
   ports:
     - name: http
       port: {{ .Values.nginx.service.port | default 80 }}

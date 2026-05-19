@@ -34,6 +34,8 @@ spec:
       app.kubernetes.io/component: summary-api
   template:
     metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         {{- include "octo.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: summary-api
