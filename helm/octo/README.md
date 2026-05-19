@@ -70,7 +70,8 @@ helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.1 \
   --set secrets.summaryReaderPassword="$(openssl rand -hex 16)" \
   --set secrets.octoMasterKey="$(openssl rand -hex 16)" \
   --set secrets.notifyInternalToken="$(openssl rand -hex 32)" \
-  --set secrets.wukongimManagerToken="$(openssl rand -hex 32)"
+  --set secrets.wukongimManagerToken="$(openssl rand -hex 32)" \
+  --set secrets.adminPwd="$(openssl rand -hex 16)"
 ```
 
 > **Important:** Save the randomly generated secret values — they are required for future upgrades.  

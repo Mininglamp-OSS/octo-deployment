@@ -85,10 +85,10 @@ secrets:
   # Generate: openssl rand -hex 32
   wukongimManagerToken: ""
 
-  # Initial superAdmin password (optional — leave empty to skip auto-bootstrap).
-  # When non-empty AND no superAdmin row exists, octo-server creates a
-  # superAdmin account on startup with password = bcrypt(adminPwd). Idempotent.
-  adminPwd: "superAdmin"
+  # Initial superAdmin password. Must be set explicitly — leave empty to skip
+  # auto-bootstrap. When non-empty AND no superAdmin row exists, octo-server
+  # creates a superAdmin account on startup with password = bcrypt(adminPwd).
+  adminPwd: ""
 
   # Redis AUTH password. Leave empty if Redis runs without authentication
   # (the bundled Redis StatefulSet has no auth by default).
@@ -195,7 +195,9 @@ wukongim:
   resources: {}
 
 # =============================================================================
-# External services (used when the bundled service is disabled)
+# External services — NOT YET SUPPORTED in this chart version.
+# Disabling bundled MySQL/Redis/MinIO/WuKongIM and pointing at external
+# instances is planned for a future release. Keep all *.enabled=true.
 # =============================================================================
 externalMySQL:
   host: ""

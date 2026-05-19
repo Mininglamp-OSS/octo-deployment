@@ -114,6 +114,23 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.summaryWorker.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: summary-worker
+spec:
+  type: ClusterIP
+  ports:
+    - name: internal
+      port: 8082
+      targetPort: internal
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: summary-worker
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
