@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "octo.fullname" . }}-wukongim-config
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+data:
+  wk.yaml: |
+    mode: "{{ .Values.wukongim.mode | default "release" }}"
+
+    tokenAuthOn: true
+
+    external:
+      ip: "{{ .Values.wukongim.externalIP | default "" }}"
+      tcpAddr: "{{ .Values.wukongim.tcpAddr | default "" }}"
+      wsAddr: "{{ include "octo.wukongim.wsAddr" . }}"
+      wssAddr: "{{ .Values.wukongim.wssAddr | default "" }}"
+
+    monitor:
+      on: true
+      addr: "0.0.0.0:5300"
+
+    webhook:
+      grpcAddr: "{{ include "octo.server.fullname" . }}:6979"
+
+    conversation:
+      on: true

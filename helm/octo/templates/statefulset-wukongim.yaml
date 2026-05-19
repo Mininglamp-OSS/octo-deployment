@@ -1,0 +1,129 @@
+{{- if .Values.wukongim.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.wukongim.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wukongim
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: {{ .Values.wukongim.service.apiPort | default 5001 }}
+      targetPort: api
+    - name: tcp
+      port: {{ .Values.wukongim.service.tcpPort | default 5100 }}
+      targetPort: tcp
+    - name: ws
+      port: {{ .Values.wukongim.service.wsPort | default 5200 }}
+      targetPort: ws
+    - name: monitor
+      port: {{ .Values.wukongim.service.monitorPort | default 5300 }}
+      targetPort: monitor
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: wukongim
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "octo.wukongim.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wukongim
+spec:
+  serviceName: {{ include "octo.wukongim.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: wukongim
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: wukongim
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: wukongim
+          image: {{ include "octo.image" (dict "repo" .Values.wukongim.image.repository "tag" .Values.wukongim.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.wukongim.image.pullPolicy }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.wukongim.service.apiPort | default 5001 }}
+            - name: tcp
+              containerPort: {{ .Values.wukongim.service.tcpPort | default 5100 }}
+            - name: ws
+              containerPort: {{ .Values.wukongim.service.wsPort | default 5200 }}
+            - name: monitor
+              containerPort: {{ .Values.wukongim.service.monitorPort | default 5300 }}
+          env:
+            - name: WK_MODE
+              value: {{ .Values.wukongim.mode | default "release" | quote }}
+            - name: WK_EXTERNAL_IP
+              value: {{ .Values.wukongim.externalIP | default "" | quote }}
+            - name: WK_EXTERNAL_TCPADDR
+              value: {{ .Values.wukongim.tcpAddr | default "" | quote }}
+            - name: WK_EXTERNAL_WSADDR
+              value: {{ include "octo.wukongim.wsAddr" . | quote }}
+            - name: WK_EXTERNAL_WSSADDR
+              value: {{ .Values.wukongim.wssAddr | default "" | quote }}
+            - name: WK_MANAGERTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WUKONGIM_MANAGER_TOKEN
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  wget -q -O - --header="token: $WK_MANAGERTOKEN" \
+                    http://localhost:{{ .Values.wukongim.service.apiPort | default 5001 }}/health \
+                    >/dev/null 2>&1
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  wget -q -O - --header="token: $WK_MANAGERTOKEN" \
+                    http://localhost:{{ .Values.wukongim.service.apiPort | default 5001 }}/health \
+                    >/dev/null 2>&1
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /root/wukongim
+            - name: config
+              mountPath: /root/wukongim/wk.yaml
+              subPath: wk.yaml
+          {{- with .Values.wukongim.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "octo.fullname" . }}-wukongim-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.wukongim.storage.storageClass }}
+        storageClassName: {{ .Values.wukongim.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.wukongim.storage.size | default "10Gi" }}
+{{- end }}

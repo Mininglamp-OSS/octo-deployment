@@ -1,0 +1,38 @@
+OCTO Server has been deployed.
+
+External URL: {{ include "octo.externalBaseURL" . }}
+
+Service endpoints (internal cluster):
+  API:     http://{{ include "octo.server.fullname" . }}:8090
+  Web:     http://{{ include "octo.web.fullname" . }}
+  Admin:   http://{{ include "octo.admin.fullname" . }}
+  Matter:  http://{{ include "octo.matter.fullname" . }}:8080
+{{- if .Values.summary.enabled }}
+  Summary: http://{{ include "octo.summaryApi.fullname" . }}:8080
+{{- end }}
+
+Get the public nginx address:
+{{- if eq .Values.nginx.service.type "LoadBalancer" }}
+  kubectl get svc {{ include "octo.nginx.fullname" . }} -n {{ .Release.Namespace }} \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+{{- else if eq .Values.nginx.service.type "NodePort" }}
+  NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  NODE_PORT=$(kubectl get svc {{ include "octo.nginx.fullname" . }} -n {{ .Release.Namespace }} \
+    -o jsonpath='{.spec.ports[0].nodePort}')
+  echo "http://$NODE_IP:$NODE_PORT"
+{{- end }}
+
+Wait for all pods to be ready:
+  kubectl rollout status deployment/{{ include "octo.server.fullname" . }} -n {{ .Release.Namespace }}
+
+Quick health check:
+  kubectl exec -n {{ .Release.Namespace }} \
+    deploy/{{ include "octo.server.fullname" . }} -- \
+    wget -q -O- http://localhost:8090/v1/ping
+
+MinIO console (SSH tunnel to pod):
+  kubectl port-forward -n {{ .Release.Namespace }} \
+    svc/{{ include "octo.minio.fullname" . }} 9001:9001
+
+NOTE: If secrets.adminPwd was set, the initial superAdmin account is
+available at {{ include "octo.externalBaseURL" . }}/admin/

@@ -24,3 +24,10 @@ kustomize/overlays/**
 docker/certs/*.pem
 docker/certs/*.key
 docker/certs/*.crt
+
+# Helm — packaged chart tarballs and personal values (real credentials)
+helm/*.tgz
+helm/values.personal.yaml
+
+# macOS
+.DS_Store

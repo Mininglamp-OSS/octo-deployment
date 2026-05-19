@@ -1,0 +1,17 @@
+apiVersion: v2
+name: octo
+description: OCTO Server — self-hosted enterprise messaging platform (IM + AI)
+type: application
+version: 0.2.1
+appVersion: "latest"
+keywords:
+  - octo
+  - messaging
+  - im
+  - wukongim
+home: https://github.com/Mininglamp-OSS/octo-deployment
+sources:
+  - https://github.com/Mininglamp-OSS/octo-deployment
+maintainers:
+  - name: Mininglamp OSS
+    url: https://github.com/Mininglamp-OSS

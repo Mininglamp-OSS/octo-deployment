@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.server.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+    - name: grpc
+      port: 6979
+      targetPort: grpc
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.server.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.server.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: wait-for-mysql
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+        - name: wait-for-redis
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.redis.fullname" . }} {{ .Values.redis.service.port | default 6379 }}; do echo waiting for redis; sleep 2; done']
+        - name: wait-for-minio
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.fullname" . }}:{{ .Values.minio.service.apiPort | default 9000 }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
+      containers:
+        - name: octo-server
+          image: {{ include "octo.image" (dict "repo" .Values.server.image.repository "tag" .Values.server.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          args: ["api"]
+          ports:
+            - name: http
+              containerPort: 8090
+            - name: grpc
+              containerPort: 6979
+          env:
+            - name: TZ
+              value: {{ .Values.timezone | default "UTC" | quote }}
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: MYSQL_ROOT_PASSWORD
+            - name: OCTO_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MASTER_KEY
+            - name: DMWORK_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MASTER_KEY
+            - name: OCTO_MINIO_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MINIO_APP_PASSWORD
+            - name: OCTO_WUKONGIM_MANAGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WUKONGIM_MANAGER_TOKEN
+            - name: OCTO_NOTIFY_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_NOTIFY_INTERNAL_TOKEN
+            - name: OCTO_ADMIN_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_ADMIN_PWD
+            - name: OCTO_WEBHOOK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WEBHOOK_SECRET_KEY
+            # DSN built from secret ref via K8s $(VAR) interpolation
+            - name: TS_DB_MYSQLADDR
+              value: "root:$(MYSQL_ROOT_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/{{ include "octo.mysql.database" . }}?charset=utf8mb4&parseTime=true&loc=Local"
+            - name: DM_MYSQL_DSN
+              value: "root:$(MYSQL_ROOT_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/{{ include "octo.mysql.database" . }}?charset=utf8mb4&parseTime=true&loc=Local"
+            - name: TS_DB_REDISADDR
+              value: {{ include "octo.redis.addr" . | quote }}
+            - name: DM_REDIS_ADDR
+              value: {{ include "octo.redis.addr" . | quote }}
+            - name: TS_WUKONGIM_MANAGERTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WUKONGIM_MANAGER_TOKEN
+            - name: WUKONGIM_MANAGER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WUKONGIM_MANAGER_TOKEN
+            - name: TS_MINIO_ACCESSKEYID
+              value: {{ include "octo.minio.appUser" . | quote }}
+            - name: TS_MINIO_SECRETACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MINIO_APP_PASSWORD
+            - name: TS_MINIO_DOWNLOADURL
+              value: {{ include "octo.minio.serverURL" . | quote }}
+            - name: TS_EXTERNAL_BASEURL
+              value: {{ include "octo.externalBaseURL" . | quote }}
+            - name: TS_EXTERNAL_IP
+              value: {{ .Values.wukongim.externalIP | default "" | quote }}
+            - name: NOTIFY_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_NOTIFY_INTERNAL_TOKEN
+            - name: TS_ADMINPWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_ADMIN_PWD
+            - name: TS_WEBHOOK_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WEBHOOK_SECRET_KEY
+          readinessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /home/configs/tsdd.yaml
+              subPath: tsdd.yaml
+            - name: logs
+              mountPath: /home/logs
+          {{- with .Values.server.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "octo.fullname" . }}-octo-server-config
+        - name: logs
+          emptyDir: {}
