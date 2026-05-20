@@ -1,4 +1,7 @@
 {{- if .Values.summary.enabled }}
+{{- if not .Values.secrets.llmApiKey }}
+{{- fail "secrets.llmApiKey must be set when summary.enabled=true" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

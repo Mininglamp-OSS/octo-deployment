@@ -58,6 +58,17 @@ helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.1
 
 ### 2. 安装
 
+**国内用户**先叠加 `values-china.yaml`，把 6 个 OCTO 应用镜像从 Docker Hub 切到腾讯云 registry（`tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/*`）。镜像 tag 从 `values.yaml` 继承，单点升版同时覆盖两个区域：
+
+```bash
+helm install octo ./helm/octo \
+  -f ./helm/octo/values-china.yaml \   # <-- 只有国内需要，海外省略
+  -f my-values.yaml \
+  ...
+```
+
+海外用户不加 `-f values-china.yaml`，默认从 Docker Hub 拉取。
+
 ```bash
 helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.1 \
   --namespace octo --create-namespace \
@@ -176,8 +187,9 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | `server.config.register.emailOn` | 启用邮箱注册 | `false` |
 | `server.config.support.email` | 发件人地址 | `""` |
 | `server.config.support.emailSmtp` | SMTP 服务器（`host:port`） | `""` |
-| `server.config.support.emailPwd` | SMTP 密码 | `""` |
+| `server.config.support.emailPwd` | SMTP 密码（自动渲染到 Secret，不会出现在 ConfigMap） | `""` |
 | `server.config.logger.level` | 日志级别（0=关闭 … 4=调试） | `2` |
+| `summary.enabled` | 启用 Smart Summary（要求设置 `secrets.llmApiKey`） | `false` |
 
 常用 SMTP 配置示例：
 
@@ -210,6 +222,33 @@ wukongim:
   storage:
     size: 10Gi
 ```
+
+### 外部服务
+
+如果要复用已有的 MySQL / Redis / MinIO / WuKongIM 而不部署 chart 内置的 StatefulSet，把对应的 `<service>.enabled` 置为 `false`，并填入对应的 `external<Service>` 字段：
+
+```yaml
+redis:
+  enabled: false
+externalRedis:
+  addr: "redis.prod.svc:6379"       # host:port
+
+minio:
+  enabled: false
+externalMinio:
+  endpoint: "minio.prod.svc:9000"   # host:port
+  appUser: "octo-app"
+secrets:
+  minioAppPassword: "..."           # IAM 凭据由外部 MinIO 维护
+
+wukongim:
+  enabled: false
+externalWukongim:
+  apiURL: "http://wukongim.prod.svc:5001"
+  wsEndpoint: "wukongim.prod.svc:5200"   # nginx ws upstream 用 host:port
+```
+
+`<service>.enabled: false` 但对应 `external<Service>.*` 字段为空时，`helm template` 会直接失败，不会渲染出半成品 manifest。
 
 ### Ingress 配置
 

@@ -195,9 +195,9 @@ wukongim:
   resources: {}
 
 # =============================================================================
-# External services — NOT YET SUPPORTED in this chart version.
-# Disabling bundled MySQL/Redis/MinIO/WuKongIM and pointing at external
-# instances is planned for a future release. Keep all *.enabled=true.
+# External services — set the matching `<service>.enabled: false` to disable
+# the bundled component, then fill in the connection info here.
+# When `<service>.enabled: true` (default), these blocks are ignored.
 # =============================================================================
 externalMySQL:
   host: ""
@@ -216,6 +216,8 @@ externalMinio:
 
 externalWukongim:
   apiURL: ""
+  # Format: host:port — required when wukongim.enabled=false
+  wsEndpoint: ""
 
 # =============================================================================
 # octo-server
@@ -223,7 +225,7 @@ externalWukongim:
 server:
   image:
     repository: mininglamposs/octo-server
-    tag: "latest"
+    tag: "1.3.0"
     pullPolicy: IfNotPresent
   replicas: 1
   resources:
@@ -289,7 +291,7 @@ server:
 web:
   image:
     repository: mininglamposs/octo-web
-    tag: "latest"
+    tag: "1.1.1"
     pullPolicy: IfNotPresent
   replicas: 1
   resources: {}
@@ -300,7 +302,7 @@ web:
 admin:
   image:
     repository: mininglamposs/octo-admin
-    tag: "latest"
+    tag: "1.2.0"
     pullPolicy: IfNotPresent
   replicas: 1
   resources: {}
@@ -311,7 +313,7 @@ admin:
 matter:
   image:
     repository: mininglamposs/octo-matter
-    tag: "latest"
+    tag: "1.0.1"
     pullPolicy: IfNotPresent
   replicas: 1
   appEnv: "prod"
@@ -327,18 +329,18 @@ matter:
 # Smart Summary (summary-api + summary-worker)
 # =============================================================================
 summary:
-  enabled: true
+  enabled: false
   api:
     image:
       repository: mininglamposs/octo-smart-summary-api
-      tag: "latest"
+      tag: "1.1.0"
       pullPolicy: IfNotPresent
     replicas: 1
     resources: {}
   worker:
     image:
       repository: mininglamposs/octo-smart-summary-worker
-      tag: "latest"
+      tag: "1.1.0"
       pullPolicy: IfNotPresent
     replicas: 1
     resources: {}

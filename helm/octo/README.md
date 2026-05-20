@@ -58,6 +58,17 @@ helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.1
 
 ### 2. Install
 
+**For users in China**, layer `values-china.yaml` first to switch the 6 OCTO app images from Docker Hub to the Tencent Cloud registry (`tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/*`). Image tags inherit from `values.yaml`, so version bumps propagate to both regions:
+
+```bash
+helm install octo ./helm/octo \
+  -f ./helm/octo/values-china.yaml \   # <-- only for China; omit elsewhere
+  -f my-values.yaml \
+  ...
+```
+
+For overseas users, omit `-f values-china.yaml` — defaults pull from Docker Hub.
+
 ```bash
 helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.1 \
   --namespace octo --create-namespace \
@@ -176,8 +187,9 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `server.config.register.emailOn` | Enable email registration | `false` |
 | `server.config.support.email` | Sender address for outbound email | `""` |
 | `server.config.support.emailSmtp` | SMTP server (`host:port`) | `""` |
-| `server.config.support.emailPwd` | SMTP password | `""` |
+| `server.config.support.emailPwd` | SMTP password (rendered into the Secret, never the ConfigMap) | `""` |
 | `server.config.logger.level` | Log level (0=off … 4=debug) | `2` |
+| `summary.enabled` | Enable Smart Summary (requires `secrets.llmApiKey`) | `false` |
 
 ### Storage
 
@@ -201,6 +213,33 @@ wukongim:
   storage:
     size: 10Gi
 ```
+
+### External services
+
+To point at pre-existing MySQL / Redis / MinIO / WuKongIM instead of the bundled StatefulSets, set the corresponding `<service>.enabled: false` and fill in the matching `external<Service>` block:
+
+```yaml
+redis:
+  enabled: false
+externalRedis:
+  addr: "redis.prod.svc:6379"       # host:port
+
+minio:
+  enabled: false
+externalMinio:
+  endpoint: "minio.prod.svc:9000"   # host:port
+  appUser: "octo-app"
+secrets:
+  minioAppPassword: "..."           # IAM credentials managed externally
+
+wukongim:
+  enabled: false
+externalWukongim:
+  apiURL: "http://wukongim.prod.svc:5001"
+  wsEndpoint: "wukongim.prod.svc:5200"   # host:port for nginx ws upstream
+```
+
+The chart fails fast (`helm template` errors out) if `<service>.enabled: false` but the corresponding `external<Service>.*` field is empty.
 
 ### Ingress
 

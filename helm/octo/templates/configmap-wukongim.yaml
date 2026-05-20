@@ -1,3 +1,4 @@
+{{- if .Values.wukongim.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,3 +26,4 @@ data:
 
     conversation:
       on: true
+{{- end }}

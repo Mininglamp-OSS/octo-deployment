@@ -36,6 +36,9 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-octo-server.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if .Values.minio.enabled }}
+        checksum/misc: {{ include (print $.Template.BasePath "/configmap-misc.yaml") . | sha256sum }}
+        {{- end }}
       labels:
         {{- include "octo.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: server
@@ -47,10 +50,87 @@ spec:
           command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
         - name: wait-for-redis
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
-          command: ['sh', '-c', 'until nc -z {{ include "octo.redis.fullname" . }} {{ .Values.redis.service.port | default 6379 }}; do echo waiting for redis; sleep 2; done']
+          command: ['sh', '-c', 'until nc -z {{ include "octo.redis.host" . }} {{ include "octo.redis.port" . }}; do echo waiting for redis; sleep 2; done']
         - name: wait-for-minio
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
-          command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.fullname" . }}:{{ .Values.minio.service.apiPort | default 9000 }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
+          command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.endpoint" . }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
+        {{- if .Values.minio.enabled }}
+        - name: minio-bootstrap
+          image: {{ include "octo.image" (dict "repo" .Values.minio.mcImage.repository "tag" .Values.minio.mcImage.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          env:
+            - name: MINIO_ROOT_USER
+              value: {{ .Values.minio.auth.rootUser | default "octoadmin" | quote }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: OCTO_MINIO_APP_USER
+              value: {{ include "octo.minio.appUser" . | quote }}
+            - name: OCTO_MINIO_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MINIO_APP_PASSWORD
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              MINIO_ENDPOINT="http://{{ include "octo.minio.endpoint" . }}"
+
+              root_lc=$(printf %s "${MINIO_ROOT_PASSWORD:-}" | tr 'A-Z' 'a-z')
+              case "$root_lc" in
+                ""|change_me_*|chg_me*)
+                  echo "[minio-bootstrap] FATAL: MINIO_ROOT_PASSWORD is empty or a placeholder." >&2; exit 1 ;;
+              esac
+              app_lc=$(printf %s "${OCTO_MINIO_APP_PASSWORD:-}" | tr 'A-Z' 'a-z')
+              case "$app_lc" in
+                ""|change_me_*|chg_me*)
+                  echo "[minio-bootstrap] FATAL: OCTO_MINIO_APP_PASSWORD is empty or a placeholder." >&2; exit 1 ;;
+              esac
+
+              echo "[minio-bootstrap] setting alias..."
+              until mc alias set local "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+                sleep 2
+              done
+
+              echo "[minio-bootstrap] ensuring app user $OCTO_MINIO_APP_USER..."
+              mc admin user add local "$OCTO_MINIO_APP_USER" "$OCTO_MINIO_APP_PASSWORD" >/dev/null 2>&1 || true
+
+              echo "[minio-bootstrap] (re)installing octo-app policy..."
+              mc admin policy create local octo-app /etc/minio/octo-app-policy.json 2>/dev/null \
+                || mc admin policy update local octo-app /etc/minio/octo-app-policy.json
+
+              echo "[minio-bootstrap] attaching policy to $OCTO_MINIO_APP_USER..."
+              mc admin policy attach local octo-app --user "$OCTO_MINIO_APP_USER" 2>/dev/null || true
+
+              for b in file chat moment sticker report chatbg common download group avatar; do
+                mc mb --ignore-existing "local/$b" >/dev/null
+              done
+
+              echo "[minio-bootstrap] setting anonymous download on content buckets..."
+              for b in chat file moment sticker chatbg common avatar; do
+                attempt=1
+                until mc anonymous set download "local/$b" >/dev/null 2>&1; do
+                  if [ "$attempt" -ge 3 ]; then
+                    echo "[minio-bootstrap] FATAL: mc anonymous set download local/$b failed after 3 attempts" >&2; exit 1
+                  fi
+                  attempt=$((attempt + 1)); sleep 2
+                done
+                json=$(mc anonymous get --json "local/$b" 2>/dev/null)
+                case "$json" in
+                  *'"permission":"download"'*) ;;
+                  *) echo "[minio-bootstrap] FATAL: anonymous policy on local/$b verify failed: $json" >&2; exit 1 ;;
+                esac
+              done
+
+              echo "[minio-bootstrap] done"
+          volumeMounts:
+            - name: minio-policy
+              mountPath: /etc/minio/octo-app-policy.json
+              subPath: minio-octo-app-policy.json
+        {{- end }}
       containers:
         - name: octo-server
           image: {{ include "octo.image" (dict "repo" .Values.server.image.repository "tag" .Values.server.image.tag "ctx" .) }}
@@ -113,6 +193,13 @@ spec:
               value: {{ include "octo.redis.addr" . | quote }}
             - name: DM_REDIS_ADDR
               value: {{ include "octo.redis.addr" . | quote }}
+            {{- if .Values.secrets.redisPassword }}
+            - name: TS_DB_REDISPASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: REDIS_PASSWORD
+            {{- end }}
             - name: TS_WUKONGIM_MANAGERTOKEN
               valueFrom:
                 secretKeyRef:
@@ -134,8 +221,10 @@ spec:
               value: {{ include "octo.minio.serverURL" . | quote }}
             - name: TS_EXTERNAL_BASEURL
               value: {{ include "octo.externalBaseURL" . | quote }}
+            {{- if .Values.wukongim.externalIP }}
             - name: TS_EXTERNAL_IP
-              value: {{ .Values.wukongim.externalIP | default "" | quote }}
+              value: {{ .Values.wukongim.externalIP | quote }}
+            {{- end }}
             - name: NOTIFY_INTERNAL_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -151,6 +240,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_WEBHOOK_SECRET_KEY
+            {{- if .Values.server.config.support.emailPwd }}
+            - name: TS_SUPPORT_EMAILPWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: TS_SUPPORT_EMAILPWD
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /v1/ping
@@ -183,3 +279,8 @@ spec:
             name: {{ include "octo.fullname" . }}-octo-server-config
         - name: logs
           emptyDir: {}
+        {{- if .Values.minio.enabled }}
+        - name: minio-policy
+          configMap:
+            name: {{ include "octo.fullname" . }}-misc
+        {{- end }}

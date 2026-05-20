@@ -54,12 +54,12 @@ data:
     }
 
     upstream octo_ws {
-        server {{ include "octo.wukongim.fullname" . }}:{{ .Values.wukongim.service.wsPort | default 5200 }};
+        server {{ include "octo.wukongim.wsEndpoint" . }};
         keepalive 8;
     }
 
     upstream octo_minio_api {
-        server {{ include "octo.minio.fullname" . }}:{{ .Values.minio.service.apiPort | default 9000 }};
+        server {{ include "octo.minio.endpoint" . }};
         keepalive 8;
     }
 

@@ -169,6 +169,22 @@ Redis addr (host:port).
 {{- end }}
 {{- end }}
 
+{{- define "octo.redis.host" -}}
+{{- if .Values.redis.enabled }}
+{{- include "octo.redis.fullname" . }}
+{{- else }}
+{{- (split ":" (required "externalRedis.addr is required when redis.enabled=false" .Values.externalRedis.addr))._0 }}
+{{- end }}
+{{- end }}
+
+{{- define "octo.redis.port" -}}
+{{- if .Values.redis.enabled }}
+{{- .Values.redis.service.port | default 6379 }}
+{{- else }}
+{{- (split ":" (required "externalRedis.addr is required when redis.enabled=false" .Values.externalRedis.addr))._1 | default "6379" }}
+{{- end }}
+{{- end }}
+
 {{/*
 MinIO internal endpoint (host:port) used by server-side calls.
 */}}
@@ -206,6 +222,14 @@ WuKongIM API URL.
 {{- printf "http://%s:%v" (include "octo.wukongim.fullname" .) (.Values.wukongim.service.apiPort | default 5001) }}
 {{- else }}
 {{- required "externalWukongim.apiURL is required when wukongim.enabled=false" .Values.externalWukongim.apiURL }}
+{{- end }}
+{{- end }}
+
+{{- define "octo.wukongim.wsEndpoint" -}}
+{{- if .Values.wukongim.enabled }}
+{{- printf "%s:%v" (include "octo.wukongim.fullname" .) (.Values.wukongim.service.wsPort | default 5200) }}
+{{- else }}
+{{- required "externalWukongim.wsEndpoint is required when wukongim.enabled=false" .Values.externalWukongim.wsEndpoint }}
 {{- end }}
 {{- end }}
 

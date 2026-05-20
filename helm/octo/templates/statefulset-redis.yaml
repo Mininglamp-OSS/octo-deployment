@@ -41,7 +41,22 @@ spec:
         - name: redis
           image: {{ include "octo.image" (dict "repo" .Values.redis.image.repository "tag" .Values.redis.image.tag "ctx" .) }}
           imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          {{- if .Values.secrets.redisPassword }}
+          command: ["sh", "-c", "exec redis-server --save 60 1 --loglevel warning --requirepass \"$REDIS_PASSWORD\""]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: REDIS_PASSWORD
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: REDIS_PASSWORD
+          {{- else }}
           command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+          {{- end }}
           ports:
             - name: redis
               containerPort: 6379
