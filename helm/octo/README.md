@@ -53,7 +53,7 @@ server:
 To see all available options:
 
 ```bash
-helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.1
+helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.4
 ```
 
 ### 2. Install
@@ -70,7 +70,7 @@ helm install octo ./helm/octo \
 For overseas users, omit `-f values-china.yaml` — defaults pull from Docker Hub.
 
 ```bash
-helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.1 \
+helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
   --namespace octo --create-namespace \
   -f my-values.yaml \
   --set secrets.mysqlRootPassword="$(openssl rand -hex 16)" \
@@ -122,7 +122,7 @@ kubectl port-forward -n octo svc/octo-nginx 8080:80
 ## Upgrade
 
 ```bash
-helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.1 \
+helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
   --namespace octo \
   --reuse-values \
   -f my-values.yaml
