@@ -30,9 +30,11 @@ Quick health check:
     deploy/{{ include "octo.server.fullname" . }} -- \
     wget -q -O- http://localhost:8090/v1/ping
 
+{{- if .Values.minio.enabled }}
 MinIO console (SSH tunnel to pod):
   kubectl port-forward -n {{ .Release.Namespace }} \
     svc/{{ include "octo.minio.fullname" . }} 9001:9001
 
+{{- end }}
 NOTE: If secrets.adminPwd was set, the initial superAdmin account is
 available at {{ include "octo.externalBaseURL" . }}/admin/
