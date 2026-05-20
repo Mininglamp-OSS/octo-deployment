@@ -65,21 +65,28 @@ jobs:
       - name: Install kustomize
         run: |
           set -euo pipefail
-          curl -fsSL -o kustomize.tar.gz \
+          # Extract into a scratch directory to avoid collision with the
+          # repo's own kustomize/ directory at the workspace root.
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fsSL -o "$tmp/kustomize.tar.gz" \
             "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
-          tar -xzf kustomize.tar.gz
-          sudo install -m 0755 kustomize /usr/local/bin/kustomize
-          rm -f kustomize kustomize.tar.gz
+          tar -xzf "$tmp/kustomize.tar.gz" -C "$tmp"
+          sudo install -m 0755 "$tmp/kustomize" /usr/local/bin/kustomize
           kustomize version
 
       - name: Install kubeconform
         run: |
           set -euo pipefail
-          curl -fsSL -o kubeconform.tar.gz \
+          # Extract into a scratch directory to keep the workspace pristine
+          # (the kubeconform tarball ships a LICENSE file that would otherwise
+          # overwrite the repo's own LICENSE).
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          curl -fsSL -o "$tmp/kubeconform.tar.gz" \
             "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          tar -xzf kubeconform.tar.gz
-          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
-          rm -f kubeconform kubeconform.tar.gz LICENSE
+          tar -xzf "$tmp/kubeconform.tar.gz" -C "$tmp"
+          sudo install -m 0755 "$tmp/kubeconform" /usr/local/bin/kubeconform
           kubeconform -v
 
       - name: Build and validate every overlay
