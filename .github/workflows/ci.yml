@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.yaml'
+      - '**/*.yml'
+      - 'kustomize/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.yaml'
+      - '**/*.yml'
+      - 'kustomize/**'
+      - '.github/workflows/ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  yaml-lint:
+    name: yamllint
+    # Skip while PR is in Draft to avoid wasting minutes on work-in-progress.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install yamllint
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --no-cache-dir 'yamllint==1.35.1'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run yamllint
+        run: |
+          set -euo pipefail
+          yamllint --version
+          # `relaxed` baseline; line-length disabled (K8s manifests routinely
+          # exceed 80 cols), `truthy` and `comments-indentation` downgraded so
+          # GitHub Actions syntax (`on:` etc.) does not fail the build.
+          yamllint -f github -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, comments-indentation: disable, truthy: {level: warning, check-keys: false}}}" .
+
+  kustomize-validate:
+    name: kustomize build + kubeconform
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    env:
+      KUSTOMIZE_VERSION: '5.8.1'
+      KUBECONFORM_VERSION: '0.7.0'
+      # Pin the schema target so a runner-image bump cannot silently change
+      # what counts as valid. Update intentionally alongside cluster upgrades.
+      KUBERNETES_VERSION: '1.31.0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install kustomize
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          tar -xzf kustomize.tar.gz
+          sudo install -m 0755 kustomize /usr/local/bin/kustomize
+          rm -f kustomize kustomize.tar.gz
+          kustomize version
+
+      - name: Install kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL -o kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          tar -xzf kubeconform.tar.gz
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          rm -f kubeconform kubeconform.tar.gz LICENSE
+          kubeconform -v
+
+      - name: Build and validate every overlay
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          overlays=(kustomize/overlays/*/)
+          if [ "${#overlays[@]}" -eq 0 ]; then
+            echo "::error::no overlays found under kustomize/overlays/"
+            exit 1
+          fi
+
+          status=0
+          for overlay in "${overlays[@]}"; do
+            overlay="${overlay%/}"
+            echo "::group::${overlay}"
+            if ! kustomize build "${overlay}" \
+              | kubeconform \
+                  -strict \
+                  -ignore-missing-schemas \
+                  -kubernetes-version "${KUBERNETES_VERSION}" \
+                  -schema-location default \
+                  -summary \
+                  -output text; then
+              echo "::error file=${overlay}/kustomization.yaml::kubeconform validation failed for ${overlay}"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "${status}"
