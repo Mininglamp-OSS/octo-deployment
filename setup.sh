@@ -1751,7 +1751,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
         # If the user ran with sudo on macOS, hand the file back to the real
         # user (logname) so non-root --smoke-test can read it without sudo.
         if [[ ${EUID} -eq 0 ]]; then
-          REAL_USER="$(logname 2>/dev/null || echo "")"
+          REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
           if [[ -n "${REAL_USER}" ]]; then
             chown "${REAL_USER}" "${ENV_OUT}" || true
           fi
@@ -2284,7 +2284,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
         # If the user ran with sudo on macOS, hand the file back to the real
         # user (logname) so non-root --smoke-test can read it without sudo.
         if [[ ${EUID} -eq 0 ]]; then
-          REAL_USER="$(logname 2>/dev/null || echo "")"
+          REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
           if [[ -n "${REAL_USER}" ]]; then
             chown "${REAL_USER}" "${ENV_OUT}" || true
           fi
