@@ -4,7 +4,14 @@ name: Auto add to project
 on:
   issues:
     types: [opened]
-  pull_request_target:
+  # pull_request_target runs in the context of the base repo and retains write
+  # access even for fork PRs — required because the reusable workflow needs a
+  # PROJECT_TOKEN secret that is unavailable in fork pull_request contexts.
+  #
+  # Security: this workflow does NOT check out or execute any code from the PR
+  # branch; it only forwards event metadata (issue/PR number) to the reusable
+  # workflow, which performs only GitHub API calls to add items to the project.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] metadata-only automation; no PR code executed
     types: [opened]
 
 permissions: {}
