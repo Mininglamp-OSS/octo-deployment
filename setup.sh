@@ -1748,8 +1748,16 @@ if [[ "${RUN_UP}" == "true" ]]; then
         # macOS Docker Desktop: current user owns the Docker socket; root
         # ownership is neither needed nor possible without sudo. mode 600 is
         # sufficient for a single-user workstation.
+        # If the user ran with sudo on macOS, hand the file back to the real
+        # user (logname) so non-root --smoke-test can read it without sudo.
+        if [[ ${EUID} -eq 0 ]]; then
+          REAL_USER="$(logname 2>/dev/null || echo "")"
+          if [[ -n "${REAL_USER}" ]]; then
+            chown "${REAL_USER}" "${ENV_OUT}" || true
+          fi
+        fi
         chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600."; exit 1; }
-        info "docker/.env mode set to 600 (macOS — owner: $(whoami))."
+        info "docker/.env mode set to 600 (macOS — owner: $(stat -f %Su "${ENV_OUT}"))."
       else
         # Linux production server: lock down to root:${ROOT_GROUP} 600.
         chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
@@ -2273,8 +2281,16 @@ if [[ "${RUN_UP}" == "true" ]]; then
         # macOS Docker Desktop: current user owns the Docker socket; root
         # ownership is neither needed nor possible without sudo. mode 600 is
         # sufficient for a single-user workstation.
+        # If the user ran with sudo on macOS, hand the file back to the real
+        # user (logname) so non-root --smoke-test can read it without sudo.
+        if [[ ${EUID} -eq 0 ]]; then
+          REAL_USER="$(logname 2>/dev/null || echo "")"
+          if [[ -n "${REAL_USER}" ]]; then
+            chown "${REAL_USER}" "${ENV_OUT}" || true
+          fi
+        fi
         chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600."; exit 1; }
-        info "docker/.env mode set to 600 (macOS — owner: $(whoami))."
+        info "docker/.env mode set to 600 (macOS — owner: $(stat -f %Su "${ENV_OUT}"))."
       else
         # Linux production server: lock down to root:${ROOT_GROUP} 600.
         chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
