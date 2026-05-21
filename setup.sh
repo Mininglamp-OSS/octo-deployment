@@ -866,7 +866,7 @@ done
 # instead of the clean S4 message). The --smoke-test EUID guard is
 # already early (inside the RUN_VERIFY short-circuit a few lines below,
 # which exits well before preflight).
-if [[ "${RUN_UP}" == "true" ]] && [[ ${EUID} -ne 0 ]]; then
+if [[ "${RUN_UP}" == "true" ]] && [[ ${EUID} -ne 0 ]] && [[ "$(uname)" != "Darwin" ]]; then
   fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
 fi
 
@@ -892,7 +892,7 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # 600 to restore the default") is a fallback for legacy `.env` states,
   # not the canonical path. The canonical path for an R7 stack is
   # exactly `sudo ./setup.sh --smoke-test`.
-  if [[ ${EUID} -ne 0 ]]; then
+  if [[ ${EUID} -ne 0 ]] && [[ "$(uname)" != "Darwin" ]]; then
     fatal "sudo required for --smoke-test (needs to read root-owned .env). Re-run as 'sudo ./setup.sh --smoke-test'."
   fi
   if [[ ! -f "${ENV_OUT}" ]]; then
@@ -1667,7 +1667,7 @@ if [[ "${RUN_UP}" == "true" ]]; then
   # already promised "Both --up and --smoke-test require sudo"; S4
   # actually enforces it instead of relying on Docker / chown to surface
   # the issue later with a less actionable error.
-  if [[ ${EUID} -ne 0 ]]; then
+  if [[ ${EUID} -ne 0 ]] && [[ "$(uname)" != "Darwin" ]]; then
     fatal "sudo required for --up (need to chown .env to root). Re-run as 'sudo ./setup.sh --up'."
   fi
   # GH#51 (PR#50 follow-up): warn before compose_up_and_wait kicks off
@@ -1744,9 +1744,18 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # fatal — operators on read-only / unusual filesystems will see the
     # exact reason and can rerun on a writable mount.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
-      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
-      info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
+      if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS Docker Desktop: current user owns the Docker socket; root
+        # ownership is neither needed nor possible without sudo. mode 600 is
+        # sufficient for a single-user workstation.
+        chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600."; exit 1; }
+        info "docker/.env mode set to 600 (macOS — owner: $(whoami))."
+      else
+        # Linux production server: lock down to root:${ROOT_GROUP} 600.
+        chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+        chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
+        info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
+      fi
     fi
 
     DOMAIN="$(env_get OCTO_DOMAIN localhost)"
@@ -2260,9 +2269,18 @@ if [[ "${RUN_UP}" == "true" ]]; then
     # warn-then-continue here would leave a user-writable .env behind
     # the next `sudo compose` run.
     if [[ -f "${ENV_OUT}" ]]; then
-      chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
-      chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
-      info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
+      if [[ "$(uname)" == "Darwin" ]]; then
+        # macOS Docker Desktop: current user owns the Docker socket; root
+        # ownership is neither needed nor possible without sudo. mode 600 is
+        # sufficient for a single-user workstation.
+        chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600."; exit 1; }
+        info "docker/.env mode set to 600 (macOS — owner: $(whoami))."
+      else
+        # Linux production server: lock down to root:${ROOT_GROUP} 600.
+        chown "root:${ROOT_GROUP}" "${ENV_OUT}" || { err "Failed to chown ${ENV_OUT} to root:${ROOT_GROUP} — refusing to leave a user-writable secrets file behind. Re-run on a writable filesystem or restore the file ownership manually before continuing."; exit 1; }
+        chmod 600 "${ENV_OUT}" || { err "Failed to chmod ${ENV_OUT} to 600 — refusing to leave a world/group-readable secrets file behind."; exit 1; }
+        info "docker/.env now owned by root:${ROOT_GROUP} (mode 600)."
+      fi
     fi
     echo ""
     printf '%s════════════════════════════════════════════════════════════════%s\n' "${BOLD}" "${RESET}"
