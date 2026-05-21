@@ -194,7 +194,7 @@ services:
       - octo-net
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     restart: unless-stopped
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
     # Backing service: loopback-only by default. See OCTO_MYSQL_BIND comment.
