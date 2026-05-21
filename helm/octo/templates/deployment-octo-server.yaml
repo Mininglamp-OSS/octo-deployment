@@ -99,8 +99,8 @@ spec:
               mc admin user add local "$OCTO_MINIO_APP_USER" "$OCTO_MINIO_APP_PASSWORD" >/dev/null 2>&1 || true
 
               echo "[minio-bootstrap] (re)installing octo-app policy..."
-              mc admin policy create local octo-app /etc/minio/octo-app-policy.json 2>/dev/null \
-                || mc admin policy update local octo-app /etc/minio/octo-app-policy.json
+              mc admin policy info local octo-app >/dev/null 2>&1 \
+                || mc admin policy create local octo-app /etc/minio/octo-app-policy.json
 
               echo "[minio-bootstrap] attaching policy to $OCTO_MINIO_APP_USER..."
               mc admin policy attach local octo-app --user "$OCTO_MINIO_APP_USER" 2>/dev/null || true
