@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/**'
+      - '.github/actions/**'
 
 permissions: {}
 

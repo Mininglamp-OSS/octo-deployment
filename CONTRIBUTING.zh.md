@@ -38,10 +38,12 @@ chore: bump dependency versions
 
 ## 代码风格
 
-- **Go**: `gofmt` + `golangci-lint`
-- **TypeScript/JavaScript**: Prettier + ESLint（配置在仓库内）
-- **Swift**: SwiftFormat
-- **Kotlin**: ktlint / Android Studio 默认配置
+- **YAML**：使用 `yamllint` 保证格式一致
+- **Shell 脚本**：使用 `shellcheck` 进行静态分析
+- **Dockerfile**：使用 `hadolint` 检查 Dockerfile 和 Docker Compose 最佳实践
+- **Kustomize**：提交 overlay 变更前先运行 `kustomize build` 验证
+
+> 本仓库是部署配置仓库，语言相关的 lint 工具（Go/TypeScript/Swift/Kotlin）不适用。
 
 ## 报告 Bug
 

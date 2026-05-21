@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       validate_run_id:
-        description: "Required: successful CI run ID from the tagged commit as release evidence"
+        description: "Required: successful CI run ID from the tagged commit. Find it in the Actions tab → 'CI' workflow run → copy the run ID from the URL (…/actions/runs/<ID>)."
         required: true
         type: string
       draft:
@@ -26,6 +26,7 @@ jobs:
       tag: ${{ inputs.tag }}
       validate_run_id: ${{ inputs.validate_run_id }}
       draft: ${{ inputs.draft }}
+      ci_workflow_name: "CI"
     permissions:
       contents: write
       actions: read

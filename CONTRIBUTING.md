@@ -38,10 +38,12 @@ chore: bump dependency versions
 
 ## Code Style
 
-- **Go**: `gofmt` + `golangci-lint`
-- **TypeScript/JavaScript**: Prettier + ESLint (config in repo)
-- **Swift**: SwiftFormat
-- **Kotlin**: ktlint / Android Studio default
+- **YAML**: `yamllint` for consistent formatting
+- **Shell scripts**: `shellcheck` for static analysis
+- **Dockerfiles**: `hadolint` for Dockerfile and Docker Compose best practices
+- **Kustomize**: `kustomize build` validation before committing overlay changes
+
+> This is a deployment config repo — language-specific linting (Go/TypeScript/Swift/Kotlin) does not apply here.
 
 ## Reporting Bugs
 
