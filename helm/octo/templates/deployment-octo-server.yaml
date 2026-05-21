@@ -96,9 +96,22 @@ spec:
               done
 
               echo "[minio-bootstrap] ensuring app user $OCTO_MINIO_APP_USER..."
+              # `mc admin user add` is idempotent on mc >= RELEASE.2024-10-02:
+              # creates the user on first run, updates the password on re-runs.
+              # No `|| true` needed — real failures (auth, network) will now
+              # surface via `set -eu` instead of being silently swallowed.
               mc admin user add local "$OCTO_MINIO_APP_USER" "$OCTO_MINIO_APP_PASSWORD" >/dev/null 2>&1
 
               echo "[minio-bootstrap] (re)installing octo-app policy..."
+              # `mc admin policy create` maps to PUT /minio/admin/v3/add-canned-policy
+              # on the MinIO server. The server handler calls SetPolicy() unconditionally
+              # (create-or-replace), so running this on an existing policy silently
+              # replaces it and returns HTTP 200. Verified against the pinned server
+              # image minio/minio:RELEASE.2025-04-22T22-12-26Z source:
+              # cmd/admin-handlers-users.go L1744: globalIAMSys.SetPolicy(ctx, ...)
+              # The old `create || update` pattern (used in docker-compose) was a
+              # workaround for an era when `mc admin policy update` existed as a
+              # separate command; that subcommand no longer exists in current mc.
               mc admin policy create local octo-app /etc/minio/octo-app-policy.json >/dev/null 2>&1
 
               echo "[minio-bootstrap] attaching policy to $OCTO_MINIO_APP_USER..."
