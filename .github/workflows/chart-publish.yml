@@ -1,0 +1,81 @@
+name: Publish Helm Chart
+
+on:
+  # Auto-trigger when a release is published (tag pushed via release-publish.yml)
+  release:
+    types: [published]
+  # Manual trigger for backfills or re-publishes
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart version to publish (e.g. 0.2.4). Must match helm/octo/Chart.yaml appVersion."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write   # required to push to ghcr.io
+
+jobs:
+  publish-chart:
+    name: Package and push Helm chart to ghcr.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: "3.15.3"
+
+      - name: Resolve chart version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            # Strip leading 'v' from release tag (e.g. v0.2.4 → 0.2.4)
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved chart version: ${VERSION}"
+
+      - name: Verify Chart.yaml version matches
+        run: |
+          set -euo pipefail
+          CHART_VERSION="$(grep '^version:' helm/octo/Chart.yaml | awk '{print $2}')"
+          EXPECTED="${{ steps.version.outputs.version }}"
+          if [[ "${CHART_VERSION}" != "${EXPECTED}" ]]; then
+            echo "::error::Chart.yaml version '${CHART_VERSION}' does not match expected '${EXPECTED}'"
+            exit 1
+          fi
+          echo "Chart.yaml version matches: ${CHART_VERSION}"
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+                --username "${{ github.actor }}" \
+                --password-stdin
+
+      - name: Package chart
+        run: |
+          set -euo pipefail
+          helm package helm/octo --destination /tmp/chart-out
+          ls -lh /tmp/chart-out/
+
+      - name: Push chart to ghcr.io
+        run: |
+          set -euo pipefail
+          helm push /tmp/chart-out/octo-${{ steps.version.outputs.version }}.tgz \
+            oci://ghcr.io/mininglamp-oss
+          echo "Chart pushed: oci://ghcr.io/mininglamp-oss/octo:${{ steps.version.outputs.version }}"
+
+      - name: Smoke-test — helm show chart
+        run: |
+          set -euo pipefail
+          helm show chart \
+            oci://ghcr.io/mininglamp-oss/octo \
+            --version ${{ steps.version.outputs.version }}

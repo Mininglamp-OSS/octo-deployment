@@ -36,5 +36,11 @@ MinIO console (SSH tunnel to pod):
     svc/{{ include "octo.minio.fullname" . }} 9001:9001
 
 {{- end }}
-NOTE: If secrets.adminPwd was set, the initial superAdmin account is
-available at {{ include "octo.externalBaseURL" . }}/admin/
+NOTE: If secrets.adminPwd was set, the initial superAdmin password is
+stored in the chart secret under the key OCTO_ADMIN_PWD (not adminPwd).
+Retrieve it with:
+  kubectl get secret -n {{ .Release.Namespace }} {{ include "octo.fullname" . }}-secrets \
+    -o jsonpath='{.data.OCTO_ADMIN_PWD}' | base64 -d
+
+The initial superAdmin account is available at
+  {{ include "octo.externalBaseURL" . }}/admin/
