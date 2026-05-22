@@ -1,0 +1,42 @@
+# =============================================================================
+# OCTO Helm Chart — China region overlay
+# =============================================================================
+# Switches the 6 OCTO app images from Docker Hub (mininglamposs/*) to the
+# Tencent Cloud registry (tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/*).
+# Image tags are NOT overridden here — they inherit from values.yaml so a
+# single version bump there propagates to both regions.
+#
+# Infra images (mysql / redis / minio / wukongim / nginx / busybox) are NOT
+# remapped; pull them via your cluster's Docker Hub mirror, or override
+# *.image.repository in your own values file if your environment requires it.
+#
+# Usage:
+#   helm install octo ./helm/octo \
+#     -f ./helm/octo/values-china.yaml \
+#     -f my-values.yaml \
+#     -n <namespace>
+# =============================================================================
+
+server:
+  image:
+    repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-server
+
+web:
+  image:
+    repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-web
+
+admin:
+  image:
+    repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-admin
+
+matter:
+  image:
+    repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-matter
+
+summary:
+  api:
+    image:
+      repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-smart-summary-api
+  worker:
+    image:
+      repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-smart-summary-worker

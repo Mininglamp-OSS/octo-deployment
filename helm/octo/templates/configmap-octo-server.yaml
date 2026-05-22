@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "octo.fullname" . }}-octo-server-config
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+data:
+  tsdd.yaml: |
+    {{- $cfg      := .Values.server.config     | default dict }}
+    {{- $logger   := $cfg.logger               | default dict }}
+    {{- $register := $cfg.register             | default dict }}
+    {{- $support  := $cfg.support              | default dict }}
+    mode: {{ $cfg.mode | default "release" | quote }}
+
+    external:
+      ip: ""
+      baseURL: ""
+      {{- if $cfg.webLoginURL }}
+      webLoginURL: {{ $cfg.webLoginURL | quote }}
+      {{- end }}
+
+    smsCode: {{ $cfg.smsCode | default "" | quote }}
+    adminPwd: ""
+
+    db:
+      mysqlAddr: ""
+      redisAddr: ""
+      redisPass: ""
+
+    wukongIM:
+      apiURL: "{{ include "octo.wukongim.apiURL" . }}"
+      managerToken: ""
+
+    fileService: {{ $cfg.fileService | default "minio" | quote }}
+    minio:
+      url: "{{ include "octo.minio.url" . }}"
+      downloadURL: ""
+      accessKeyID: ""
+      secretAccessKey: ""
+
+    logger:
+      level: {{ $logger.level | default 2 }}
+      dir: {{ $logger.dir | default "./logs" | quote }}
+      lineNum: {{ hasKey $logger "lineNum" | ternary (index $logger "lineNum") false }}
+
+    register:
+      "off": {{ hasKey $register "disabled" | ternary (index $register "disabled") true }}
+      onlyChina: {{ hasKey $register "onlyChina" | ternary (index $register "onlyChina") false }}
+      emailOn: {{ hasKey $register "emailOn" | ternary (index $register "emailOn") false }}
+
+    {{- if or $support.email $support.emailSmtp }}
+    support:
+      {{- if $support.email }}
+      email: {{ $support.email | quote }}
+      {{- end }}
+      {{- if $support.emailSmtp }}
+      emailSmtp: {{ $support.emailSmtp | quote }}
+      {{- end }}
+    {{- end }}

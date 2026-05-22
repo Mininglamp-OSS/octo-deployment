@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.matter.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matter
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: matter
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.matter.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: matter
+spec:
+  replicas: {{ .Values.matter.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: matter
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: matter
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: wait-for-mysql
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+      containers:
+        - name: octo-matter
+          image: {{ include "octo.image" (dict "repo" .Values.matter.image.repository "tag" .Values.matter.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.matter.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ENV
+              value: {{ .Values.matter.appEnv | default "prod" | quote }}
+            - name: OCTO_MATTER_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_MATTER_DB_PASSWORD
+            - name: MYSQL_DSN
+              value: "matter:$(OCTO_MATTER_DB_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/octo_matter?charset=utf8mb4&parseTime=true"
+            - name: DMWORKIM_URL
+              value: "http://{{ include "octo.server.fullname" . }}:8090"
+            - name: WUKONGIM_URL
+              value: {{ include "octo.wukongim.apiURL" . | quote }}
+            - name: SERVER_PORT
+              value: "8080"
+            - name: NOTIFY_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_NOTIFY_INTERNAL_TOKEN
+            - name: LLM_API_URL
+              value: {{ .Values.llm.apiURL | default "https://api.example.com/v1" | quote }}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: LLM_API_KEY
+            - name: LLM_MODEL
+              value: {{ .Values.llm.model | default "claude-sonnet-4-6" | quote }}
+            - name: LLM_TIMEOUT
+              value: "30"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: logs
+              mountPath: /home/logs
+          {{- with .Values.matter.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: logs
+          emptyDir: {}

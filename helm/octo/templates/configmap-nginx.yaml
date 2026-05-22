@@ -1,0 +1,199 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "octo.fullname" . }}-nginx-config
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  auto;
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        server_tokens off;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        limit_req_zone $binary_remote_addr zone=octo_api:10m  rate=30r/s;
+        limit_req_zone $binary_remote_addr zone=octo_auth:10m rate=10r/s;
+
+        gzip  on;
+        gzip_min_length  1k;
+        gzip_vary        on;
+        gzip_proxied     any;
+        gzip_comp_level  2;
+        gzip_buffers     16 8k;
+        gzip_http_version 1.1;
+        gzip_types text/plain text/css application/json application/javascript
+                   text/xml application/xml application/xml+rss text/javascript
+                   application/wasm image/svg+xml font/woff2;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+
+  octo.conf: |
+    upstream octo_api {
+        server {{ include "octo.server.fullname" . }}:8090;
+        keepalive 16;
+    }
+
+    upstream octo_ws {
+        server {{ include "octo.wukongim.wsEndpoint" . }};
+        keepalive 8;
+    }
+
+    upstream octo_minio_api {
+        server {{ include "octo.minio.endpoint" . }};
+        keepalive 8;
+    }
+
+    server {
+        listen       80 default_server;
+        listen       [::]:80 default_server;
+        server_name  {{ .Values.domain }} localhost _;
+
+        client_max_body_size    1000m;
+        client_body_buffer_size 8m;
+
+        add_header X-Frame-Options          "SAMEORIGIN" always;
+        add_header X-Content-Type-Options   "nosniff" always;
+        add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
+
+        location = /_nginx_up {
+            access_log off;
+            default_type text/plain;
+            return 200 "ok\n";
+        }
+
+        location /api/ {
+            limit_req zone=octo_api burst=60 nodelay;
+            proxy_pass         http://octo_api/;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 600s;
+        }
+
+        location ^~ /v1/ {
+            limit_req zone=octo_auth burst=20 nodelay;
+            proxy_pass         http://octo_api/v1/;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 600s;
+        }
+
+        location /ws {
+            proxy_pass          http://octo_ws;
+            proxy_http_version  1.1;
+            proxy_set_header    Upgrade           $http_upgrade;
+            proxy_set_header    Connection        "upgrade";
+            proxy_set_header    Host              $host;
+            proxy_set_header    X-Real-IP         $remote_addr;
+            proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header    X-Forwarded-Proto $scheme;
+            proxy_read_timeout  3600s;
+            proxy_send_timeout  3600s;
+        }
+
+        location /minio/ {
+            proxy_pass         http://octo_minio_api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $http_host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_read_timeout 600s;
+            proxy_request_buffering off;
+            proxy_buffering off;
+        }
+
+        location = /admin {
+            return 301 /admin/;
+        }
+        location /admin/ {
+            proxy_pass         http://{{ include "octo.admin.fullname" . }}/admin/;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        location /matter/ {
+            limit_req zone=octo_api burst=20 nodelay;
+            rewrite ^/matter/(.*) /$1 break;
+            proxy_pass         http://{{ include "octo.matter.fullname" . }}:8080;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+
+        {{- if .Values.summary.enabled }}
+        location /summary/ {
+            limit_req zone=octo_api burst=20 nodelay;
+            rewrite ^/summary/(.*) /$1 break;
+            proxy_pass         http://{{ include "octo.summaryApi.fullname" . }}:8080;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+        {{- end }}
+
+        location = /_octo_up {
+            default_type text/html;
+            return 200 "OCTO Server is up. Visit /admin/ for the admin console.";
+        }
+
+        location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
+            proxy_pass         http://octo_minio_api;
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $http_host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+            proxy_set_header   Connection        "";
+            proxy_request_buffering off;
+            proxy_buffering off;
+            proxy_read_timeout 600s;
+        }
+
+        location / {
+            proxy_pass         http://{{ include "octo.web.fullname" . }};
+            proxy_http_version 1.1;
+            proxy_set_header   Host              $host;
+            proxy_set_header   X-Real-IP         $remote_addr;
+            proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto $scheme;
+        }
+    }
+
+  default.conf: |
+    # Empty — suppresses nginx built-in default server.
