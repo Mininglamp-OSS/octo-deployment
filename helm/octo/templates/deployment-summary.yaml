@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.summary.enabled }}
 {{- if not .Values.secrets.llmApiKey }}
 {{- fail "secrets.llmApiKey must be set when summary.enabled=true" }}

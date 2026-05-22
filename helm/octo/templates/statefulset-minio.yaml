@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.minio.enabled }}
 apiVersion: v1
 kind: Service

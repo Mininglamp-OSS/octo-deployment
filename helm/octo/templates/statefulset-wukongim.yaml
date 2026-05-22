@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.wukongim.enabled }}
 apiVersion: v1
 kind: Service

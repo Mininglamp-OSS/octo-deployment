@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.mysql.enabled }}
 apiVersion: v1
 kind: Service

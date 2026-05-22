@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.redis.enabled }}
 apiVersion: v1
 kind: Service

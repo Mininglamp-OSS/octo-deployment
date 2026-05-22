@@ -1,4 +1,3 @@
-# yamllint disable
 {{- if .Values.ingress.enabled }}
 {{- $host := .Values.ingress.host | default .Values.domain }}
 apiVersion: networking.k8s.io/v1
