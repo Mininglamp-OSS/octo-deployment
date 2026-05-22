@@ -2,23 +2,23 @@
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default owners — everything not matched below.
-*                       @Mininglamp-OSS/maintainers
+*                       @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
 
 # Bilingual doc pairs: any change to one side should land with the
 # other in the same PR.
-*.md                    @Mininglamp-OSS/maintainers
-*.zh.md                 @Mininglamp-OSS/maintainers
-README.md               @Mininglamp-OSS/maintainers
-README.zh.md            @Mininglamp-OSS/maintainers
-docker/README.md        @Mininglamp-OSS/maintainers
-docker/README.zh.md     @Mininglamp-OSS/maintainers
-kustomize/README.md     @Mininglamp-OSS/maintainers
-kustomize/README.zh.md  @Mininglamp-OSS/maintainers
+*.md                    @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+*.zh.md                 @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+README.md               @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+README.zh.md            @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/README.md        @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/README.zh.md     @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+kustomize/README.md     @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+kustomize/README.zh.md  @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
 
 # Deploy surface — review every touch.
-setup.sh                @Mininglamp-OSS/maintainers
-docker/docker-compose.yaml @Mininglamp-OSS/maintainers
-docker/.env.example     @Mininglamp-OSS/maintainers
-docker/nginx/           @Mininglamp-OSS/maintainers
-docker/scripts/         @Mininglamp-OSS/maintainers
-docker/configs/         @Mininglamp-OSS/maintainers
+setup.sh                @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/docker-compose.yaml @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/.env.example     @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/nginx/           @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/scripts/         @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
+docker/configs/         @Mininglamp-OSS/maintainers @Mininglamp-OSS/deployment-maintainers
