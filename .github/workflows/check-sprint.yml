@@ -1,9 +1,33 @@
 # Calls the org-level reusable workflow to block merge when the PR's
-# Sprint field on the Octo Board is missing or doesn't match the
+# Sprint field on the Octo Board is missing or does not match the
 # current sprint iteration.
 #
-# Uses pull_request_target so the workflow can access secrets for the
-# Projects API. No code from the PR is checked out or executed.
+# Uses pull_request_target so the workflow can access PROJECT_TOKEN for
+# the GitHub Projects API. No PR code is checked out or executed here.
+#
+# KNOWN LIMITATION — stale required status after sprint/field change:
+#   This check re-evaluates only on pull_request_target events
+#   (opened, synchronize, reopened). Two scenarios can leave a stale
+#   green status on branch protection:
+#
+#   1. Sprint rollover: the org's active sprint advances while this PR
+#      has no new commits. Branch protection may allow merge on the old
+#      green result from the previous sprint.
+#      Partial mitigation: enforce-freshness: true (see below) rejects
+#      PRs whose head commit predates the current sprint start.
+#
+#   2. Sprint field edited via Projects UI after a green run: no
+#      pull_request* event fires, so the check is not re-run.
+#      No automated mitigation exists (GitHub Projects has no webhook
+#      events that can trigger Actions workflows).
+#
+# RECOMMENDED MITIGATION for both cases:
+#   In branch protection for main, enable
+#   "Require branches to be up to date before merging".
+#   A new push re-triggers this check, keeping the result fresh.
+#
+# See the reusable workflow header for full technical details:
+#   Mininglamp-OSS/.github/.github/workflows/reusable-check-sprint.yml
 
 name: Check Sprint
 
@@ -20,5 +44,6 @@ jobs:
     with:
       pr-number: ${{ github.event.pull_request.number }}
       repo-name: ${{ github.repository }}
+      enforce-freshness: true
     secrets:
       PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
