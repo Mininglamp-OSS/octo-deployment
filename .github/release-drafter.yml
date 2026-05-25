@@ -9,12 +9,12 @@ template: |
   **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
 categories:
   - title: "Features"
-    labels: [enhancement, feature]
+    labels: [type:feature]
   - title: "Bug Fixes"
-    labels: [bug, fix]
+    labels: [type:bug]
   - title: "CI and Infrastructure"
-    labels: [ci, infra, dependencies-changed, dependencies]
+    labels: [type:chore, dependencies-changed]
   - title: "Documentation"
-    labels: [documentation, docs]
+    labels: [type:docs]
 exclude-labels: [skip-changelog]
 change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
