@@ -46,7 +46,7 @@ jobs:
           # `relaxed` baseline; line-length disabled (K8s manifests routinely
           # exceed 80 cols), `truthy` and `comments-indentation` downgraded so
           # GitHub Actions syntax (`on:` etc.) does not fail the build.
-          yamllint -f github -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, comments-indentation: disable, truthy: {level: warning, check-keys: false}}}" .
+          yamllint -f github -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, comments-indentation: disable, truthy: {level: warning, check-keys: false}}}" .github/ kustomize/
 
   kustomize-validate:
     name: kustomize build + kubeconform
