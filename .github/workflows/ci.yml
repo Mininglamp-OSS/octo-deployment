@@ -43,10 +43,11 @@ jobs:
         run: |
           set -euo pipefail
           yamllint --version
-          # `relaxed` baseline; line-length disabled (K8s manifests routinely
-          # exceed 80 cols), `truthy` and `comments-indentation` downgraded so
-          # GitHub Actions syntax (`on:` etc.) does not fail the build.
-          yamllint -f github -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, comments-indentation: disable, truthy: {level: warning, check-keys: false}}}" .
+          # Config is in .yamllint at repo root. helm/octo/templates/ is
+          # excluded there because Helm templates contain Go template syntax
+          # ({{- ... }}) that is not valid YAML and would produce false
+          # positives. Helm chart correctness is verified via helm lint instead.
+          yamllint -f github .
 
   kustomize-validate:
     name: kustomize build + kubeconform
