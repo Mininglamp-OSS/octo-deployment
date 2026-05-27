@@ -1,0 +1,10 @@
+extends: relaxed
+ignore: |
+  helm/octo/templates/
+rules:
+  line-length: disable
+  document-start: disable
+  comments-indentation: disable
+  truthy:
+    level: warning
+    check-keys: false
