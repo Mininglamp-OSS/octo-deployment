@@ -12,7 +12,7 @@ on:
   # branch; it only forwards event metadata (issue/PR number) to the reusable
   # workflow, which performs only GitHub API calls to add items to the project.
   pull_request_target: # zizmor: ignore[dangerous-triggers] metadata-only automation; no PR code executed
-    types: [opened]
+    types: [opened, edited]
 
 permissions: {}
 
