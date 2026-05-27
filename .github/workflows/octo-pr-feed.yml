@@ -8,7 +8,8 @@ permissions: {}
 
 jobs:
   notify:
-    uses: Mininglamp-OSS/.github/.github/workflows/octo-pr-feed.yml@v1
+    if: ${{ !github.event.pull_request.draft }}
+    uses: Mininglamp-OSS/.github/.github/workflows/octo-pr-feed.yml@main
     with:
       repo_name: ${{ github.event.repository.name }}
       pr_number: ${{ github.event.pull_request.number }}
@@ -20,6 +21,7 @@ jobs:
       pr_deletions: ${{ github.event.pull_request.deletions }}
       pr_changed_files: ${{ github.event.pull_request.changed_files }}
       event_action: ${{ github.event.action }}
-      project_group_id: 288154967f614d7ca1faac21b5f2f8f0
+      feed_group_id: "1c303c142e9840f2a9b46c10b0972e8d"
+      project_group_id: "288154967f614d7ca1faac21b5f2f8f0"
     secrets:
       OCTO_BOT_TOKEN: ${{ secrets.OCTO_BOT_TOKEN }}

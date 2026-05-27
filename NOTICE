@@ -1,0 +1,7 @@
+OCTO Deployment
+Copyright 2026 MININGLAMP Technology and the OCTO contributors
+
+This repository contains Kubernetes manifests and Kustomize overlays
+for deploying the OCTO platform.
+
+See LICENSE for full license text.
