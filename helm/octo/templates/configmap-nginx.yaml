@@ -134,6 +134,11 @@ data:
         location = /admin {
             return 301 /admin/;
         }
+        # /space is the space-admin entry point in octo-admin (basename=/admin, route=/space).
+        # Redirect /space/* to /admin/space/* so React Router resolves correctly.
+        location ~ ^/space(/.*)?$ {
+            return 301 /admin/space$1$is_args$args;
+        }
         location /admin/ {
             proxy_pass         http://{{ include "octo.admin.fullname" . }}/admin/;
             proxy_http_version 1.1;
