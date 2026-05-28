@@ -5,6 +5,7 @@ metadata:
   labels:
     {{- include "octo.labels" . | nindent 4 }}
 data:
+  {{- if .Values.minio.enabled }}
   minio-octo-app-policy.json: |
     {
       "Version": "2012-10-17",
@@ -55,6 +56,7 @@ data:
         }
       ]
     }
+  {{- end }}
 
   init-extra-dbs.sh: |
     #!/bin/bash

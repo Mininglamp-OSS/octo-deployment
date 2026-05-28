@@ -57,11 +57,13 @@ data:
         server {{ include "octo.wukongim.wsEndpoint" . }};
         keepalive 8;
     }
+{{- if not (include "octo.isCloudStorage" .) }}
 
     upstream octo_minio_api {
         server {{ include "octo.minio.endpoint" . }};
         keepalive 8;
     }
+{{- end }}
 
     server {
         listen       80 default_server;
@@ -117,6 +119,7 @@ data:
             proxy_read_timeout  3600s;
             proxy_send_timeout  3600s;
         }
+        {{- if not (include "octo.isCloudStorage" .) }}
 
         location /minio/ {
             proxy_pass         http://octo_minio_api;
@@ -130,6 +133,7 @@ data:
             proxy_request_buffering off;
             proxy_buffering off;
         }
+        {{- end }}
 
         location = /admin {
             return 301 /admin/;
@@ -171,6 +175,7 @@ data:
             default_type text/html;
             return 200 "OCTO Server is up. Visit /admin/ for the admin console.";
         }
+        {{- if not (include "octo.isCloudStorage" .) }}
 
         location ~ ^/(file|chat|moment|sticker|report|chatbg|common|download|group|avatar)/.+ {
             proxy_pass         http://octo_minio_api;
@@ -184,6 +189,7 @@ data:
             proxy_buffering off;
             proxy_read_timeout 600s;
         }
+        {{- end }}
 
         location / {
             proxy_pass         http://{{ include "octo.web.fullname" . }};

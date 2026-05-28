@@ -161,8 +161,8 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `secrets.mysqlRootPassword` | MySQL root password | `""` |
-| `secrets.minioRootPassword` | MinIO root password (≥ 8 chars) | `""` |
-| `secrets.minioAppPassword` | MinIO app-scoped IAM password | `""` |
+| `secrets.minioRootPassword` | MinIO root password (≥ 8 chars, required when `minio.enabled=true`) | `""` |
+| `secrets.minioAppPassword` | MinIO app-scoped IAM password (required when `fileService=minio`) | `""` |
 | `secrets.matterDbPassword` | MySQL password for matter service | `""` |
 | `secrets.summaryDbPassword` | MySQL password for summary service | `""` |
 | `secrets.summaryReaderPassword` | MySQL read-only password for summary | `""` |
@@ -171,6 +171,11 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `secrets.wukongimManagerToken` | WuKongIM admin token | `""` |
 | `secrets.adminPwd` | Initial superAdmin password | `superAdmin` |
 | `secrets.llmApiKey` | LLM API key for AI features | `""` |
+| `secrets.cosSecretId` / `secrets.cosSecretKey` | Tencent COS credentials (required when `fileService=tencentCOS`) | `""` |
+| `secrets.ossAccessKeyId` / `secrets.ossAccessKeySecret` | Aliyun OSS credentials (required when `fileService=aliyunOSS`) | `""` |
+| `secrets.s3AccessKeyId` / `secrets.s3SecretAccessKey` | AWS S3 credentials (required when `fileService=awsS3`) | `""` |
+| `secrets.s3SessionToken` | AWS STS temporary token (optional) | `""` |
+| `secrets.qiniuAccessKey` / `secrets.qiniuSecretKey` | Qiniu credentials (required when `fileService=qiniu`) | `""` |
 
 ### LLM (AI features)
 
@@ -213,6 +218,66 @@ wukongim:
   storage:
     size: 10Gi
 ```
+
+### Cloud storage (optional)
+
+The chart defaults to embedded MinIO (`server.config.fileService: minio`). To use a cloud object storage provider instead, set `fileService` to the matching value and `minio.enabled: false`:
+
+| `fileService` value | Provider | Required config block | Required secret |
+|---------------------|----------|-----------------------|-----------------|
+| `minio` (default) | Embedded / external MinIO | `minio` / `externalMinio` | `secrets.minioAppPassword` |
+| `tencentCOS` | Tencent Cloud COS | `cos.region`, `cos.bucket` | `secrets.cosSecretId/Key` |
+| `aliyunOSS` | Aliyun OSS | `oss.endpoint`, `oss.bucket` | `secrets.ossAccessKeyId/Secret` |
+| `awsS3` | AWS S3 / S3-compatible | `s3.region`, `s3.bucket` | `secrets.s3AccessKeyId/SecretAccessKey` |
+| `qiniu` | Qiniu Kodo | `qiniu.bucket` | `secrets.qiniuAccessKey/SecretKey` |
+
+**Example (Tencent COS):**
+
+```yaml
+server:
+  config:
+    fileService: "tencentCOS"
+
+minio:
+  enabled: false
+
+cos:
+  region: "ap-guangzhou"
+  bucket: "my-bucket-1234567890"
+  downloadURL: "https://my-bucket-1234567890.cos.ap-guangzhou.myqcloud.com"
+  prefix: ""          # optional, for multi-env isolation
+
+secrets:
+  cosSecretId:  "AKIDxxxxxxxxxxx"
+  cosSecretKey: "xxxxxxxxxxxxxxxxxxx"
+  minioAppPassword: ""   # not required in cloud storage mode
+```
+
+**Example (Aliyun OSS):**
+
+```yaml
+server:
+  config:
+    fileService: "aliyunOSS"
+
+minio:
+  enabled: false
+
+oss:
+  endpoint: "oss-cn-hangzhou.aliyuncs.com"
+  bucket: "my-oss-bucket"
+  downloadURL: "https://my-oss-bucket.oss-cn-hangzhou.aliyuncs.com"
+
+secrets:
+  ossAccessKeyId:     "OSSAccessKeyId"
+  ossAccessKeySecret: "OSSAccessKeySecret"
+  minioAppPassword: ""
+```
+
+When cloud storage is active, the chart automatically:
+- Skips the `wait-for-minio` init container
+- Removes the MinIO proxy upstream and `/file/` locations from Nginx
+- Injects only the provider-specific credentials into the Secret and env vars
 
 ### External services
 

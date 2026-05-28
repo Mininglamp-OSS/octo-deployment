@@ -100,6 +100,26 @@ secrets:
   # Inbound webhook HMAC secret (optional).
   webhookSecretKey: ""
 
+  # ── Cloud storage credentials ───────────────────────────────────────────────
+  # Only the block matching server.config.fileService is required.
+
+  # fileService: tencentCOS
+  cosSecretId: ""
+  cosSecretKey: ""
+
+  # fileService: aliyunOSS
+  ossAccessKeyId: ""
+  ossAccessKeySecret: ""
+
+  # fileService: awsS3
+  s3AccessKeyId: ""
+  s3SecretAccessKey: ""
+  s3SessionToken: ""   # Optional — STS temporary credential
+
+  # fileService: qiniu
+  qiniuAccessKey: ""
+  qiniuSecretKey: ""
+
 # =============================================================================
 # LLM configuration (shared by matter + smart-summary)
 # =============================================================================
@@ -220,6 +240,38 @@ externalWukongim:
   wsEndpoint: ""
 
 # =============================================================================
+# Cloud object storage — used when server.config.fileService != "minio"
+# Set minio.enabled=false when using any of these providers.
+# =============================================================================
+
+# fileService: tencentCOS
+cos:
+  region: ""          # Required. e.g. ap-guangzhou
+  bucket: ""          # Required. e.g. my-bucket-1234567890
+  downloadURL: ""     # Public download domain. e.g. https://my-bucket-1234567890.cos.ap-guangzhou.myqcloud.com
+  prefix: ""          # Optional path prefix for multi-env isolation
+
+# fileService: aliyunOSS
+oss:
+  endpoint: ""        # Required. e.g. oss-cn-hangzhou.aliyuncs.com
+  bucket: ""          # Required.
+  downloadURL: ""     # Public download domain. e.g. https://my-bucket.oss-cn-hangzhou.aliyuncs.com
+
+# fileService: awsS3 (also works for S3-compatible stores)
+s3:
+  endpoint: ""        # Host only, no scheme. e.g. s3.us-east-1.amazonaws.com
+  region: ""          # e.g. us-east-1
+  bucket: ""          # Required.
+  downloadURL: ""     # Optional CDN domain.
+  prefix: ""          # Optional path prefix.
+  usePathStyle: false # Set true for path-style addressing (MinIO-compatible stores)
+
+# fileService: qiniu
+qiniu:
+  bucket: ""          # Kodo space name.
+  downloadURL: ""     # CDN / bucket domain. e.g. https://cdn.example.com
+
+# =============================================================================
 # octo-server
 # =============================================================================
 server:
@@ -252,7 +304,13 @@ server:
     # Test-only SMS verification code bypass. Ignored in release mode.
     smsCode: ""
 
-    # File storage backend. Only "minio" is currently supported.
+    # File storage backend. Supported values:
+    #   minio       — bundled or external MinIO (see minio:/externalMinio:)
+    #   tencentCOS  — Tencent Cloud COS         (see cos: + secrets.cosSecretId/Key)
+    #   aliyunOSS   — Aliyun OSS                (see oss: + secrets.ossAccessKeyId/Secret)
+    #   awsS3       — AWS S3 or S3-compatible   (see s3: + secrets.s3AccessKeyId/SecretKey)
+    #   qiniu       — Qiniu Kodo                (see qiniu: + secrets.qiniuAccessKey/SecretKey)
+    # When set to any value other than "minio", set minio.enabled=false.
     fileService: "minio"
 
     logger:

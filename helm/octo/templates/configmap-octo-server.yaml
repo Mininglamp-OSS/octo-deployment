@@ -32,11 +32,45 @@ data:
       managerToken: ""
 
     fileService: {{ $cfg.fileService | default "minio" | quote }}
+    {{- $fs := $cfg.fileService | default "minio" }}
+    {{- if not (include "octo.isCloudStorage" .) }}
     minio:
       url: "{{ include "octo.minio.url" . }}"
       downloadURL: ""
       accessKeyID: ""
       secretAccessKey: ""
+    {{- else if eq $fs "tencentCOS" }}
+    cos:
+      region:    {{ required "cos.region is required when fileService=tencentCOS" .Values.cos.region | quote }}
+      bucket:    {{ required "cos.bucket is required when fileService=tencentCOS" .Values.cos.bucket | quote }}
+      bucketURL: {{ .Values.cos.downloadURL | default "" | quote }}
+      prefix:    {{ .Values.cos.prefix    | default "" | quote }}
+      secretID:  ""
+      secretKey: ""
+    {{- else if eq $fs "aliyunOSS" }}
+    oss:
+      endpoint:        {{ required "oss.endpoint is required when fileService=aliyunOSS" .Values.oss.endpoint | quote }}
+      bucketName:      {{ required "oss.bucket is required when fileService=aliyunOSS" .Values.oss.bucket | quote }}
+      bucketURL:       {{ .Values.oss.downloadURL | default "" | quote }}
+      accessKeyID:     ""
+      accessKeySecret: ""
+    {{- else if eq $fs "awsS3" }}
+    s3:
+      endpoint:        {{ .Values.s3.endpoint     | default "" | quote }}
+      region:          {{ required "s3.region is required when fileService=awsS3" .Values.s3.region | quote }}
+      bucket:          {{ required "s3.bucket is required when fileService=awsS3" .Values.s3.bucket | quote }}
+      downloadURL:     {{ .Values.s3.downloadURL  | default "" | quote }}
+      prefix:          {{ .Values.s3.prefix       | default "" | quote }}
+      usePathStyle:    {{ .Values.s3.usePathStyle | default false }}
+      accessKeyID:     ""
+      secretAccessKey: ""
+    {{- else if eq $fs "qiniu" }}
+    qiniu:
+      url:        {{ .Values.qiniu.downloadURL | default "" | quote }}
+      bucketName: {{ required "qiniu.bucket is required when fileService=qiniu" .Values.qiniu.bucket | quote }}
+      accessKey:  ""
+      secretKey:  ""
+    {{- end }}
 
     logger:
       level: {{ $logger.level | default 2 }}

@@ -3,12 +3,13 @@ name: octo
 description: OCTO Server — self-hosted enterprise messaging platform (IM + AI)
 type: application
 version: 0.2.4
-appVersion: "latest"
+appVersion: "1.3.0"
 keywords:
   - octo
   - messaging
   - im
   - wukongim
+icon: https://github.com/Mininglamp-OSS/octo-web/blob/main/docs/assets/logo-dark.png?raw=true
 home: https://github.com/Mininglamp-OSS/octo-deployment
 sources:
   - https://github.com/Mininglamp-OSS/octo-deployment

@@ -161,8 +161,8 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `secrets.mysqlRootPassword` | MySQL root 密码 | `""` |
-| `secrets.minioRootPassword` | MinIO root 密码（≥ 8 位） | `""` |
-| `secrets.minioAppPassword` | MinIO 应用级 IAM 密码 | `""` |
+| `secrets.minioRootPassword` | MinIO root 密码（≥ 8 位，`minio.enabled=true` 时必填） | `""` |
+| `secrets.minioAppPassword` | MinIO 应用级 IAM 密码（`fileService=minio` 时必填） | `""` |
 | `secrets.matterDbPassword` | matter 服务的 MySQL 密码 | `""` |
 | `secrets.summaryDbPassword` | summary 服务的 MySQL 密码 | `""` |
 | `secrets.summaryReaderPassword` | summary 服务的 MySQL 只读密码 | `""` |
@@ -171,6 +171,11 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | `secrets.wukongimManagerToken` | WuKongIM 管理员令牌 | `""` |
 | `secrets.adminPwd` | 初始超级管理员密码 | `superAdmin` |
 | `secrets.llmApiKey` | AI 功能 LLM API Key | `""` |
+| `secrets.cosSecretId` / `secrets.cosSecretKey` | 腾讯云 COS 密钥（`fileService=tencentCOS` 时必填） | `""` |
+| `secrets.ossAccessKeyId` / `secrets.ossAccessKeySecret` | 阿里云 OSS 密钥（`fileService=aliyunOSS` 时必填） | `""` |
+| `secrets.s3AccessKeyId` / `secrets.s3SecretAccessKey` | AWS S3 密钥（`fileService=awsS3` 时必填） | `""` |
+| `secrets.s3SessionToken` | AWS STS 临时凭据（可选） | `""` |
+| `secrets.qiniuAccessKey` / `secrets.qiniuSecretKey` | 七牛云密钥（`fileService=qiniu` 时必填） | `""` |
 
 ### LLM（AI 功能）
 
@@ -223,9 +228,67 @@ wukongim:
     size: 10Gi
 ```
 
-### 外部服务
+### 云存储（可选）
 
-如果要复用已有的 MySQL / Redis / MinIO / WuKongIM 而不部署 chart 内置的 StatefulSet，把对应的 `<service>.enabled` 置为 `false`，并填入对应的 `external<Service>` 字段：
+默认使用内置 MinIO（`server.config.fileService: minio`）。如需对接云厂商存储，将 `fileService` 改为对应值，并将 `minio.enabled` 置为 `false`：
+
+| `fileService` 值 | 云服务 | 必填配置块 | 必填密钥 |
+|-----------------|--------|-----------|---------|
+| `minio`（默认） | 内置 / 外部 MinIO | `minio` / `externalMinio` | `secrets.minioAppPassword` |
+| `tencentCOS` | 腾讯云对象存储 | `cos.region`、`cos.bucket` | `secrets.cosSecretId/Key` |
+| `aliyunOSS` | 阿里云对象存储 | `oss.endpoint`、`oss.bucket` | `secrets.ossAccessKeyId/Secret` |
+| `awsS3` | AWS S3 / 兼容 S3 | `s3.region`、`s3.bucket` | `secrets.s3AccessKeyId/SecretAccessKey` |
+| `qiniu` | 七牛云 Kodo | `qiniu.bucket` | `secrets.qiniuAccessKey/SecretKey` |
+
+**示例（腾讯云 COS）：**
+
+```yaml
+server:
+  config:
+    fileService: "tencentCOS"
+
+minio:
+  enabled: false
+
+cos:
+  region: "ap-guangzhou"
+  bucket: "my-bucket-1234567890"
+  downloadURL: "https://my-bucket-1234567890.cos.ap-guangzhou.myqcloud.com"
+  prefix: ""          # 可选，多环境隔离
+
+secrets:
+  cosSecretId:  "AKIDxxxxxxxxxxx"
+  cosSecretKey: "xxxxxxxxxxxxxxxxxxx"
+  minioAppPassword: ""   # 云存储模式下不需要
+```
+
+**示例（阿里云 OSS）：**
+
+```yaml
+server:
+  config:
+    fileService: "aliyunOSS"
+
+minio:
+  enabled: false
+
+oss:
+  endpoint: "oss-cn-hangzhou.aliyuncs.com"
+  bucket: "my-oss-bucket"
+  downloadURL: "https://my-oss-bucket.oss-cn-hangzhou.aliyuncs.com"
+
+secrets:
+  ossAccessKeyId:     "OSSAccessKeyId"
+  ossAccessKeySecret: "OSSAccessKeySecret"
+  minioAppPassword: ""
+```
+
+切换到云存储后，chart 会自动：
+- 跳过 `wait-for-minio` init container
+- 从 Nginx 配置中移除 MinIO 代理 upstream 和 `/file/` 等 location
+- 仅将对应 provider 的凭据注入 Secret 和 env var
+
+### 外部服务
 
 ```yaml
 redis:

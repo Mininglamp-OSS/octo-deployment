@@ -51,9 +51,11 @@ spec:
         - name: wait-for-redis
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until nc -z {{ include "octo.redis.host" . }} {{ include "octo.redis.port" . }}; do echo waiting for redis; sleep 2; done']
+        {{- if not (include "octo.isCloudStorage" .) }}
         - name: wait-for-minio
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.endpoint" . }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
+        {{- end }}
         {{- if .Values.minio.enabled }}
         - name: minio-bootstrap
           image: {{ include "octo.image" (dict "repo" .Values.minio.mcImage.repository "tag" .Values.minio.mcImage.tag "ctx" .) }}
@@ -171,11 +173,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MASTER_KEY
+            {{- if not (include "octo.isCloudStorage" .) }}
             - name: OCTO_MINIO_APP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MINIO_APP_PASSWORD
+            {{- end }}
             - name: OCTO_WUKONGIM_MANAGER_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -222,6 +226,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_WUKONGIM_MANAGER_TOKEN
+            {{- $fs := (.Values.server.config | default dict).fileService | default "minio" }}
+            {{- if not (include "octo.isCloudStorage" .) }}
             - name: TS_MINIO_ACCESSKEYID
               value: {{ include "octo.minio.appUser" . | quote }}
             - name: TS_MINIO_SECRETACCESSKEY
@@ -231,6 +237,88 @@ spec:
                   key: OCTO_MINIO_APP_PASSWORD
             - name: TS_MINIO_DOWNLOADURL
               value: {{ include "octo.minio.serverURL" . | quote }}
+            {{- else if eq $fs "tencentCOS" }}
+            - name: TS_COS_SECRETID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: COS_SECRET_ID
+            - name: TS_COS_SECRETKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: COS_SECRET_KEY
+            - name: TS_COS_REGION
+              value: {{ required "cos.region is required when fileService=tencentCOS" .Values.cos.region | quote }}
+            - name: TS_COS_BUCKET
+              value: {{ required "cos.bucket is required when fileService=tencentCOS" .Values.cos.bucket | quote }}
+            - name: TS_COS_BUCKETURL
+              value: {{ .Values.cos.downloadURL | default "" | quote }}
+            - name: TS_COS_PREFIX
+              value: {{ .Values.cos.prefix | default "" | quote }}
+            {{- else if eq $fs "aliyunOSS" }}
+            - name: TS_OSS_ACCESSKEYID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OSS_ACCESS_KEY_ID
+            - name: TS_OSS_ACCESSKEYSECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OSS_ACCESS_KEY_SECRET
+            - name: TS_OSS_ENDPOINT
+              value: {{ required "oss.endpoint is required when fileService=aliyunOSS" .Values.oss.endpoint | quote }}
+            - name: TS_OSS_BUCKETNAME
+              value: {{ required "oss.bucket is required when fileService=aliyunOSS" .Values.oss.bucket | quote }}
+            - name: TS_OSS_BUCKETURL
+              value: {{ .Values.oss.downloadURL | default "" | quote }}
+            {{- else if eq $fs "awsS3" }}
+            - name: TS_S3_ACCESSKEYID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_ACCESS_KEY_ID
+            - name: TS_S3_SECRETACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_SECRET_ACCESS_KEY
+            {{- if .Values.secrets.s3SessionToken }}
+            - name: TS_S3_SESSIONTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_SESSION_TOKEN
+            {{- end }}
+            - name: TS_S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | default "" | quote }}
+            - name: TS_S3_REGION
+              value: {{ required "s3.region is required when fileService=awsS3" .Values.s3.region | quote }}
+            - name: TS_S3_BUCKET
+              value: {{ required "s3.bucket is required when fileService=awsS3" .Values.s3.bucket | quote }}
+            - name: TS_S3_DOWNLOADURL
+              value: {{ .Values.s3.downloadURL | default "" | quote }}
+            - name: TS_S3_PREFIX
+              value: {{ .Values.s3.prefix | default "" | quote }}
+            - name: TS_S3_USEPATHSTYLE
+              value: {{ .Values.s3.usePathStyle | default false | quote }}
+            {{- else if eq $fs "qiniu" }}
+            - name: TS_QINIU_ACCESSKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: QINIU_ACCESS_KEY
+            - name: TS_QINIU_SECRETKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: QINIU_SECRET_KEY
+            - name: TS_QINIU_URL
+              value: {{ .Values.qiniu.downloadURL | default "" | quote }}
+            - name: TS_QINIU_BUCKETNAME
+              value: {{ required "qiniu.bucket is required when fileService=qiniu" .Values.qiniu.bucket | quote }}
+            {{- end }}
             - name: TS_EXTERNAL_BASEURL
               value: {{ include "octo.externalBaseURL" . | quote }}
             {{- if .Values.wukongim.externalIP }}

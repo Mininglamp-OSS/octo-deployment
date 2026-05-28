@@ -187,28 +187,35 @@ Redis addr (host:port).
 
 {{/*
 MinIO internal endpoint (host:port) used by server-side calls.
+Returns empty when cloud storage is active (endpoint is irrelevant).
 */}}
 {{- define "octo.minio.endpoint" -}}
 {{- if .Values.minio.enabled }}
 {{- printf "%s:%v" (include "octo.minio.fullname" .) (.Values.minio.service.apiPort | default 9000) }}
+{{- else if include "octo.isCloudStorage" . }}
+{{- "" }}
 {{- else }}
 {{- required "externalMinio.endpoint is required when minio.enabled=false" .Values.externalMinio.endpoint }}
 {{- end }}
 {{- end }}
 
 {{/*
-MinIO internal URL (http://host:port).
+MinIO internal URL (http://host:port). Returns empty when endpoint is empty (cloud storage mode).
 */}}
 {{- define "octo.minio.url" -}}
-{{- printf "http://%s" (include "octo.minio.endpoint" .) }}
+{{- $ep := include "octo.minio.endpoint" . -}}
+{{- if $ep -}}{{- printf "http://%s" $ep -}}{{- end -}}
 {{- end }}
 
 {{/*
-MinIO app user (IAM).
+MinIO app user (IAM). Only meaningful when fileService=minio.
+Returns empty string in cloud storage mode — callers are already guarded by octo.isCloudStorage.
 */}}
 {{- define "octo.minio.appUser" -}}
 {{- if .Values.minio.enabled }}
 {{- .Values.minio.auth.appUser | default "octo-app" }}
+{{- else if include "octo.isCloudStorage" . }}
+{{- "" }}
 {{- else }}
 {{- .Values.externalMinio.appUser | default "octo-app" }}
 {{- end }}
@@ -273,3 +280,12 @@ WuKongIM external WebSocket address.
 {{- $base | replace "https://" "wss://" | replace "http://" "ws://" }}/ws
 {{- end }}
 {{- end }}
+
+{{/*
+Returns "true" when server.config.fileService is a cloud provider (not "minio").
+Use with: {{- if include "octo.isCloudStorage" . }}
+*/}}
+{{- define "octo.isCloudStorage" -}}
+{{- $fs := (.Values.server.config | default dict).fileService | default "minio" -}}
+{{- if ne $fs "minio" -}}true{{- end -}}
+{{- end -}}
