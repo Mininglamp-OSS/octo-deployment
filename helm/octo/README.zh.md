@@ -230,7 +230,7 @@ wukongim:
 
 ### 云存储（可选）
 
-默认使用内置 MinIO（`server.config.fileService: minio`）。如需对接云厂商存储，将 `fileService` 改为对应值，并将 `minio.enabled` 置为 `false`：
+默认使用内置 MinIO（`server.config.fileService: minio`）。如需对接云厂商存储，将 `fileService` 改为对应值即可。切换为云存储后，内置 MinIO StatefulSet 会自动禁用，无需额外设置 `minio.enabled: false`（保留该配置也兼容）：
 
 | `fileService` 值 | 云服务 | 必填配置块 | 必填密钥 |
 |-----------------|--------|-----------|---------|
@@ -247,8 +247,7 @@ server:
   config:
     fileService: "tencentCOS"
 
-minio:
-  enabled: false
+# minio.enabled: false   # 可选 — fileService != minio 时内置 MinIO 自动禁用
 
 cos:
   region: "ap-guangzhou"
@@ -269,8 +268,7 @@ server:
   config:
     fileService: "aliyunOSS"
 
-minio:
-  enabled: false
+# minio.enabled: false   # 可选 — fileService != minio 时自动禁用
 
 oss:
   endpoint: "oss-cn-hangzhou.aliyuncs.com"

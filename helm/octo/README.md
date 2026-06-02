@@ -221,7 +221,7 @@ wukongim:
 
 ### Cloud storage (optional)
 
-The chart defaults to embedded MinIO (`server.config.fileService: minio`). To use a cloud object storage provider instead, set `fileService` to the matching value and `minio.enabled: false`:
+The chart defaults to embedded MinIO (`server.config.fileService: minio`). To use a cloud object storage provider instead, set `fileService` to the matching value. The bundled MinIO StatefulSet is automatically disabled when a cloud provider is active — you do not need to also set `minio.enabled: false` (though it is still accepted):
 
 | `fileService` value | Provider | Required config block | Required secret |
 |---------------------|----------|-----------------------|-----------------|
@@ -238,8 +238,7 @@ server:
   config:
     fileService: "tencentCOS"
 
-minio:
-  enabled: false
+# minio.enabled: false   # optional — bundled MinIO is auto-disabled when fileService != minio
 
 cos:
   region: "ap-guangzhou"
@@ -260,8 +259,7 @@ server:
   config:
     fileService: "aliyunOSS"
 
-minio:
-  enabled: false
+# minio.enabled: false   # optional — auto-disabled when fileService != minio
 
 oss:
   endpoint: "oss-cn-hangzhou.aliyuncs.com"
