@@ -1,4 +1,4 @@
-{{- if .Values.minio.enabled }}
+{{- if include "octo.minio.active" . }}
 apiVersion: v1
 kind: Service
 metadata:

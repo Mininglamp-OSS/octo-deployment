@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "octo.labels" . | nindent 4 }}
 data:
-  {{- if .Values.minio.enabled }}
+  {{- if include "octo.minio.active" . }}
   minio-octo-app-policy.json: |
     {
       "Version": "2012-10-17",

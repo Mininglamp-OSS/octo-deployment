@@ -190,10 +190,10 @@ MinIO internal endpoint (host:port) used by server-side calls.
 Returns empty when cloud storage is active (endpoint is irrelevant).
 */}}
 {{- define "octo.minio.endpoint" -}}
-{{- if .Values.minio.enabled }}
-{{- printf "%s:%v" (include "octo.minio.fullname" .) (.Values.minio.service.apiPort | default 9000) }}
-{{- else if include "octo.isCloudStorage" . }}
+{{- if include "octo.isCloudStorage" . }}
 {{- "" }}
+{{- else if .Values.minio.enabled }}
+{{- printf "%s:%v" (include "octo.minio.fullname" .) (.Values.minio.service.apiPort | default 9000) }}
 {{- else }}
 {{- required "externalMinio.endpoint is required when minio.enabled=false" .Values.externalMinio.endpoint }}
 {{- end }}
@@ -280,6 +280,16 @@ WuKongIM external WebSocket address.
 {{- $base | replace "https://" "wss://" | replace "http://" "ws://" }}/ws
 {{- end }}
 {{- end }}
+
+{{/*
+Returns "true" when the bundled MinIO StatefulSet is active.
+True only when minio.enabled=true AND fileService=minio.
+Setting fileService to a cloud provider implicitly disables bundled MinIO
+without requiring the user to also set minio.enabled=false.
+*/}}
+{{- define "octo.minio.active" -}}
+{{- if and (not (include "octo.isCloudStorage" .)) .Values.minio.enabled -}}true{{- end -}}
+{{- end -}}
 
 {{/*
 Returns "true" when server.config.fileService is a cloud provider (not "minio").

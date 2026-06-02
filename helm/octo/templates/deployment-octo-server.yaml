@@ -36,7 +36,7 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-octo-server.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
-        {{- if .Values.minio.enabled }}
+        {{- if include "octo.minio.active" . }}
         checksum/misc: {{ include (print $.Template.BasePath "/configmap-misc.yaml") . | sha256sum }}
         {{- end }}
       labels:
@@ -56,7 +56,7 @@ spec:
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.endpoint" . }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
         {{- end }}
-        {{- if .Values.minio.enabled }}
+        {{- if include "octo.minio.active" . }}
         - name: minio-bootstrap
           image: {{ include "octo.image" (dict "repo" .Values.minio.mcImage.repository "tag" .Values.minio.mcImage.tag "ctx" .) }}
           imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
@@ -379,7 +379,7 @@ spec:
             name: {{ include "octo.fullname" . }}-octo-server-config
         - name: logs
           emptyDir: {}
-        {{- if .Values.minio.enabled }}
+        {{- if include "octo.minio.active" . }}
         - name: minio-policy
           configMap:
             name: {{ include "octo.fullname" . }}-misc
