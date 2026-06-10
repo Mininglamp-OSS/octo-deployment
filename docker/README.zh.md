@@ -138,6 +138,16 @@ sudo ./setup.sh --non-interactive --ip 1.2.3.4 --up --force   # 显式 one-shot 
 sudo ./setup.sh --up
 ```
 
+启用可选的语音转写（speech）服务加 `--speech`：
+
+```bash
+./setup.sh --speech --domain octo.example.com --ip 1.2.3.4
+sudo ./setup.sh --up
+```
+
+`setup.sh --speech` 会自动生成 `SPEECH_DB_PASS`、`SPEECH_ADMIN_PASS`、`SPEECH_JWT_SECRET` 并写入 `docker/.env`。
+随后执行 `sudo ./setup.sh --up` 时，脚本会先启动 `octo-speech-admin`，创建应用，并将获取到的 `SPEECH_API_KEY` 自动回写到 `docker/.env` —— 无需手动操作管理界面。
+
 `setup.sh` 写出含轮换随机密钥的 `docker/.env` 和自动生成的 `OCTO_ADMIN_PWD`，并**在最后打印 admin URL + 密码**，免得你回头去 grep `.env`。这是从空 checkout 到 `(healthy)` 栈无需手改任何东西的唯一路径。
 
 栈起来后，通过 nginx 访问：`http://${OCTO_DOMAIN}:${OCTO_HTTP_PORT}`（默认 `http://localhost:28080`）。默认 `localhost` 在运行栈的主机上不需要任何额外的 DNS / `/etc/hosts` 配置。如果你把 `OCTO_DOMAIN` 改成真实域名，则每台访问 UI 的客户端机器都要能解析这个域名（真实 DNS，或者 `/etc/hosts` 里指向本机 IP）。

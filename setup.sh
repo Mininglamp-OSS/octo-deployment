@@ -31,6 +31,8 @@ DOMAIN="localhost"
 EXTERNAL_IP=""
 ENABLE_HTTPS=false
 ENABLE_SUMMARY=false
+ENABLE_SPEECH=false
+SPEECH_SET_VIA_CLI=false
 NON_INTERACTIVE=false
 FORCE_OVERWRITE=false
 RUN_UP=false
@@ -764,6 +766,7 @@ while [[ $# -gt 0 ]]; do
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
     --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
+    --speech)   ENABLE_SPEECH=true; SPEECH_SET_VIA_CLI=true; shift ;;
     --up)         RUN_UP=true; shift ;;
     --smoke-test) RUN_VERIFY=true; shift ;;
     # `--verify` is the original spelling, retained as a deprecated alias
@@ -778,7 +781,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>]
-                [--https] [--summary] [--up]
+                [--https] [--summary] [--speech] [--up]
        setup.sh --smoke-test (or --verify, deprecated alias)
        setup.sh --uninstall
 
@@ -795,6 +798,10 @@ Generation:
                       See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
+  --speech            Enable the optional speech transcription service
+                      (COMPOSE_PROFILES+=speech). setup.sh --up will
+                      automatically bootstrap the speech-admin App and
+                      write SPEECH_API_KEY into docker/.env.
   --up                START-ONLY subcommand (peer of --smoke-test /
                       --uninstall): requires an existing docker/.env and
                       runs `docker compose up -d --wait --wait-timeout
@@ -847,7 +854,7 @@ Smoke test / tear-down (work against an already-existing docker/.env):
   --uninstall         Tear down the stack. Interactively offers three
                       granularity levels (full / data-only / containers-only).
 
-When any of --domain / --ip / --https / --summary is given without
+When any of --domain / --ip / --https / --summary / --speech is given without
 --non-interactive, setup.sh treats the flags as your decisions and runs
 non-interactively so the documented one-liner forms (see docker/README.md)
 work as written. --up is a start-only subcommand (peer of --smoke-test
@@ -1000,6 +1007,23 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     # broken matter for a healthy one.
     fail "no 200 from matter — check 'docker compose logs matter'"
     ((fails++)) || true
+  fi
+
+  # Speech health probe (only when speech profile is active)
+  CURRENT_PROFILES_SMOKE="$(grep '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null | cut -d= -f2- || true)"
+  if [[ "${CURRENT_PROFILES_SMOKE}" == *"speech"* ]]; then
+    step "octo-speech nginx route (GET ${BASE_URL}/speech/v1/speech/config — 200 or 401 = route OK)"
+    # The speech API has no unauthenticated health endpoint.
+    # /v1/speech/config returns 200 with a valid API key or 401 without one.
+    # Either response proves nginx → octo-speech routing is wired correctly.
+    SPEECH_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      "${BASE_URL}/speech/v1/speech/config" 2>/dev/null || echo '000')"
+    if [[ "${SPEECH_PROBE_CODE}" == "200" || "${SPEECH_PROBE_CODE}" == "401" ]]; then
+      ok
+    else
+      fail "unexpected ${SPEECH_PROBE_CODE} from octo-speech route — check 'docker compose logs octo-speech' and nginx conf"
+      ((fails++)) || true
+    fi
   fi
 
   step "MinIO via nginx (GET ${BASE_URL}/minio/health/live)"
@@ -1493,7 +1517,8 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
      || "${IP_SET_VIA_CLI}" == "true" \
      || "${HTTPS_SET_VIA_CLI}" == "true" \
-     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
+     || "${SUMMARY_SET_VIA_CLI}" == "true" \
+     || "${SPEECH_SET_VIA_CLI}" == "true" ]]; then
     info "CLI flags supplied; switching to non-interactive mode."
     info "(Pass no flags, or only --force, to get the interactive prompts.)"
     NON_INTERACTIVE=true
@@ -1658,6 +1683,94 @@ preflight_existing_octo
 # fix is to short-circuit here: validate that .env exists, then delegate
 # straight to compose_up_and_wait and exit. No prompt, no overwrite, no
 # secret regeneration on this code path — ever.
+
+# ── Speech bootstrap (--speech path) ─────────────────────────────────────
+# When the speech profile is active we bootstrap octo-speech-admin first
+# so octo-server can read SPEECH_API_KEY at start time.
+# $1 = admin_port  (nginx-proxied port, 28091) — used only for display
+# $2 = direct_port (container direct port, 18781) — used for API calls
+#      This avoids polling through nginx which hasn't started yet.
+_run_speech_bootstrap() {
+  local admin_port="$1"
+  local direct_port="${2:-18781}"
+  info "Starting mysql first (speech-admin needs the database)…"
+  ( cd "${DOCKER_DIR}" && ${CC} up -d mysql ) || true
+  info "Waiting for mysql to be healthy (max 90 s)…"
+  local _mi
+  for _mi in $(seq 1 90); do
+    local _ms
+    _ms="$( ( cd "${DOCKER_DIR}" && ${CC} ps mysql --format '{{.Health}}' 2>/dev/null || true ) | head -1)"
+    if [[ "${_ms}" == "healthy" ]]; then
+      info "mysql is healthy — starting speech services…"; break
+    fi
+    sleep 1
+  done
+  info "Starting speech services (octo-speech, octo-speech-admin)…"
+  ( cd "${DOCKER_DIR}" && ${CC} up -d octo-speech octo-speech-admin ) || true
+  info "Waiting for speech-admin to be ready on direct port ${direct_port} (max 60 s)…"
+  local ready=false
+  for _si in $(seq 1 60); do
+    local _code
+    _code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 \
+      "http://localhost:${direct_port}/api/login" 2>/dev/null || echo 000)"
+    if [[ "${_code}" != "000" ]]; then
+      ready=true; break
+    fi
+    sleep 1
+  done
+  if [[ "${ready}" != "true" ]]; then
+    warn "speech-admin not ready in 60 s — SPEECH_API_KEY will remain empty."
+    return 0
+  fi
+  info "speech-admin ready — creating App 'octo-default' (cookie+CSRF auth)…"
+  local sp="$(env_get SPEECH_ADMIN_PASS '')"
+  local _cookie_jar
+  _cookie_jar="$(mktemp)"
+  # speech-admin uses cookie-based session + CSRF token (not Bearer)
+  local login_resp
+  login_resp="$(curl -sS --max-time 10 -c "${_cookie_jar}" -b "${_cookie_jar}" \
+    -X POST "http://localhost:${direct_port}/api/login" \
+    -H 'Content-Type: application/json' \
+    --data-raw "{\"username\":\"admin\",\"password\":\"${sp}\"}" 2>/dev/null || true)"
+  local login_status
+  login_status="$(printf '%s' "${login_resp}" | python3 -c \
+    'import json,sys; d=json.loads(sys.stdin.read() or "{}"); print(d.get("status",0))' 2>/dev/null || true)"
+  if [[ "${login_status}" != "200" ]]; then
+    warn "speech-admin login failed (response: ${login_resp:0:200}) — skipping API key bootstrap."
+    rm -f "${_cookie_jar}"; return 0
+  fi
+  # extract CSRF token from cookie jar
+  local csrf
+  csrf="$(grep -i 'csrf_token' "${_cookie_jar}" | awk '{print $NF}' | head -1 || true)"
+  local app_resp api_key
+  app_resp="$(curl -sS --max-time 10 \
+    -c "${_cookie_jar}" -b "${_cookie_jar}" \
+    -X POST "http://localhost:${direct_port}/api/apps" \
+    -H 'Content-Type: application/json' \
+    -H "X-CSRF-Token: ${csrf}" \
+    --data-raw '{"app_name":"octo-default"}' 2>/dev/null || true)"
+  rm -f "${_cookie_jar}"
+  api_key="$(printf '%s' "${app_resp}" | python3 -c '
+import json,sys
+try:
+  d=json.loads(sys.stdin.read() or "{}")
+except:
+  sys.exit(0)
+def g(o,k): return o.get(k) or (o.get("data") or {}).get(k) or ""
+print(g(d,"api_key") or g(d,"apiKey"))
+' 2>/dev/null || true)"
+  if [[ -n "${api_key}" ]]; then
+    if grep -q '^SPEECH_API_KEY=' "${ENV_OUT}"; then
+      sed_inplace "s|^SPEECH_API_KEY=.*|SPEECH_API_KEY=${api_key}|" "${ENV_OUT}"
+    else
+      printf 'SPEECH_API_KEY=%s\n' "${api_key}" >> "${ENV_OUT}"
+    fi
+    info "SPEECH_API_KEY written to docker/.env."
+  else
+    warn "Could not retrieve API key (response: ${app_resp:0:200})."
+  fi
+}
+
 if [[ "${RUN_UP}" == "true" ]]; then
   # S4 (R7 / YUJ-1020): hard EUID guard at the top of `--up`. We chown
   # `.env` back to `root:root 600` once compose is healthy (below), so
@@ -1723,6 +1836,12 @@ if [[ "${RUN_UP}" == "true" ]]; then
   info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
   info "A '.' will print every 5s while we wait so you know the script is still alive."
 
+
+  SPEECH_PROFILE_ACTIVE="$(env_get COMPOSE_PROFILES '' | grep -o 'speech' || true)"
+  if [[ -n "${SPEECH_PROFILE_ACTIVE}" ]]; then
+    _run_speech_bootstrap "$(env_get SPEECH_ADMIN_PORT 28091)" "$(env_get SPEECH_ADMIN_DIRECT_PORT 18781)"
+  fi
+
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
 
@@ -1777,10 +1896,16 @@ if [[ "${RUN_UP}" == "true" ]]; then
     echo ""
     printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
     printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Web URL:        %s%s%s\n' "${BOLD}" "${ADMIN_URL%/admin/}/" "${RESET}"
     printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
     printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
-    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s%s%s\n' "${BOLD}" "$(env_get OCTO_ADMIN_PWD '')" "${RESET}"
     echo ""
+    if [[ "$(env_get COMPOSE_PROFILES '')" == *"speech"* ]]; then
+      printf '  Speech Admin:   %shttp://%s:%s/  (admin / %s)%s\n' \
+        "${BOLD}" "${DOMAIN}" "$(env_get SPEECH_ADMIN_PORT '28091')" \
+        "$(env_get SPEECH_ADMIN_PASS '')" "${RESET}"
+    fi
     info "Next step:"
     echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"
     echo ""
@@ -1884,6 +2009,13 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
     [yY]|[yY][eE][sS]) ENABLE_SUMMARY=true ;;
     *) ENABLE_SUMMARY=false ;;
   esac
+
+  read -rp "Enable speech (voice transcription) service? [y/N]: " user_speech
+  case "${user_speech}" in
+    [yY]|[yY][eE][sS]) ENABLE_SPEECH=true ;;
+    *) ENABLE_SPEECH=false ;;
+  esac
+
 else
   # Non-interactive: auto-detect IP if not provided via --ip
   if [[ -z "${EXTERNAL_IP}" ]]; then
@@ -1896,6 +2028,7 @@ info "Domain:     ${DOMAIN}"
 info "External IP: ${EXTERNAL_IP}"
 info "HTTPS:      ${ENABLE_HTTPS}"
 info "Summary:    ${ENABLE_SUMMARY}"
+info "Speech:     ${ENABLE_SPEECH}"
 
 # ── Generate secrets ────────────────────────────────────────────────────────
 info "Generating random secrets…"
@@ -1906,6 +2039,9 @@ OCTO_MINIO_APP_PASSWORD="$(openssl rand -hex 24)"
 OCTO_MATTER_DB_PASSWORD="$(openssl rand -hex 16)"
 OCTO_SUMMARY_DB_PASSWORD="$(openssl rand -hex 16)"
 OCTO_SUMMARY_READER_PASSWORD="$(openssl rand -hex 16)"
+SPEECH_DB_PASS="$(openssl rand -hex 16)"
+SPEECH_ADMIN_PASS="$(openssl rand -hex 16)"
+SPEECH_JWT_SECRET="$(openssl rand -hex 32)"
 OCTO_MASTER_KEY="$(openssl rand -hex 16)"
 OCTO_NOTIFY_INTERNAL_TOKEN="$(openssl rand -hex 32)"
 OCTO_WUKONGIM_MANAGER_TOKEN="$(openssl rand -hex 32)"
@@ -1969,15 +2105,35 @@ sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_O
 # diffing against R6 sees the intentional removal.
 # (was: sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=...|" ...)
 
-# Summary setting
+# Summary / speech profile activation.
+# Build the COMPOSE_PROFILES value from whichever optional services the
+# operator enabled. The two profiles are independent but can coexist as a
+# comma-separated list (e.g. "summary,speech").
+_PROFILES=""
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
+  _PROFILES="summary"
+fi
+if [[ "${ENABLE_SPEECH}" == "true" ]]; then
+  _PROFILES="${_PROFILES:+${_PROFILES},}speech"
+fi
+if [[ -n "${_PROFILES}" ]]; then
   if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+    sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${_PROFILES}|" "${ENV_OUT}"
   elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
+    sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${_PROFILES}|" "${ENV_OUT}"
   else
-    printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
+    printf '\n# Activate optional services via Docker Compose profiles.\nCOMPOSE_PROFILES=%s\n' "${_PROFILES}" >> "${ENV_OUT}"
   fi
+fi
+
+# Speech secrets — only written when --speech was requested.
+if [[ "${ENABLE_SPEECH}" == "true" ]]; then
+  sed_inplace "s|^# *SPEECH_DB_PASS=.*|SPEECH_DB_PASS=${SPEECH_DB_PASS}|" "${ENV_OUT}"
+  sed_inplace "s|^# *SPEECH_ADMIN_PASS=.*|SPEECH_ADMIN_PASS=${SPEECH_ADMIN_PASS}|" "${ENV_OUT}"
+  sed_inplace "s|^# *SPEECH_JWT_SECRET=.*|SPEECH_JWT_SECRET=${SPEECH_JWT_SECRET}|" "${ENV_OUT}"
+  # SPEECH_API_KEY is intentionally left empty here; --up will bootstrap
+  # octo-speech-admin and fill it in automatically.
+  sed_inplace "s|^# *SPEECH_API_KEY=.*|SPEECH_API_KEY=|" "${ENV_OUT}"
 fi
 
 # ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
@@ -2175,6 +2331,9 @@ fi
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
 fi
+if [[ "${ENABLE_SPEECH}" == "true" ]]; then
+  info "Speech service enabled. SPEECH_API_KEY will be auto-filled by --up."
+fi
 
 # R6 (YUJ-1020): we are always on the generation path here (--up exits
 # earlier as a start-only subcommand). Print the canonical 3-step next-
@@ -2253,6 +2412,11 @@ if [[ "${RUN_UP}" == "true" ]]; then
   info "Starting stack (project: ${PROJECT_NAME_VALUE}) — waiting up to ${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}s for all services to become healthy."
   info "A '.' will print every 5s while we wait so you know the script is still alive."
 
+  SPEECH_PROFILE_ACTIVE="$(env_get COMPOSE_PROFILES '' | grep -o 'speech' || true)"
+  if [[ -n "${SPEECH_PROFILE_ACTIVE}" ]]; then
+    _run_speech_bootstrap "$(env_get SPEECH_ADMIN_PORT 28091)" "$(env_get SPEECH_ADMIN_DIRECT_PORT 18781)"
+  fi
+
   if compose_up_and_wait "${CC}" "${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}"; then
     info "All services reached healthy."
     # R9 (YUJ-1068 / Jerry-Xin PR#36 W2): same fatal-on-failure
@@ -2271,9 +2435,15 @@ if [[ "${RUN_UP}" == "true" ]]; then
     echo ""
     printf '  Project:        %s%s%s\n' "${BOLD}" "${PROJECT_NAME_VALUE}" "${RESET}"
     printf '  Domain:         %s%s%s\n' "${BOLD}" "${DOMAIN}" "${RESET}"
+    printf '  Web URL:        %s%s%s\n' "${BOLD}" "${ADMIN_URL%/admin/}/" "${RESET}"
     printf '  Admin URL:      %s%s%s\n' "${BOLD}" "${ADMIN_URL}" "${RESET}"
     printf '  Admin user:     %ssuperAdmin%s\n' "${BOLD}" "${RESET}"
-    printf '  Admin password: %s(stored in docker/.env — read with sudo)%s\n' "${BOLD}" "${RESET}"
+    printf '  Admin password: %s%s%s\n' "${BOLD}" "$(env_get OCTO_ADMIN_PWD '')" "${RESET}"
+    if [[ "$(env_get COMPOSE_PROFILES '')" == *"speech"* ]]; then
+      printf '  Speech Admin:   %shttp://%s:%s/  (admin / %s)%s\n' \
+        "${BOLD}" "${DOMAIN}" "$(env_get SPEECH_ADMIN_PORT '28091')" \
+        "$(env_get SPEECH_ADMIN_PASS '')" "${RESET}"
+    fi
     echo ""
     info "Next step:"
     echo "  sudo ./setup.sh --smoke-test    # admin login + presign PUT end-to-end check"

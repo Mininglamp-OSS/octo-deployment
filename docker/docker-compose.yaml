@@ -168,6 +168,7 @@ services:
       OCTO_MATTER_DB_PASSWORD: ${OCTO_MATTER_DB_PASSWORD:-matter}
       OCTO_SUMMARY_DB_PASSWORD: ${OCTO_SUMMARY_DB_PASSWORD:-summary}
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
+      SPEECH_DB_PASS: ${SPEECH_DB_PASS:-speech}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
@@ -462,7 +463,7 @@ services:
     # has not been stable across pre-2.x builds. Bump deliberately after
     # validating the new tag against `wk.yaml` (tokenAuthOn) and the
     # WK_MANAGERTOKEN binding below. Override via .env -> OCTO_WK_IMAGE.
-    image: ${OCTO_WK_IMAGE:-wukongim/wukongim:v2.2.4-20260313}
+    image: ${OCTO_WK_IMAGE:-wukongim/wukongim:v2.2.5-20260422}
     restart: unless-stopped
     environment:
       WK_MODE: ${WK_MODE:-debug}
@@ -695,6 +696,11 @@ services:
       # Leave OCTO_ADMIN_PWD empty in .env to skip auto-bootstrap
       # (create admin manually via API).
       TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
+      # --- octo-speech integration.
+      # --- SPEECH_SERVICE_URL: internal Docker DNS address of octo-speech.
+      # --- SPEECH_API_KEY: API key created in octo-speech-admin.
+      SPEECH_SERVICE_URL: ${SPEECH_SERVICE_URL:-http://octo-speech:8780}
+      SPEECH_API_KEY: ${SPEECH_API_KEY:-}
     depends_on:
       preflight:
         condition: service_completed_successfully
@@ -754,6 +760,8 @@ services:
       # 28443 (see .env.example). See docker/certs/README.md for the
       # full procedure.
       # - "${OCTO_HTTPS_PORT:-28443}:443"
+      # speech-admin management UI port (only meaningful when speech profile is active)
+      - "${OCTO_NGINX_BIND:-0.0.0.0}:${SPEECH_ADMIN_PORT:-28091}:28091"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/templates:ro
@@ -982,3 +990,52 @@ services:
       # window does not wedge the worker into `(unhealthy)` while the
       # mysql init script is still finishing.
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Speech: octo-speech + octo-speech-admin  (profiles: speech)
+  # ---------------------------------------------------------------------------
+  # Activate with ./setup.sh --speech or set COMPOSE_PROFILES=speech in
+  # docker/.env.  Both services are gated behind the speech profile so a
+  # plain `docker compose up -d` never starts them.
+  octo-speech:
+    image: ${OCTO_SPEECH_IMAGE:-mininglamposs/octo-speech:latest}
+    restart: unless-stopped
+    profiles: ["speech"]
+    environment:
+      SPEECH_DB_DSN: "octo_speech:${SPEECH_DB_PASS}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      VOICE_LITELLM_URL: "${VOICE_LITELLM_URL:-https://llm-gateway.mlamp.cn/v1}"
+      VOICE_LITELLM_KEY: "${VOICE_LITELLM_KEY:-${LLM_API_KEY:-}}"
+      VOICE_ENGINE: "${VOICE_ENGINE:-qwen}"
+      VOICE_QWEN_MODELS: "${VOICE_QWEN_MODELS:-qwen3.5-omni-plus}"
+      VOICE_GPT_MODELS: "${VOICE_GPT_MODELS:-gpt-4o-mini-transcribe}"
+      VOICE_MODELS: "${VOICE_MODELS:-gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-2.5-pro}"
+      VOICE_MAX_DURATION: "${VOICE_MAX_DURATION:-60}"
+      VOICE_MAX_FILE_SIZE: "${VOICE_MAX_FILE_SIZE:-3145728}"
+      VOICE_LITELLM_TIMEOUT: "${VOICE_LITELLM_TIMEOUT:-30}"
+      VOICE_TOTAL_TIMEOUT: "${VOICE_TOTAL_TIMEOUT:-45}"
+      VOICE_EDIT_MODE: "${VOICE_EDIT_MODE:-edit}"
+      VOICE_LOCAL_ENABLED: "${VOICE_LOCAL_ENABLED:-false}"
+      VOICE_LOCAL_TIMEOUT_MS: "${VOICE_LOCAL_TIMEOUT_MS:-8000}"
+    networks:
+      - octo-net
+    healthcheck:
+      disable: true
+
+  octo-speech-admin:
+    image: ${OCTO_SPEECH_ADMIN_IMAGE:-mininglamposs/octo-speech-admin:latest}
+    restart: unless-stopped
+    profiles: ["speech"]
+    environment:
+      SPEECH_DB_DSN: "octo_speech:${SPEECH_DB_PASS}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      ADMIN_USERNAME: "admin"
+      ADMIN_PASSWORD: "${SPEECH_ADMIN_PASS}"
+      ADMIN_JWT_SECRET: "${SPEECH_JWT_SECRET}"
+      ADMIN_SECURE_COOKIE: "false"
+    # Direct host port so _run_speech_bootstrap can reach the admin API
+    # before nginx starts. 127.0.0.1 binding keeps it local-only.
+    ports:
+      - "127.0.0.1:${SPEECH_ADMIN_DIRECT_PORT:-18781}:8781"
+    networks:
+      - octo-net
+    healthcheck:
+      disable: true

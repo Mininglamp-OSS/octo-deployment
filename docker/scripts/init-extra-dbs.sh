@@ -40,6 +40,7 @@ set -euo pipefail
 : "${OCTO_MATTER_DB_PASSWORD:=matter}"
 : "${OCTO_SUMMARY_DB_PASSWORD:=summary}"
 : "${OCTO_SUMMARY_READER_PASSWORD:=summary_reader}"
+: "${SPEECH_DB_PASS:=speech}"
 : "${MYSQL_DATABASE:=octo}"
 
 validate_password() {
@@ -117,6 +118,16 @@ validate_password  OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD"
 reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"      "matter"
 reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
 reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
+# SPEECH_DB_PASS: only validate when speech profile is active (non-default value set).
+# When speech is disabled, SPEECH_DB_PASS defaults to 'speech'; skip validation so
+# that the init script does not FATAL and block matter/summary DB creation.
+if [[ "${SPEECH_DB_PASS}" != "speech" ]] && [[ -n "${SPEECH_DB_PASS}" ]]; then
+  validate_password  SPEECH_DB_PASS  "$SPEECH_DB_PASS"
+  reject_literal_default SPEECH_DB_PASS  "$SPEECH_DB_PASS"  "speech"
+  SPEECH_ENABLED=true
+else
+  SPEECH_ENABLED=false
+fi
 # MYSQL_ROOT_PASSWORD is interpolated directly into TS_DB_MYSQLADDR /
 # DM_MYSQL_DSN in docker-compose.yaml (Go-MySQL DSN format). Special
 # characters such as `@`, `#`, `!`, `$`, `&`, `:`, `/` make the DSN
@@ -164,7 +175,25 @@ ALTER USER IF EXISTS      'summary_reader'@'%' IDENTIFIED BY '${OCTO_SUMMARY_REA
 GRANT ALL PRIVILEGES ON octo_matter.*      TO 'matter'@'%';
 GRANT ALL PRIVILEGES ON octo_summary.*     TO 'summary'@'%';
 GRANT SELECT         ON \`${MYSQL_DATABASE}\`.* TO 'summary_reader'@'%';
+
+-- Speech schema and user (only when SPEECH_ENABLED=true, i.e. SPEECH_DB_PASS is set)
+-- Conditional logic handled in bash after this heredoc; placeholder kept for
+-- documentation. Actual CREATE/GRANT is executed separately below.
+
 FLUSH PRIVILEGES;
 SQL
+
+# Speech schema + user: only create when speech profile is active
+if [[ "${SPEECH_ENABLED}" == "true" ]]; then
+  mysql --defaults-extra-file=<(printf '[client]\npassword=%s\n' "${MYSQL_ROOT_PASSWORD}") \
+    -uroot -e "
+CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS 'octo_speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASS}';
+ALTER USER IF EXISTS      'octo_speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASS}';
+GRANT ALL PRIVILEGES ON octo_speech.* TO 'octo_speech'@'%';
+FLUSH PRIVILEGES;
+" 2>/dev/null
+  echo "[init-extra-dbs] created octo_speech schema and user"
+fi
 
 echo "[init-extra-dbs] created octo_matter + octo_summary + service users (scoped to \`${MYSQL_DATABASE}\`)"
