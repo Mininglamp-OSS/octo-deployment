@@ -244,6 +244,19 @@ To enable the optional LLM summary services, add `--summary`:
 sudo ./setup.sh --up
 ```
 
+To enable the optional speech (voice transcription) services, add `--speech`:
+
+```bash
+./setup.sh --speech --domain octo.example.com --ip 1.2.3.4
+sudo ./setup.sh --up
+```
+
+`setup.sh --speech` auto-generates `SPEECH_DB_PASS`, `SPEECH_ADMIN_PASS`, and
+`SPEECH_JWT_SECRET` in `docker/.env`. When you subsequently run `sudo ./setup.sh
+--up`, the script bootstraps `octo-speech-admin`, creates an app, and writes the
+resulting `SPEECH_API_KEY` back into `docker/.env` automatically — no manual
+admin-UI step required.
+
 `setup.sh` writes `docker/.env` with rotated random secrets and a
 generated `OCTO_ADMIN_PWD`, then **prints the admin URL + password at
 the end of the run** so you do not have to grep `.env` for them. It is
@@ -569,6 +582,7 @@ TCP port (28080) in their firewall.**
 | MinIO console | `29001` | `127.0.0.1` | admin only; reach via SSH tunnel (see below) |
 | MySQL | `23306` | `127.0.0.1` | backing service |
 | Redis | `26379` | `127.0.0.1` | backing service |
+| speech-admin UI *(speech profile)* | `28091` | `127.0.0.1` | speech app/key management console — loopback-only by default; reached via SSH tunnel. Set `OCTO_SPEECH_ADMIN_BIND=0.0.0.0` **and** open port `28091` in your firewall to expose it (not recommended on public hosts). |
 
 The MinIO console is **not** proxied through nginx by default.
 Earlier revisions exposed it under `/minio-console/`, which put the
