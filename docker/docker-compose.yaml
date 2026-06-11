@@ -760,8 +760,12 @@ services:
       # 28443 (see .env.example). See docker/certs/README.md for the
       # full procedure.
       # - "${OCTO_HTTPS_PORT:-28443}:443"
-      # speech-admin management UI port (only meaningful when speech profile is active)
-      - "${OCTO_NGINX_BIND:-0.0.0.0}:${SPEECH_ADMIN_PORT:-28091}:28091"
+      # speech-admin management UI port — loopback-only by default so non-speech
+      # deployments never expose 28091 externally. When speech is active nginx
+      # proxies to octo-speech-admin via speech-admin.conf.template.
+      # To expose externally: set OCTO_SPEECH_ADMIN_BIND=0.0.0.0 in .env AND
+      # open port SPEECH_ADMIN_PORT (28091) on your firewall.
+      - "${OCTO_SPEECH_ADMIN_BIND:-127.0.0.1}:${SPEECH_ADMIN_PORT:-28091}:28091"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/templates:ro
@@ -1001,6 +1005,11 @@ services:
     image: ${OCTO_SPEECH_IMAGE:-mininglamposs/octo-speech:latest}
     restart: unless-stopped
     profiles: ["speech"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      preflight:
+        condition: service_completed_successfully
     environment:
       SPEECH_DB_DSN: "octo_speech:${SPEECH_DB_PASS}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
       VOICE_LITELLM_URL: "${VOICE_LITELLM_URL:-https://llm-gateway.mlamp.cn/v1}"
@@ -1025,6 +1034,11 @@ services:
     image: ${OCTO_SPEECH_ADMIN_IMAGE:-mininglamposs/octo-speech-admin:latest}
     restart: unless-stopped
     profiles: ["speech"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      preflight:
+        condition: service_completed_successfully
     environment:
       SPEECH_DB_DSN: "octo_speech:${SPEECH_DB_PASS}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
       ADMIN_USERNAME: "admin"

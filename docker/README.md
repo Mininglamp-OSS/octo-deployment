@@ -582,6 +582,7 @@ TCP port (28080) in their firewall.**
 | MinIO console | `29001` | `127.0.0.1` | admin only; reach via SSH tunnel (see below) |
 | MySQL | `23306` | `127.0.0.1` | backing service |
 | Redis | `26379` | `127.0.0.1` | backing service |
+| speech-admin UI *(speech profile)* | `28091` | `127.0.0.1` | speech app/key management console — loopback-only by default; reached via SSH tunnel. Set `OCTO_SPEECH_ADMIN_BIND=0.0.0.0` **and** open port `28091` in your firewall to expose it (not recommended on public hosts). |
 
 The MinIO console is **not** proxied through nginx by default.
 Earlier revisions exposed it under `/minio-console/`, which put the

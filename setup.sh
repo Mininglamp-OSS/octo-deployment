@@ -1012,17 +1012,23 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # Speech health probe (only when speech profile is active)
   CURRENT_PROFILES_SMOKE="$(grep '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null | cut -d= -f2- || true)"
   if [[ "${CURRENT_PROFILES_SMOKE}" == *"speech"* ]]; then
-    step "octo-speech nginx route (GET ${BASE_URL}/speech/v1/speech/config — 200 or 401 = route OK)"
-    # The speech API has no unauthenticated health endpoint.
-    # /v1/speech/config returns 200 with a valid API key or 401 without one.
-    # Either response proves nginx → octo-speech routing is wired correctly.
-    SPEECH_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-      "${BASE_URL}/speech/v1/speech/config" 2>/dev/null || echo '000')"
-    if [[ "${SPEECH_PROBE_CODE}" == "200" || "${SPEECH_PROBE_CODE}" == "401" ]]; then
-      ok
-    else
-      fail "unexpected ${SPEECH_PROBE_CODE} from octo-speech route — check 'docker compose logs octo-speech' and nginx conf"
+    step "octo-speech nginx route (GET ${BASE_URL}/speech/v1/speech/config — expect 200 with valid API key)"
+    # Bootstrap should have written SPEECH_API_KEY into docker/.env.
+    # A 401 here means the key is missing or wrong — treat it as a failure.
+    SPEECH_API_KEY_VAL="$(env_get SPEECH_API_KEY '')"
+    if [[ -z "${SPEECH_API_KEY_VAL}" ]]; then
+      fail "SPEECH_API_KEY is empty in docker/.env — speech bootstrap did not complete successfully"
       ((fails++)) || true
+    else
+      SPEECH_PROBE_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        -H "Authorization: Bearer ${SPEECH_API_KEY_VAL}" \
+        "${BASE_URL}/speech/v1/speech/config" 2>/dev/null || echo '000')"
+      if [[ "${SPEECH_PROBE_CODE}" == "200" ]]; then
+        ok
+      else
+        fail "unexpected ${SPEECH_PROBE_CODE} from octo-speech route (expected 200) — check 'docker compose logs octo-speech' and nginx conf"
+        ((fails++)) || true
+      fi
     fi
   fi
 
@@ -1697,16 +1703,50 @@ _run_speech_bootstrap() {
   ( cd "${DOCKER_DIR}" && ${CC} up -d mysql ) || true
   info "Waiting for mysql to be healthy (max 90 s)…"
   local _mi
+  local mysql_healthy=false
   for _mi in $(seq 1 90); do
     local _ms
     _ms="$( ( cd "${DOCKER_DIR}" && ${CC} ps mysql --format '{{.Health}}' 2>/dev/null || true ) | head -1)"
     if [[ "${_ms}" == "healthy" ]]; then
-      info "mysql is healthy — starting speech services…"; break
+      info "mysql is healthy — starting speech services…"
+      mysql_healthy=true; break
     fi
     sleep 1
   done
+  if [[ "${mysql_healthy}" != "true" ]]; then
+    err "mysql did not become healthy within 90 s — speech bootstrap failed."
+    return 1
+  fi
+  # Idempotently create the octo_speech DB and user.
+  # init-extra-dbs.sh only runs on first mysql volume init, so on an existing
+  # deployment this step ensures the schema exists before the speech services start.
+  info "Ensuring octo_speech database and user exist (idempotent)…"
+  local db_pass
+  db_pass="$(env_get SPEECH_DB_PASS '')"
+  if [[ -z "${db_pass}" ]]; then
+    err "SPEECH_DB_PASS is empty — cannot create octo_speech database."
+    return 1
+  fi
+  local root_pass
+  root_pass="$(env_get MYSQL_ROOT_PASSWORD '')"
+  # Use -e MYSQL_PWD instead of -p"..." so the password never appears in
+  # the process cmdline (consistent with init-extra-dbs.sh).
+  if ! ( cd "${DOCKER_DIR}" && ${CC} exec -T \
+    -e MYSQL_PWD="${root_pass}" mysql mysql -uroot \
+    -e "CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
+        CREATE USER IF NOT EXISTS 'octo_speech'@'%' IDENTIFIED BY '${db_pass}'; \
+        ALTER USER IF EXISTS 'octo_speech'@'%' IDENTIFIED BY '${db_pass}'; \
+        GRANT ALL PRIVILEGES ON octo_speech.* TO 'octo_speech'@'%'; \
+        FLUSH PRIVILEGES;" 2>/dev/null ); then
+    err "Failed to create octo_speech database/user — speech bootstrap failed."
+    return 1
+  fi
+  info "octo_speech database ready."
   info "Starting speech services (octo-speech, octo-speech-admin)…"
-  ( cd "${DOCKER_DIR}" && ${CC} up -d octo-speech octo-speech-admin ) || true
+  if ! ( cd "${DOCKER_DIR}" && ${CC} up -d octo-speech octo-speech-admin ); then
+    err "Failed to start speech services — speech bootstrap failed."
+    return 1
+  fi
   info "Waiting for speech-admin to be ready on direct port ${direct_port} (max 60 s)…"
   local ready=false
   for _si in $(seq 1 60); do
@@ -1719,8 +1759,8 @@ _run_speech_bootstrap() {
     sleep 1
   done
   if [[ "${ready}" != "true" ]]; then
-    warn "speech-admin not ready in 60 s — SPEECH_API_KEY will remain empty."
-    return 0
+    err "speech-admin not ready in 60 s — speech bootstrap failed."
+    return 1
   fi
   info "speech-admin ready — creating App 'octo-default' (cookie+CSRF auth)…"
   local sp="$(env_get SPEECH_ADMIN_PASS '')"
@@ -1736,8 +1776,8 @@ _run_speech_bootstrap() {
   login_status="$(printf '%s' "${login_resp}" | python3 -c \
     'import json,sys; d=json.loads(sys.stdin.read() or "{}"); print(d.get("status",0))' 2>/dev/null || true)"
   if [[ "${login_status}" != "200" ]]; then
-    warn "speech-admin login failed (response: ${login_resp:0:200}) — skipping API key bootstrap."
-    rm -f "${_cookie_jar}"; return 0
+    err "speech-admin login failed (response: ${login_resp:0:200}) — speech bootstrap failed."
+    rm -f "${_cookie_jar}"; return 1
   fi
   # extract CSRF token from cookie jar
   local csrf
@@ -1766,8 +1806,13 @@ print(g(d,"api_key") or g(d,"apiKey"))
       printf 'SPEECH_API_KEY=%s\n' "${api_key}" >> "${ENV_OUT}"
     fi
     info "SPEECH_API_KEY written to docker/.env."
+  elif [[ -n "$(env_get SPEECH_API_KEY '')" ]]; then
+    # Already bootstrapped on a previous --up run; app creation returned no key
+    # (e.g. duplicate-name response). Existing key is still valid — skip.
+    info "SPEECH_API_KEY already present in docker/.env — skipping key creation."
   else
-    warn "Could not retrieve API key (response: ${app_resp:0:200})."
+    err "Could not retrieve API key (response: ${app_resp:0:200}) — speech bootstrap failed."
+    return 1
   fi
 }
 
