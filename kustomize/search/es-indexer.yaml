@@ -1,0 +1,59 @@
+# es-indexer: consumes Kafka octo.message.v1 and bulk-indexes into OpenSearch
+# (idempotent _id=message_id upsert; IK analyzers via the embedded mapping).
+# The DLQ spill mounts a PVC so DLQ-write outages survive a pod restart.
+#
+# NOTE: image is built only on v* tags / manual dispatch in octo-search-indexer.
+# Pin a real published tag in kustomization.yaml before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: es-indexer
+  labels:
+    app: es-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: es-indexer
+  template:
+    metadata:
+      labels:
+        app: es-indexer
+    spec:
+      containers:
+        - name: es-indexer
+          image: mininglamposs/octo-search-indexer:latest
+          imagePullPolicy: Always
+          env:
+            - name: ES_INDEXER_ENABLED
+              value: "true"
+            - name: KAFKA_BROKERS
+              value: "search-kafka:9092"
+            - name: KAFKA_TOPIC
+              value: "octo.message.v1"
+            - name: KAFKA_DLQ_TOPIC
+              value: "octo.message.v1.dlq"
+            - name: KAFKA_GROUP_ID
+              value: "octo-search-indexer"
+            - name: ES_ADDRESSES
+              value: "http://search-opensearch:9200"
+            - name: ES_INDEX
+              value: "octo-message"
+            - name: INDEXER_BATCH_SIZE
+              value: "500"
+            - name: INDEXER_DLQ_SPILL_DIR
+              value: "/var/lib/es-indexer/dlq-spill"
+          volumeMounts:
+            - name: search-dlq-spill
+              mountPath: /var/lib/es-indexer/dlq-spill
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: search-dlq-spill
+          persistentVolumeClaim:
+            claimName: search-dlq-spill

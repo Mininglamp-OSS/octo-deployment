@@ -1,0 +1,94 @@
+# Kafka (KRaft single broker) for the message-search pipeline. Single-node,
+# in-cluster only (ClusterIP, no external exposure). Topics are created by the
+# es-indexer's expectations (DLQ producer has AllowAutoTopicCreation=false), so
+# operators should pre-create octo.message.v1 / octo.message.v1.dlq once the
+# broker is up (a one-shot Job or kafka-topics.sh exec — see README).
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-kafka
+  labels:
+    app: search-kafka
+spec:
+  clusterIP: None
+  selector:
+    app: search-kafka
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: search-kafka
+  labels:
+    app: search-kafka
+spec:
+  serviceName: search-kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: search-kafka
+  template:
+    metadata:
+      labels:
+        app: search-kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.0
+          ports:
+            - name: broker
+              containerPort: 9092
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://search-kafka:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@search-kafka:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            - name: CLUSTER_ID
+              value: "octo-search-kraft-0000001"
+          volumeMounts:
+            - name: search-kafka-data
+              mountPath: /var/lib/kafka/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 12
+      volumes:
+        - name: search-kafka-data
+          persistentVolumeClaim:
+            claimName: search-kafka-data

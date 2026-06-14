@@ -89,6 +89,20 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-octo}_server-logs
   nginx-logs:
     name: ${COMPOSE_PROJECT_NAME:-octo}_nginx-logs
+  # --- search profile (opt-in: COMPOSE_PROFILES=search) ---------------------
+  # These volumes are ONLY attached by the search-profile services below.
+  # Declaring them here is inert for a default (no-profile) `up` — Compose
+  # does not create a named volume until a started service references it.
+  # Same COMPOSE_PROJECT_NAME prefixing as every other volume so a second
+  # clone / `down -v` only ever touches its own data (INCIDENT-2026-05-16-001).
+  opensearch-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}_opensearch-data
+  kafka-data:
+    name: ${COMPOSE_PROJECT_NAME:-octo}_kafka-data
+  # DLQ spill must survive an indexer restart, otherwise the crash-resumable
+  # spill accounting (octo-search-indexer phase 6) is defeated.
+  search-dlq-spill:
+    name: ${COMPOSE_PROJECT_NAME:-octo}_search-dlq-spill
 
 services:
   # ---------------------------------------------------------------------------
@@ -982,3 +996,172 @@ services:
       # window does not wedge the worker into `(unhealthy)` while the
       # mysql init script is still finishing.
       start_period: 30s
+
+  # ===========================================================================
+  # Search infrastructure (message-search pipeline) — STRICTLY ADDITIVE
+  # ===========================================================================
+  # Kafka (KRaft single broker) + OpenSearch (single node, analysis-ik) +
+  # es-indexer (Kafka -> OpenSearch bulk indexer). Mirrors the smart-summary
+  # pattern: every service here is gated behind `profiles: ["search"]`, so a
+  # default `docker compose up -d` (no COMPOSE_PROFILES, or only "summary")
+  # starts ZERO of them. Operators opt in with `COMPOSE_PROFILES=search`.
+  #
+  # ISOLATION GUARANTEES (phase 7, YUJ-4530 v4):
+  #   - No core service definition (server/nginx/mysql/redis/...) is touched.
+  #   - No new REQUIRED env var: every var below has a `:-` default or is
+  #     referenced only inside these search-profile services, so a non-search
+  #     deployment never fails preflight on a missing variable.
+  #   - Reuses the existing octo-net network; new named volumes only.
+  #   - New host ports bind loopback by default (override the *_BIND vars).
+  #   - These services do NOT depend on `preflight` / core services and do not
+  #     alter the default profile set.
+  #
+  # NOTE: merging this file deploys nothing. Bringing the search profile up is
+  # an explicit, owner-gated operator action (`COMPOSE_PROFILES=search`).
+  # ---------------------------------------------------------------------------
+  search-kafka:
+    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:3.8.0}
+    restart: unless-stopped
+    profiles: ["search"]
+    environment:
+      TZ: ${TZ:-UTC}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # Internal listener for in-network clients (es-indexer, octo-server
+      # producer in a later phase); EXTERNAL is loopback-published for local
+      # validation tooling (the seed/producer harness). The advertised
+      # EXTERNAL host is configurable so a non-localhost validator can reach it.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://search-kafka:9092,EXTERNAL://${OCTO_SEARCH_KAFKA_ADVERTISED_HOST:-localhost}:${OCTO_SEARCH_KAFKA_PORT:-29092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@search-kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # The body + DLQ topics are created up front by search-kafka-init (the
+      # indexer's DLQ producer runs with AllowAutoTopicCreation=false). Leave
+      # broker auto-create off so a mistyped topic fails loudly.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # KRaft needs a stable cluster id; keep it pinned so a volume reuse does
+      # not trip "cluster id mismatch".
+      CLUSTER_ID: ${OCTO_SEARCH_KAFKA_CLUSTER_ID:-octo-search-kraft-0000001}
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "${OCTO_SEARCH_KAFKA_BIND:-127.0.0.1}:${OCTO_SEARCH_KAFKA_PORT:-29092}:29092"
+    networks:
+      - octo-net
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # One-shot: create the body + DLQ topics (indexer DLQ producer has
+  # AllowAutoTopicCreation=false, so the DLQ topic MUST pre-exist). Idempotent
+  # via --if-not-exists; exits 0 once both topics are present.
+  search-kafka-init:
+    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:3.8.0}
+    restart: "no"
+    profiles: ["search"]
+    depends_on:
+      search-kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        BOOT=search-kafka:9092
+        for t in "${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}" "${OCTO_SEARCH_KAFKA_DLQ_TOPIC:-octo.message.v1.dlq}"; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$$BOOT" \
+            --create --if-not-exists --topic "$$t" \
+            --partitions "${OCTO_SEARCH_KAFKA_PARTITIONS:-1}" \
+            --replication-factor 1
+        done
+        echo "[search-kafka-init] topics ready"
+    networks:
+      - octo-net
+
+  search-opensearch:
+    # Built locally to bake in the analysis-ik plugin (index uses ik_max_word /
+    # query uses ik_smart). The plugin version MUST match the OpenSearch
+    # version — both are pinned via the build arg below.
+    image: ${OCTO_SEARCH_OPENSEARCH_IMAGE:-octo-search-opensearch-ik:2.17.0}
+    build:
+      context: ./opensearch
+      dockerfile: Dockerfile
+      args:
+        OPENSEARCH_VERSION: ${OCTO_SEARCH_OPENSEARCH_VERSION:-2.17.0}
+    restart: unless-stopped
+    profiles: ["search"]
+    environment:
+      TZ: ${TZ:-UTC}
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: ${OCTO_SEARCH_OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+      # Local-stack default: disable the security plugin so the indexer and
+      # validation tooling can talk plain http on the internal network. For a
+      # hardened deployment, set OCTO_SEARCH_OPENSEARCH_DISABLE_SECURITY=false
+      # and wire credentials via ES_USERNAME/ES_PASSWORD on the indexer.
+      DISABLE_SECURITY_PLUGIN: ${OCTO_SEARCH_OPENSEARCH_DISABLE_SECURITY:-true}
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "${OCTO_SEARCH_OPENSEARCH_BIND:-127.0.0.1}:${OCTO_SEARCH_OPENSEARCH_PORT:-29200}:9200"
+    networks:
+      - octo-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 18
+      start_period: 30s
+
+  es-indexer:
+    # Built only on v* tags / manual dispatch (see octo-search-indexer
+    # .github/workflows/docker-publish.yml). For LOCAL validation, build a
+    # local tag from a checkout of that repo and set OCTO_SEARCH_INDEXER_IMAGE
+    # to it (see docker/README.md "Search profile"). Default points at the
+    # published :latest, which only exists once a release tag has been cut.
+    image: ${OCTO_SEARCH_INDEXER_IMAGE:-mininglamposs/octo-search-indexer:latest}
+    restart: unless-stopped
+    profiles: ["search"]
+    depends_on:
+      search-kafka-init:
+        condition: service_completed_successfully
+      search-opensearch:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-UTC}
+      # The indexer idles (no backend connection) unless ES_INDEXER_ENABLED=true
+      # AND brokers + ES are set. Within the search profile we set all three so
+      # the pipeline runs; outside the profile this service does not exist.
+      ES_INDEXER_ENABLED: "true"
+      KAFKA_BROKERS: search-kafka:9092
+      KAFKA_TOPIC: ${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}
+      KAFKA_DLQ_TOPIC: ${OCTO_SEARCH_KAFKA_DLQ_TOPIC:-octo.message.v1.dlq}
+      KAFKA_GROUP_ID: ${OCTO_SEARCH_INDEXER_GROUP_ID:-octo-search-indexer}
+      ES_ADDRESSES: http://search-opensearch:9200
+      ES_INDEX: ${OCTO_SEARCH_ES_INDEX:-octo-message}
+      ES_USERNAME: ${OCTO_SEARCH_ES_USERNAME:-}
+      ES_PASSWORD: ${OCTO_SEARCH_ES_PASSWORD:-}
+      INDEXER_BATCH_SIZE: ${OCTO_SEARCH_INDEXER_BATCH_SIZE:-500}
+      # Spill path lives on a named volume so DLQ-write outages survive an
+      # indexer restart (crash-resumable spill accounting).
+      INDEXER_DLQ_SPILL_DIR: /var/lib/es-indexer/dlq-spill
+    volumes:
+      - search-dlq-spill:/var/lib/es-indexer/dlq-spill
+    networks:
+      - octo-net

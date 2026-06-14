@@ -1,0 +1,41 @@
+# Persistent volumes for the search pipeline. The DLQ-spill PVC is REQUIRED:
+# without durable spill storage the es-indexer's crash-resumable DLQ
+# accounting (octo-search-indexer phase 6) is defeated on a pod restart.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: search-opensearch-data
+  labels:
+    app: search-opensearch
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: search-kafka-data
+  labels:
+    app: search-kafka
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: search-dlq-spill
+  labels:
+    app: es-indexer
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
