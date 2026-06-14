@@ -43,8 +43,15 @@ spec:
           env:
             - name: discovery.type
               value: single-node
+            # Memory locking is OFF for k8s: bootstrap.memory_lock=true requires
+            # the IPC_LOCK capability + an unlimited memlock rlimit on the pod
+            # (the compose service supplies this via `ulimits:`), which a plain
+            # StatefulSet does not have — with it on, OpenSearch fails its
+            # memory-lock bootstrap check and stays unready. To enable it on a
+            # cluster that supports it, add securityContext.capabilities
+            # IPC_LOCK + a memlock rlimit, then set this to "true".
             - name: bootstrap.memory_lock
-              value: "true"
+              value: "false"
             - name: OPENSEARCH_JAVA_OPTS
               value: "-Xms512m -Xmx512m"
             # Local/in-cluster default disables the security plugin. For a
