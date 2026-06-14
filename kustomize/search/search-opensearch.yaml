@@ -34,6 +34,12 @@ spec:
       labels:
         app: search-opensearch
     spec:
+      # OpenSearch runs as a non-root user (uid/gid 1000). Freshly provisioned
+      # PVCs are often root-owned, so set fsGroup to make the data mount
+      # group-writable — otherwise OpenSearch cannot create files under
+      # /usr/share/opensearch/data and the pod exits before readiness.
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: opensearch
           image: octo-search-opensearch-ik:2.17.0
