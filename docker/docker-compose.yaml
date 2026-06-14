@@ -1006,7 +1006,7 @@ services:
   # default `docker compose up -d` (no COMPOSE_PROFILES, or only "summary")
   # starts ZERO of them. Operators opt in with `COMPOSE_PROFILES=search`.
   #
-  # ISOLATION GUARANTEES (phase 7, YUJ-4530 v4):
+  # ISOLATION GUARANTEES:
   #   - No core service definition (server/nginx/mysql/redis/...) is touched.
   #   - No new REQUIRED env var: every var below has a `:-` default or is
   #     referenced only inside these search-profile services, so a non-search
