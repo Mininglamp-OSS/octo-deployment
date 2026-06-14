@@ -11,6 +11,11 @@ metadata:
     app: search-kafka
 spec:
   clusterIP: None
+  # Publish the broker's DNS A record before it is Ready. KRaft resolves
+  # search-kafka for KAFKA_CONTROLLER_QUORUM_VOTERS during startup, which
+  # happens before the readiness probe passes — without this the name can be
+  # unresolvable and the single broker deadlocks unready.
+  publishNotReadyAddresses: true
   selector:
     app: search-kafka
   ports:
@@ -70,6 +75,11 @@ spec:
             # `kafka-storage.sh random-uuid`); pin per cluster.
             - name: CLUSTER_ID
               value: "3kNqlPkyT16sjDguh9qqKA"
+            # apache/kafka defaults log.dirs to /tmp/kraft-combined-logs (NOT
+            # the PVC mount) — set it to the mounted path so topics + KRaft
+            # metadata survive a pod replacement/reschedule.
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
           volumeMounts:
             - name: search-kafka-data
               mountPath: /var/lib/kafka/data

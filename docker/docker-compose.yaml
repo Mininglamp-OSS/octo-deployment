@@ -1050,6 +1050,10 @@ services:
       # URL-safe Base64 form from `kafka-storage.sh random-uuid`) — some Kafka
       # builds reject a free-form string at format time. Override per stack.
       CLUSTER_ID: ${OCTO_SEARCH_KAFKA_CLUSTER_ID:-3kNqlPkyT16sjDguh9qqKA}
+      # apache/kafka defaults log.dirs to /tmp/kraft-combined-logs, which is
+      # NOT the mounted volume — without this, topics/metadata are lost across
+      # recreate even though kafka-data exists. Point it at the named volume.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
     volumes:
       - kafka-data:/var/lib/kafka/data
     ports:
