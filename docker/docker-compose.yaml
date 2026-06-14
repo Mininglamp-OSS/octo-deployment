@@ -1046,8 +1046,10 @@ services:
       # broker auto-create off so a mistyped topic fails loudly.
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       # KRaft needs a stable cluster id; keep it pinned so a volume reuse does
-      # not trip "cluster id mismatch".
-      CLUSTER_ID: ${OCTO_SEARCH_KAFKA_CLUSTER_ID:-octo-search-kraft-0000001}
+      # not trip "cluster id mismatch". MUST be a valid Kafka UUID (the 22-char
+      # URL-safe Base64 form from `kafka-storage.sh random-uuid`) — some Kafka
+      # builds reject a free-form string at format time. Override per stack.
+      CLUSTER_ID: ${OCTO_SEARCH_KAFKA_CLUSTER_ID:-3kNqlPkyT16sjDguh9qqKA}
     volumes:
       - kafka-data:/var/lib/kafka/data
     ports:

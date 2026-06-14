@@ -1,0 +1,49 @@
+# One-shot topic creation for the search pipeline. REQUIRED because broker
+# auto-create is off and the es-indexer's DLQ producer runs with
+# AllowAutoTopicCreation=false — the body + DLQ topics must pre-exist. This
+# Job is the k8s equivalent of the compose `search-kafka-init` service. It is
+# idempotent (--if-not-exists) and retries until the broker is reachable.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: search-kafka-init
+  labels:
+    app: search-kafka-init
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels:
+        app: search-kafka-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: apache/kafka:3.8.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              BOOT=search-kafka:9092
+              # Wait for the broker to accept API calls (the StatefulSet has no
+              # Job-visible readiness gate across objects, so poll here).
+              i=0
+              until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BOOT" >/dev/null 2>&1; do
+                i=$((i+1))
+                if [ "$i" -gt 60 ]; then echo "[init] broker not ready after 5m" >&2; exit 1; fi
+                echo "[init] waiting for $BOOT ..."; sleep 5
+              done
+              for t in octo.message.v1 octo.message.v1.dlq; do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" \
+                  --create --if-not-exists --topic "$t" \
+                  --partitions 1 --replication-factor 1
+              done
+              echo "[init] topics ready"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

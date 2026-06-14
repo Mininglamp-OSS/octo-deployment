@@ -66,8 +66,10 @@ spec:
               value: "1"
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "false"
+            # Valid Kafka UUID (22-char URL-safe Base64, from
+            # `kafka-storage.sh random-uuid`); pin per cluster.
             - name: CLUSTER_ID
-              value: "octo-search-kraft-0000001"
+              value: "3kNqlPkyT16sjDguh9qqKA"
           volumeMounts:
             - name: search-kafka-data
               mountPath: /var/lib/kafka/data

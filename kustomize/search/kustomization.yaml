@@ -15,6 +15,7 @@ kind: Kustomization
 resources:
   - search-pvc.yaml
   - search-kafka.yaml
+  - search-kafka-init.yaml
   - search-opensearch.yaml
   - es-indexer.yaml
 
