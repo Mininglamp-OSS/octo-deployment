@@ -1181,7 +1181,10 @@ profile. With no profile set it is completely inert:
 - New host ports bind loopback by default (`127.0.0.1:29200` OpenSearch,
   `127.0.0.1:29092` Kafka); new named volumes (`opensearch-data`,
   `kafka-data`, `search-dlq-spill`) carry the same `COMPOSE_PROJECT_NAME`
-  prefix as the rest of the stack, so `down -v` only ever touches your own.
+  prefix as the rest of the stack. Tear them down by **naming the search
+  volumes explicitly** (see "Tear down" below) — **never** a project-wide
+  `docker compose down -v`, which ignores `COMPOSE_PROFILES` and would delete
+  the core data volumes too.
 
 > Merging these manifests deploys nothing. Bringing the profile up is an
 > explicit operator action and, in any shared/staging/production environment,
@@ -1262,16 +1265,40 @@ curl -s -XPOST localhost:29200/octo-message/_search \
 
 ### Tear down (clean)
 
+> ⚠️ **DANGER — never run `docker compose down` or `docker compose down -v`
+> to tear down the search profile.** Those commands **ignore
+> `COMPOSE_PROFILES`** — the profile filter only applies to `up` / `create` /
+> `run`, **not** to `down`. `docker compose down` therefore acts on the **whole
+> `octo` project** and stops every core service (server / nginx / mysql / redis
+> / minio / wukongim …); `down -v` additionally **deletes the core data
+> volumes** (mysql-data, redis-data, minio-data, wukongim-data). Running it to
+> "clean up search" will wipe the entire stack and its data.
+
+Tear the search profile down by **naming exactly the search services**, then
+removing **only the search-specific named volumes** — never a project-wide
+`down`:
+
 ```bash
 cd docker
-COMPOSE_PROFILES=search docker compose down
-# Drop the search data volumes too (local validation only):
-COMPOSE_PROFILES=search docker compose down -v
+# 1. Stop + remove ONLY the search-profile containers (by name). -p octo pins
+#    the project so this never touches another stack; core services are not
+#    listed, so they are left running and untouched.
+docker compose -p octo rm -sf search-kafka search-kafka-init search-opensearch es-indexer
+
+# 2. (local validation only) Remove ONLY the search-specific named volumes.
+#    Core volumes (mysql-data, redis-data, ...) are NOT listed and NOT touched.
+#    Volume names follow `name: ${COMPOSE_PROJECT_NAME:-octo}_*` from the
+#    compose file; for the default project that is the `octo_` prefix. If you
+#    run a non-default COMPOSE_PROJECT_NAME, substitute it here.
+docker volume rm octo_opensearch-data octo_kafka-data octo_search-dlq-spill
 ```
 
-`down -v` only removes this project's volumes (`${COMPOSE_PROJECT_NAME}_*`),
-so it is safe alongside other OCTO stacks as long as your project name is set
-correctly — see "Uninstall / reset" above.
+If you set a custom `COMPOSE_PROJECT_NAME` (e.g. `octo-fz`), use `-p <name>` in
+step 1 and the matching `<name>_opensearch-data` etc. in step 2.
+
+`docker volume rm` errors harmlessly with "no such volume" if a volume was
+never created (e.g. you only ran OpenSearch); that is safe to ignore. It will
+refuse to remove a volume still in use, so always do step 1 first.
 
 ### Kubernetes
 

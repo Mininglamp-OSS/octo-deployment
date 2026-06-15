@@ -93,8 +93,14 @@ volumes:
   # These volumes are ONLY attached by the search-profile services below.
   # Declaring them here is inert for a default (no-profile) `up` — Compose
   # does not create a named volume until a started service references it.
-  # Same COMPOSE_PROJECT_NAME prefixing as every other volume so a second
-  # clone / `down -v` only ever touches its own data (INCIDENT-2026-05-16-001).
+  # The COMPOSE_PROJECT_NAME prefix isolates volumes across DIFFERENT projects
+  # (a `down -v` in project A never touches project B). It does NOT make
+  # `down -v` profile-aware: within ONE project, `docker compose down -v`
+  # deletes ALL of that project's volumes, core ones included — `down` ignores
+  # COMPOSE_PROFILES. To remove just these search volumes, name them
+  # explicitly (`docker volume rm <project>_opensearch-data ...`); never run a
+  # project-wide `down -v` to "clean up search". See docker/README.md
+  # "Search profile" → "Tear down".
   opensearch-data:
     name: ${COMPOSE_PROJECT_NAME:-octo}_opensearch-data
   kafka-data:
