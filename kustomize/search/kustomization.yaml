@@ -1,0 +1,31 @@
+# Search pipeline (Kafka + OpenSearch + es-indexer) — STANDALONE, OPT-IN.
+#
+# This kustomization is INTENTIONALLY NOT referenced by kustomize/base or any
+# overlay (dev/prod). Applying the default base/overlays deploys ZERO search
+# resources. An operator opts in explicitly and on a separate, owner-gated
+# action, e.g.:
+#
+#   kubectl apply -k kustomize/search -n <ns>
+#
+# Everything here is additive: it adds new workloads, services, and PVCs and
+# does not modify any core OCTO resource. See README.md in this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - search-pvc.yaml
+  - search-kafka.yaml
+  - search-kafka-init.yaml
+  - search-opensearch.yaml
+  - es-indexer.yaml
+
+images:
+  - name: apache/kafka
+    newTag: "3.8.0"
+  # Build this locally with the analysis-ik plugin baked in (see
+  # docker/opensearch/Dockerfile) and push to your registry, then point this
+  # at it. The plugin version MUST match the OpenSearch version.
+  - name: octo-search-opensearch-ik
+    newTag: "2.17.0"
+  - name: mininglamposs/octo-search-indexer
+    newTag: latest

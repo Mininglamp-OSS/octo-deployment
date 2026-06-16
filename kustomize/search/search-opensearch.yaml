@@ -1,0 +1,91 @@
+# OpenSearch (single node, analysis-ik) for the message-search pipeline.
+# The image MUST have the analysis-ik plugin baked in and the plugin version
+# MUST match the OpenSearch version (see docker/opensearch/Dockerfile — build
+# and push that to your registry, then set the image tag in kustomization.yaml).
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-opensearch
+  labels:
+    app: search-opensearch
+spec:
+  clusterIP: None
+  selector:
+    app: search-opensearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: search-opensearch
+  labels:
+    app: search-opensearch
+spec:
+  serviceName: search-opensearch
+  replicas: 1
+  selector:
+    matchLabels:
+      app: search-opensearch
+  template:
+    metadata:
+      labels:
+        app: search-opensearch
+    spec:
+      # OpenSearch runs as a non-root user (uid/gid 1000). Freshly provisioned
+      # PVCs are often root-owned, so set fsGroup to make the data mount
+      # group-writable — otherwise OpenSearch cannot create files under
+      # /usr/share/opensearch/data and the pod exits before readiness.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: opensearch
+          image: octo-search-opensearch-ik:2.17.0
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            # Memory locking is OFF for k8s: bootstrap.memory_lock=true requires
+            # the IPC_LOCK capability + an unlimited memlock rlimit on the pod
+            # (the compose service supplies this via `ulimits:`), which a plain
+            # StatefulSet does not have — with it on, OpenSearch fails its
+            # memory-lock bootstrap check and stays unready. To enable it on a
+            # cluster that supports it, add securityContext.capabilities
+            # IPC_LOCK + a memlock rlimit, then set this to "true".
+            - name: bootstrap.memory_lock
+              value: "false"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            # Local/in-cluster default disables the security plugin. For a
+            # hardened deployment set this to false and wire ES_USERNAME /
+            # ES_PASSWORD on the es-indexer.
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+          volumeMounts:
+            - name: search-opensearch-data
+              mountPath: /usr/share/opensearch/data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 18
+      volumes:
+        - name: search-opensearch-data
+          persistentVolumeClaim:
+            claimName: search-opensearch-data

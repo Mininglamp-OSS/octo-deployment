@@ -1165,6 +1165,159 @@ above for why a ufw rule alone is not enough).
 
 ---
 
+## Search profile (message-search pipeline)
+
+The message-search pipeline — Kafka + OpenSearch (with the `analysis-ik`
+Chinese analyzer) + the `es-indexer` consumer — is **opt-in** behind the
+Docker Compose `search` profile, exactly like smart-summary's `summary`
+profile. With no profile set it is completely inert:
+
+- A default `docker compose up -d` (or `setup.sh`) starts **zero** search
+  services. The rendered config for the default profile is byte-for-byte
+  identical with and without these additions.
+- Every search variable in `.env` has a default (or is referenced only inside
+  the search services), so a non-search deployment never fails preflight on a
+  missing search variable.
+- New host ports bind loopback by default (`127.0.0.1:29200` OpenSearch,
+  `127.0.0.1:29092` Kafka); new named volumes (`opensearch-data`,
+  `kafka-data`, `search-dlq-spill`) carry the same `COMPOSE_PROJECT_NAME`
+  prefix as the rest of the stack. Tear them down by **naming the search
+  volumes explicitly** (see "Tear down" below) — **never** a project-wide
+  `docker compose down -v`, which ignores `COMPOSE_PROFILES` and would delete
+  the core data volumes too.
+
+> Merging these manifests deploys nothing. Bringing the profile up is an
+> explicit operator action and, in any shared/staging/production environment,
+> is gated on owner sign-off.
+
+### Build the es-indexer image for local validation
+
+The `mininglamposs/octo-search-indexer` image is published only on `v*` tags /
+manual dispatch. For local validation, build a tag from a checkout of the
+[octo-search-indexer](https://github.com/Mininglamp-OSS/octo-search-indexer)
+repo and point the stack at it:
+
+```bash
+# in a checkout of octo-search-indexer
+docker build -t octo-search-indexer:local .
+
+# in docker/.env (this repo)
+OCTO_SEARCH_INDEXER_IMAGE=octo-search-indexer:local
+```
+
+The OpenSearch image with the IK plugin is built automatically from
+`docker/opensearch/Dockerfile` on first `up` (no manual step).
+
+### Bring the search profile up
+
+```bash
+cd docker
+# Enable the profile for this shell (or persist COMPOSE_PROFILES=search in .env)
+export COMPOSE_PROFILES=search
+docker compose up -d --build search-opensearch search-kafka search-kafka-init es-indexer
+```
+
+`search-kafka-init` pre-creates the body + DLQ topics (`octo.message.v1`,
+`octo.message.v1.dlq`) — required because the indexer's DLQ producer runs with
+`AllowAutoTopicCreation=false`. The `es-indexer` waits for it plus a healthy
+OpenSearch, then auto-creates the `octo-message` index with the embedded IK
+mapping (`ik_max_word` on the index side, `ik_smart` on the query side).
+
+### End-to-end check (local)
+
+```bash
+# 1. OpenSearch is up and the index was created by the indexer
+curl -s localhost:29200/_cluster/health | grep -o '"status":"[a-z]*"'
+curl -s localhost:29200/octo-message/_count
+
+# 2. Produce a contract message to Kafka and confirm it lands in OpenSearch.
+#    The octo-search-indexer repo ships a seed tool for exactly this:
+#      (in that checkout)
+#      KAFKA_BROKERS=localhost:29092 go run ./harness/seed -mode suite
+#    then re-check the count / search:
+curl -s -XPOST localhost:29200/octo-message/_search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":{"match":{"content":"公园"}}}'
+```
+
+### Observability
+
+- **Consumer lag** (how far behind the indexer is):
+  ```bash
+  docker compose exec search-kafka \
+    /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+    --describe --group octo-search-indexer
+  ```
+- **DLQ backlog** (poison-pill topic depth):
+  ```bash
+  docker compose exec search-kafka \
+    /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 \
+    --topic octo.message.v1.dlq
+  ```
+- **DLQ spill** (durable local fallback when the DLQ topic is unwritable):
+  ```bash
+  docker compose exec es-indexer ls -la /var/lib/es-indexer/dlq-spill
+  ```
+- **Reconciliation diff** (MySQL source rows vs ES docs): run the
+  `cmd/reconcile` tool from the octo-search-indexer repo against
+  `localhost:29200` — see that repo's `docs/backfill.md`.
+- **Indexer logs**: `docker compose logs -f es-indexer`.
+
+### Tear down (clean)
+
+> ⚠️ **DANGER — never run `docker compose down` or `docker compose down -v`
+> to tear down the search profile.** Those commands **ignore
+> `COMPOSE_PROFILES`** — the profile filter only applies to `up` / `create` /
+> `run`, **not** to `down`. `docker compose down` therefore acts on the **whole
+> `octo` project** and stops every core service (server / nginx / mysql / redis
+> / minio / wukongim …); `down -v` additionally **deletes the core data
+> volumes** (mysql-data, redis-data, minio-data, wukongim-data). Running it to
+> "clean up search" will wipe the entire stack and its data.
+
+Tear the search profile down by **naming exactly the search services**, then
+removing **only the search-specific named volumes** — never a project-wide
+`down`:
+
+```bash
+cd docker
+# 1. Stop + remove ONLY the search-profile containers (by name). -p octo pins
+#    the project so this never touches another stack; core services are not
+#    listed, so they are left running and untouched.
+docker compose -p octo rm -sf search-kafka search-kafka-init search-opensearch es-indexer
+
+# 2. (local validation only) Remove ONLY the search-specific named volumes.
+#    Core volumes (mysql-data, redis-data, ...) are NOT listed and NOT touched.
+#    Volume names follow `name: ${COMPOSE_PROJECT_NAME:-octo}_*` from the
+#    compose file; for the default project that is the `octo_` prefix. If you
+#    run a non-default COMPOSE_PROJECT_NAME, substitute it here.
+docker volume rm octo_opensearch-data octo_kafka-data octo_search-dlq-spill
+```
+
+If you set a custom `COMPOSE_PROJECT_NAME` (e.g. `octo-fz`), use `-p <name>` in
+step 1 and the matching `<name>_opensearch-data` etc. in step 2.
+
+`docker volume rm` errors harmlessly with "no such volume" if a volume was
+never created (e.g. you only ran OpenSearch); that is safe to ignore. It will
+refuse to remove a volume still in use, so always do step 1 first.
+
+### Kubernetes
+
+The k8s manifests live in a standalone, opt-in kustomization at
+`kustomize/search/` that base/overlays do **not** reference. Apply it
+explicitly (and, for shared environments, only after owner sign-off):
+
+```bash
+kubectl apply -k kustomize/search -n <ns>
+```
+
+It adds Kafka + OpenSearch StatefulSets (each with a PVC), an es-indexer
+Deployment, and a dedicated DLQ-spill PVC (required so the indexer's
+crash-resumable spill accounting survives a pod restart). Build/push the
+IK-enabled OpenSearch image and pin a real `octo-search-indexer` tag in
+`kustomize/search/kustomization.yaml` first.
+
+---
+
 ## MinIO bootstrap & credential scoping
 
 The stack ships with an `octo-server` MinIO client that is **not** the
