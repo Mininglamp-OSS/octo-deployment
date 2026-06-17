@@ -73,11 +73,16 @@ fi
 # -----------------------------------------------------------------------------
 log "writing isolated bot config under $CFG_DIR (real ~/.cc-channel-octo untouched)"
 mkdir -p "$CFG_DIR/$BOT_ID"
+# Security: the demo bot only needs to REPLY with text to an @mention, so it runs
+# with NO tools (allowedTools: []) and the default (non-bypass) permission mode.
+# A chat-triggered process must not get broad local capability; an operator who
+# deliberately wants a tool-using agent can widen allowedTools in this isolated
+# config. (Reviewed: PR #119 — Jerry-Xin P0; CTO security-by-default ruling.)
 cat > "$CFG_DIR/config.json" <<JSON
 {
   "apiUrl": "$API_BASE",
   "bots": [{ "id": "$BOT_ID" }],
-  "sdk": { "allowedTools": "*", "permissionMode": "bypassPermissions", "toolProgress": true },
+  "sdk": { "allowedTools": [], "permissionMode": "default", "toolProgress": true },
   "rateLimit": { "maxPerMinute": 30 }
 }
 JSON

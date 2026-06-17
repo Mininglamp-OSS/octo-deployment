@@ -58,10 +58,20 @@ compose() {
   fi
 }
 
+# Stop the bot gateway launched by wire-bot.sh, if any (its pid is in bot.pid).
+stop_bot() {
+  [ -f "$HERE/bot.pid" ] || return 0
+  local pid; pid="$(cat "$HERE/bot.pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    log "stopping bot gateway (pid $pid)"; kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$HERE/bot.pid"
+}
+
 # --- lifecycle subcommands ----------------------------------------------------
 case "${1:-up}" in
-  down)  log "tearing down the golden-path stack (volumes preserved; add -v to wipe)"; compose down "${@:2}"; exit 0 ;;
-  nuke)  warn "removing the golden-path stack AND its data volumes"; compose down -v; rm -f "$ENV_FILE"; exit 0 ;;
+  down)  stop_bot; log "tearing down the golden-path stack (volumes preserved; add -v to wipe)"; compose down "${@:2}"; exit 0 ;;
+  nuke)  stop_bot; warn "removing the golden-path stack AND its data volumes"; compose down -v; rm -f "$ENV_FILE"; exit 0 ;;
   logs)  compose logs "${@:2}"; exit 0 ;;
   ps)    compose ps; exit 0 ;;
   up|"") ;;  # fall through to bring-up
@@ -93,6 +103,16 @@ if [ ! -f "$ENV_FILE" ]; then
   set_kv OCTO_MASTER_KEY            "$(gen 16)"   # 32 hex chars = 32 bytes
   set_kv OCTO_NOTIFY_INTERNAL_TOKEN "$(gen 32)"
   set_kv OCTO_WUKONGIM_MANAGER_TOKEN "$(gen 32)"
+  # MySQL service-account passwords. Even though matter / summary-* are NOT in
+  # REF_SERVICES, `mysql` is, and its first-volume init runs
+  # docker/scripts/init-extra-dbs.sh, which hard-rejects the .env.example
+  # literal defaults (matter / summary / summary_reader) under `set -euo
+  # pipefail`. Leaving them unrotated aborts MySQL init → mysql never healthy →
+  # octo-server never starts on a clean machine. Rotate them too. (hex output is
+  # within init-extra-dbs.sh's DSN-safe allowlist.)
+  set_kv OCTO_MATTER_DB_PASSWORD      "$(gen 16)"
+  set_kv OCTO_SUMMARY_DB_PASSWORD     "$(gen 16)"
+  set_kv OCTO_SUMMARY_READER_PASSWORD "$(gen 16)"
   # Bootstrap a first superAdmin so the demo is reachable in octo-web.
   set_kv OCTO_ADMIN_PWD             "$(gen 12)"
   chmod 600 "$ENV_FILE"
