@@ -1,8 +1,56 @@
 name: Dependency Review
 
+# Scope this check to PRs that actually touch a dependency manifest/lockfile.
+#
+# octo-deployment is a manifest-free repo (shell / compose / docs), and the
+# org/enterprise policy disables the GitHub Dependency Graph for it, so
+# dependency-review-action's compare API returns 404 and the check hard-fails
+# on every PR — a misleading red that gates nothing (this check is NOT in
+# branch protection). The paths filter below means the workflow only triggers
+# when a recognised manifest changes, so manifest-free PRs no longer show red.
+#
+# IMPORTANT: keep this check NON-required while it is path-filtered. A required
+# check that does not trigger on a PR is reported as "Expected — waiting" and
+# would block merge. If dependency manifests are ever added to this repo and
+# this should genuinely gate, make it required only after confirming the
+# Dependency Graph is enabled for the repo.
 on:
   pull_request:
     branches: [main]
+    paths:
+      # Go
+      - '**/go.mod'
+      - '**/go.sum'
+      # JavaScript / Node
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/npm-shrinkwrap.json'
+      - '**/yarn.lock'
+      - '**/pnpm-lock.yaml'
+      # Python
+      - '**/requirements*.txt'
+      - '**/Pipfile'
+      - '**/Pipfile.lock'
+      - '**/pyproject.toml'
+      - '**/poetry.lock'
+      # Java / Kotlin
+      - '**/pom.xml'
+      - '**/build.gradle'
+      - '**/build.gradle.kts'
+      - '**/settings.gradle'
+      - '**/settings.gradle.kts'
+      # Ruby
+      - '**/Gemfile'
+      - '**/Gemfile.lock'
+      # PHP
+      - '**/composer.json'
+      - '**/composer.lock'
+      # Rust
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      # Swift / CocoaPods
+      - '**/Podfile'
+      - '**/Podfile.lock'
 
 permissions: {}
 

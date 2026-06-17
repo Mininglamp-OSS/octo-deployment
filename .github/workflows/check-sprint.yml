@@ -33,7 +33,14 @@ name: Check Sprint
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # 'edited' is REQUIRED: developers commonly add the "Closes #<issue>" link
+    # to the PR body AFTER opening. Without 'edited' the check never re-runs on
+    # that edit and stays red with "No linked issue found" (this is exactly what
+    # produced the false red on #119). 'converted_to_draft' pairs with
+    # 'ready_for_review' so the draft-skip cached on a draft SHA cannot persist
+    # across draft↔ready transitions. Both match the reusable workflow's
+    # documented caller usage (reusable-check-sprint.yml header).
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
     branches: [main]
 
 permissions: {}
