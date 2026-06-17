@@ -10,11 +10,6 @@ on:
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
-    paths:
-      - '**/*.yaml'
-      - '**/*.yml'
-      - 'kustomize/**'
-      - '.github/workflows/ci.yml'
 
 permissions:
   contents: read
@@ -118,3 +113,31 @@ jobs:
             echo "::endgroup::"
           done
           exit "${status}"
+
+  ci-gate:
+    name: CI Gate
+    # Aggregate gate: always runs so the required status check ALWAYS reports.
+    # The workflow now triggers on every PR to main (the old pull_request path
+    # filter was removed because workflow-level path filtering prevents GitHub
+    # from creating any check run, deadlocking required-status checks on PRs
+    # that touch no yaml/kustomize files). Fails iff a needed job failed or was
+    # cancelled; 'skipped'/'success' count as passing. Branch protection should
+    # require ONLY the "CI Gate" context for this repo.
+    if: ${{ always() }}
+    needs: [yaml-lint, kustomize-validate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify upstream CI results
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "needed job results: ${RESULTS}"
+          IFS=',' read -ra items <<< "${RESULTS}"
+          for r in "${items[@]}"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::CI Gate: a required job concluded '${r}'"
+              exit 1
+            fi
+          done
+          echo "CI Gate: all required jobs passed or were skipped"
