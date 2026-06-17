@@ -1,10 +1,22 @@
-# OCTO golden-path demo — reference stack + streaming channel bot
+# OCTO golden-path demo — reference stack + channel bot
 
 A reproducible, **one-command** path that brings up the OCTO reference stack
 locally and wires a [`cc-channel-octo`](https://github.com/Mininglamp-OSS/cc-channel-octo)
-bot that **streams** a reply when a human @mentions it in a group channel.
+bot that **replies** when a human @mentions it in a group channel. While the
+bot's Claude Agent SDK turn runs, the channel shows a live typing indicator;
+the reply is then posted in-channel (split into multiple messages if long).
 
 This is the demo QA validates end-to-end (OCT-12).
+
+> **Streaming status (read this).** True token-by-token streaming (the WuKongIM
+> `IMStreamStart`→items→`IMStreamEnd` protocol) is **not** available to a
+> `cc-channel-octo` bot today: those stream routes are exposed only on the
+> internal `modules/robot` agent path, not on the public `/v1/bot` API the
+> gateway uses (`/v1/bot` has no `stream/start` or `stream/end` route; the
+> gateway removed its dead stream path in cc-channel-octo `b7139d2`). The bot
+> therefore delivers a **typing indicator + a posted reply**, not an
+> incrementally-rendered bubble. Adding incremental streaming to the public bot
+> API + re-wiring the gateway is tracked as a follow-up (see OCT-10 children).
 
 ## What comes up
 
@@ -30,7 +42,7 @@ the golden path. `preflight` runs automatically as a dependency gate.
   checkout (`npm install && npm run build`) and **Claude model credentials in
   your environment** (`ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` +
   `ANTHROPIC_BASE_URL` for a gateway). The gateway forwards these to the Claude
-  Agent SDK subprocess that generates the streamed reply.
+  Agent SDK subprocess that generates the bot's reply.
 
 ## Quick start
 
@@ -56,8 +68,9 @@ OCTO_HUMAN_UID=<your-user-uid> OCTO_BOT_TOKEN=bf_xxxxxxxx ./run.sh
 ```
 
 Then in octo-web (`http://localhost:28083`): open the demo group (or create one
-and add the bot), **@mention the bot**, and watch the reply stream back
-token-by-token.
+and add the bot), **@mention the bot**, and watch for the typing indicator
+followed by the bot's posted reply (see **Streaming status** above for why this
+is not a token-by-token bubble).
 
 ### Lifecycle
 
@@ -84,11 +97,14 @@ tail -f bot.log      # follow the bot
 ## Acceptance mapping (OCT-10 / OCT-18)
 
 - **Documented, reproducible script brings up the stack + a bot** → `./run.sh`
-  (stack) and `OCTO_BOT_TOKEN=… ./run.sh` (bot), documented here.
-- **Bot replies to a human @mention in a group channel, streamed back** → the
-  bot joins the group (scripted via `OCTO_HUMAN_UID`, or added in web) and the
-  Claude Agent SDK streams its reply; `cc-channel-octo`'s stream relay posts it
-  incrementally. Validated in octo-web (QA: OCT-12).
+  (stack) and `OCTO_BOT_TOKEN=… ./run.sh` (bot), documented here. ✅
+- **Bot replies to a human @mention in a group channel** → the bot joins the
+  group (scripted via `OCTO_HUMAN_UID`, or added in web) as a `robot=1` member,
+  shows a typing indicator while the Claude Agent SDK turn runs, then posts its
+  reply via `cc-channel-octo`'s relay (`sendMessage` + splitting). Validated in
+  octo-web (QA: OCT-12). ⚠️ **"streamed back" caveat:** the reply is posted, not
+  incrementally rendered — see **Streaming status** above. Whether the demo's
+  acceptance requires true incremental streaming is a scope call on OCT-10.
 
 ## QA end-to-end test plan (OCT-12)
 
@@ -100,5 +116,7 @@ tail -f bot.log      # follow the bot
    `Ready — listening for messages`.
 4. In octo-web, create a group, add the bot (or use `OCTO_HUMAN_UID` to seed it),
    and @mention the bot.
-5. **Expected:** the bot replies in-channel and the reply renders incrementally
-   (streamed), not as one delayed block.
+5. **Expected:** a typing indicator appears while the bot's turn runs, then the
+   bot posts its reply in-channel (one or more messages if long). Note this is a
+   posted reply, not an incrementally-rendered streaming bubble — see
+   **Streaming status** at the top.
