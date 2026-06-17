@@ -1,0 +1,3 @@
+oct7_gate_red:
+  foo: bar: baz
+    - broken: : :
