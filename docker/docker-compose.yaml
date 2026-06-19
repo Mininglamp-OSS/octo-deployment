@@ -109,6 +109,12 @@ volumes:
   # spill accounting (octo-search-indexer phase 6) is defeated.
   search-dlq-spill:
     name: ${COMPOSE_PROJECT_NAME:-octo}_search-dlq-spill
+  # Backfill checkpoint + DLQ spill (one-shot historical loader, `search-tools`
+  # profile). Persisted so a backfill that is interrupted (SIGTERM / host
+  # reboot) resumes from its last keyset high-watermark instead of re-scanning
+  # from zero. Separate from search-dlq-spill (the live indexer's spill).
+  search-backfill-state:
+    name: ${COMPOSE_PROJECT_NAME:-octo}_search-backfill-state
 
 services:
   # ---------------------------------------------------------------------------
@@ -715,6 +721,56 @@ services:
       # Leave OCTO_ADMIN_PWD empty in .env to skip auto-bootstrap
       # (create admin manually via API).
       TS_ADMINPWD: ${OCTO_ADMIN_PWD:-}
+      # -----------------------------------------------------------------
+      # Message search backend (opt-in `search` profile)
+      # -----------------------------------------------------------------
+      # OCTO_SEARCH_BACKEND is the SINGLE switch octo-server reads to decide
+      # whether any message-search surface serves. It is read directly via
+      # os.Getenv (NOT the TS_/Viper path), three explicit states:
+      #
+      #   disabled — every _search* endpoint returns SEARCH_DISABLED and the
+      #              client app_config advertises search_enabled=false, so the
+      #              frontend hides the search entry instead of probing a dead
+      #              backend. The server NEVER dials OpenSearch (the ES client
+      #              is built lazily on first request, and the backend gate
+      #              short-circuits before that), so a no-search deployment
+      #              boots clean with zero UPSTREAM_UNAVAILABLE noise.
+      #   es       — the OpenSearch _search* endpoints serve (legacy Zinc off).
+      #   zinc     — rollback to the legacy WuKongIM→Zinc path (ES off).
+      #
+      # Default here is `disabled`: a vanilla `docker compose up` runs no
+      # search infrastructure, so the only correct posture is "search off,
+      # cleanly". The `search` profile upgrade (docker/README.md "Turn search
+      # on") flips this to `es` and restarts octo-server as its final step.
+      # Leaving it UNSET would make octo-server assume the pre-switch default
+      # (ES on) and hammer a non-existent OpenSearch on the first search call.
+      OCTO_SEARCH_BACKEND: ${OCTO_SEARCH_BACKEND:-disabled}
+      # Where the reader finds OpenSearch + which read alias it queries. Only
+      # consulted when OCTO_SEARCH_BACKEND=es; harmless (unread) when disabled.
+      # The reader queries the ALIAS, never the physical index — the alias is
+      # bound to the physical `octo-message` index by the upgrade flow only
+      # after backfill + reconcile pass (see docker/README.md "Turn search on").
+      OCTO_SEARCH_OS_ADDRS: ${OCTO_SEARCH_OS_ADDRS:-http://search-opensearch:9200}
+      OCTO_SEARCH_OS_READ_ALIAS: ${OCTO_SEARCH_OS_READ_ALIAS:-wukongim-messages-read}
+      # Per-deployment HMAC key for the opaque search pagination cursor. Unset
+      # falls back to a published constant (forgeable but carries no authz);
+      # set a random value in .env for any real search deployment.
+      OCTO_SEARCH_CURSOR_HMAC: ${OCTO_SEARCH_CURSOR_HMAC:-}
+      # -----------------------------------------------------------------
+      # Real-time search producer (searchetl → Kafka) — OFF by default
+      # -----------------------------------------------------------------
+      # The searchetl module streams new messages into Kafka for the indexer
+      # to consume. It is gated by Kafka.On (Viper key kafka.on ← TS_KAFKA_ON);
+      # OFF means the scheduler never starts (zero overhead) and is the correct
+      # state for a no-search deployment. The `search` profile upgrade turns it
+      # on ONLY AFTER the extraction cursor has been seeded to each message
+      # shard's high-watermark — otherwise the cursor starts at 0 and the
+      # producer re-streams the entire message history (a full double-ingest on
+      # top of the one-shot backfill). See docker/README.md "Turn search on".
+      TS_KAFKA_ON: ${OCTO_SEARCH_PRODUCER_ON:-false}
+      TS_KAFKA_BROKERS: ${OCTO_SEARCH_KAFKA_BROKERS:-search-kafka:9092}
+      TS_KAFKA_TOPIC: ${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}
+      TS_KAFKA_DLQTOPIC: ${OCTO_SEARCH_KAFKA_DLQ_TOPIC:-octo.message.v1.dlq}
     depends_on:
       preflight:
         condition: service_completed_successfully
@@ -1175,5 +1231,131 @@ services:
       INDEXER_DLQ_SPILL_DIR: /var/lib/es-indexer/dlq-spill
     volumes:
       - search-dlq-spill:/var/lib/es-indexer/dlq-spill
+    networks:
+      - octo-net
+
+  # ===========================================================================
+  # Search upgrade tooling (one-shot) — `search-tools` profile, NOT `search`
+  # ===========================================================================
+  # These two jobs implement the irreversible "light search up" steps of the
+  # upgrade flow (docker/README.md "Turn search on"). They are gated behind a
+  # SEPARATE profile so that the everyday `COMPOSE_PROFILES=search up -d` (which
+  # brings up the infrastructure: Kafka + OpenSearch + indexer) NEVER triggers a
+  # historical reload or a cursor mutation as a side effect. The upgrade script
+  # (docker/scripts/search-upgrade.sh) runs them explicitly, in order, each with
+  # an exit-code gate.
+  #
+  #   1. search-cursor-seed — seeds the searchetl extraction cursor to each
+  #      message shard's current MAX(id) BEFORE the real-time producer is turned
+  #      on. Without this the cursor starts at 0 and the producer would re-stream
+  #      the entire message history (a full double-ingest on top of backfill).
+  #   2. search-backfill — one-shot historical loader (MySQL shards →
+  #      OpenSearch, bypassing Kafka) with an inline reconcile gate. Exits
+  #      non-zero on any count/sample mismatch so the upgrade script stops before
+  #      the alias is bound.
+  #
+  # Both are idempotent and resumable; both only ever appear with
+  # `--profile search-tools`.
+  # ---------------------------------------------------------------------------
+  search-cursor-seed:
+    image: mysql:8.0
+    restart: "no"
+    profiles: ["search-tools"]
+    environment:
+      TZ: ${TZ:-UTC}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-octo}
+      # Comma-separated message shard tables (defaults match the searchetl /
+      # backfill contract: the 5 WuKongIM message shards).
+      OCTO_SEARCH_SHARD_TABLES: ${OCTO_SEARCH_SHARD_TABLES:-message,message1,message2,message3,message4}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # Seed octo_etl_es_cursor.last_id = MAX(id) for every shard so the
+        # real-time producer (turned on in the next step) only streams messages
+        # newer than the backfill cut-over, never the full history.
+        #
+        # Idempotent + monotonic: GREATEST(existing,new) so re-running never
+        # rewinds a cursor that has already advanced past this point (which
+        # would replay messages). INSERT ... ON DUPLICATE KEY UPDATE upserts the
+        # per-shard row that searchetl's own ensureCursor also creates.
+        #
+        # Requires the octo_etl_es_cursor table to exist — octo-server creates
+        # it via the searchetl migration on first boot, so run this only after
+        # the core stack has come up at least once.
+        DB="${MYSQL_DATABASE:-octo}"
+        run_sql() { MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -h mysql -u root -N -B "$$DB" -e "$$1"; }
+        echo "[cursor-seed] verifying octo_etl_es_cursor exists in $$DB"
+        if [ "$$(run_sql "SHOW TABLES LIKE 'octo_etl_es_cursor';" | wc -l)" -eq 0 ]; then
+          echo "[cursor-seed] FATAL: table octo_etl_es_cursor not found — bring the core stack up once so octo-server runs the searchetl migration, then retry." >&2
+          exit 1
+        fi
+        IFS=','
+        for t in $$OCTO_SEARCH_SHARD_TABLES; do
+          t="$$(echo "$$t" | tr -d ' ')"
+          [ -z "$$t" ] && continue
+          # Validate the shard name as a strict SQL identifier before it is
+          # interpolated into a statement. The list is operator-controlled, not
+          # remote input, but a typo or hostile value must not become arbitrary
+          # SQL run as root. Reject anything outside [A-Za-z0-9_].
+          case "$$t" in
+            *[!A-Za-z0-9_]*)
+              echo "[cursor-seed] FATAL: invalid shard table name '$$t' (allowed: A-Za-z0-9_)" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$$(run_sql "SHOW TABLES LIKE '$$t';" | wc -l)" -eq 0 ]; then
+            echo "[cursor-seed] WARN: shard table '$$t' not present, skipping"
+            continue
+          fi
+          MAXID="$$(run_sql "SELECT COALESCE(MAX(id),0) FROM \`$$t\`;")"
+          run_sql "INSERT INTO octo_etl_es_cursor (shard_table,last_id) VALUES ('$$t',$$MAXID) ON DUPLICATE KEY UPDATE last_id=GREATEST(last_id,VALUES(last_id));"
+          NOW="$$(run_sql "SELECT last_id FROM octo_etl_es_cursor WHERE shard_table='$$t';")"
+          echo "[cursor-seed] $$t: MAX(id)=$$MAXID cursor now=$$NOW"
+        done
+        echo "[cursor-seed] done — searchetl cursor seeded to high-watermark"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - octo-net
+
+  search-backfill:
+    image: ${OCTO_SEARCH_INDEXER_IMAGE:-mininglamposs/octo-search-indexer:latest}
+    restart: "no"
+    profiles: ["search-tools"]
+    # Run the bundled one-shot backfill binary (the same image also ships
+    # es-indexer + reconcile). Bypasses Kafka: reads the MySQL shards directly
+    # and bulk-writes the physical octo-message index, then runs the inline
+    # reconcile gate (count + field-level sample). A mismatch exits non-zero so
+    # the upgrade script stops before binding the read alias.
+    entrypoint: ["/usr/local/bin/backfill"]
+    command:
+      - "-mysql-dsn=root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      - "-tables=${OCTO_SEARCH_SHARD_TABLES:-message,message1,message2,message3,message4}"
+      - "-es=http://search-opensearch:9200"
+      - "-es-index=${OCTO_SEARCH_ES_INDEX:-octo-message}"
+      - "-es-user=${OCTO_SEARCH_ES_USERNAME:-}"
+      - "-es-pass=${OCTO_SEARCH_ES_PASSWORD:-}"
+      - "-spill-dir=/var/lib/octo-backfill/dlq"
+      - "-checkpoint=/var/lib/octo-backfill/checkpoint.json"
+      - "-rate=${OCTO_SEARCH_BACKFILL_RATE:-5000}"
+      - "-batch=${OCTO_SEARCH_BACKFILL_BATCH:-1000}"
+      - "-reconcile"
+      - "-from=${OCTO_SEARCH_BACKFILL_FROM:-0}"
+      - "-to=${OCTO_SEARCH_BACKFILL_TO:-0}"
+    volumes:
+      - search-backfill-state:/var/lib/octo-backfill
+    # Only depends on the core mysql service (always defined). It deliberately
+    # does NOT hard-depend on search-opensearch (a `search`-profile service):
+    # a depends_on across profiles makes `docker compose config` reject the
+    # stack whenever the other profile is inactive. The upgrade script
+    # (search-upgrade.sh) gates on a healthy OpenSearch via an explicit
+    # exit-code check before invoking this job, so the ordering guarantee lives
+    # in the script, not in a fragile cross-profile depends_on.
+    depends_on:
+      mysql:
+        condition: service_healthy
     networks:
       - octo-net

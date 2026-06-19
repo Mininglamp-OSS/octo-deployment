@@ -1205,6 +1205,22 @@ docker build -t octo-search-indexer:local .
 OCTO_SEARCH_INDEXER_IMAGE=octo-search-indexer:local
 ```
 
+This one image carries all three pipeline binaries — `es-indexer` (the
+long-running consumer, the default entrypoint), `backfill` (the one-shot
+historical loader), and `reconcile` (the correctness gate) — so the upgrade
+flow below needs no separate Go toolchain or second image.
+
+> **Image availability (community deployments).** The published
+> `mininglamposs/octo-search-indexer:latest` tag only exists once a release tag
+> has been cut, and the IK-enabled OpenSearch image
+> (`octo-search-opensearch-ik`) is built locally from
+> `docker/opensearch/Dockerfile` (it is not pushed to a public registry). For a
+> from-scratch community deployment, treat both as **prerequisites**: build the
+> indexer image from a checkout as shown above (or pin a published `v*` tag once
+> one exists), and let Compose build the OpenSearch+IK image on first `up`
+> (`--build`). The IK plugin download pulls from `release.infinilabs.com` at
+> build time, so that host must be reachable from wherever you build.
+
 The OpenSearch image with the IK plugin is built automatically from
 `docker/opensearch/Dockerfile` on first `up` (no manual step).
 
@@ -1222,6 +1238,159 @@ docker compose up -d --build search-opensearch search-kafka search-kafka-init es
 `AllowAutoTopicCreation=false`. The `es-indexer` waits for it plus a healthy
 OpenSearch, then auto-creates the `octo-message` index with the embedded IK
 mapping (`ik_max_word` on the index side, `ik_smart` on the query side).
+
+Bringing the profile up only stands up the **infrastructure** (Kafka,
+OpenSearch, the consumer). It does **not** start indexing your message history
+or flip octo-server onto OpenSearch — that is the "Turn search on" upgrade
+below. A fresh `octo-message` index at this point is empty and the alias is
+unbound; octo-server stays on `OCTO_SEARCH_BACKEND=disabled` until you complete
+the upgrade.
+
+### Turn search on (zero-downtime upgrade for a running stack)
+
+This upgrades a stack that has been running **search-off** to a live search
+deployment without taking the core IM service down. The ordering is
+deliberate — **seed the cursor to the message high-watermark, turn the
+real-time producer on, THEN backfill history** — so no live message is missed
+during the load and the historical stream is never double-ingested. Backfill
+and the live stream overlap safely because every ES write is an idempotent
+upsert keyed on `message_id`.
+
+The whole flow is scripted with an exit-code gate (`G1`..`G5`) after each step:
+
+```bash
+cd docker
+docker/scripts/search-upgrade.sh            # run all 6 steps from the start
+# or resume mid-flow:  docker/scripts/search-upgrade.sh --from 4
+# or just re-run the gates against the current state: --check
+```
+
+The script **persists each state flip into `docker/.env` as it makes it**
+(`COMPOSE_PROFILES=search`, then `OCTO_SEARCH_PRODUCER_ON=true`, then
+`OCTO_SEARCH_BACKEND=es`), so a later ordinary `docker compose up -d` keeps
+search on instead of silently reverting to the search-off defaults. No manual
+`.env` edit is required.
+
+What the script does, and the gate that proves each step:
+
+| Step | Action | Gate (exit-code decisive) |
+|------|--------|---------------------------|
+| 1 | `--profile search up -d` — Kafka + OpenSearch + es-indexer | OpenSearch cluster reports green/yellow |
+| 2 | Seed `octo_etl_es_cursor.last_id = MAX(id)` per shard (`search-cursor-seed` one-shot) | **G1**: every shard cursor ≥ its `MAX(id)` |
+| 3 | Turn the producer on (`OCTO_SEARCH_PRODUCER_ON=true`, recreate octo-server) | **G2**: octo-server up with `TS_KAFKA_ON=true` |
+| 4 | One-shot historical backfill + inline reconcile (`search-backfill`) | **G3**: backfill exits 0 (reconcile count+sample pass) |
+| 5 | Bind the read alias → physical `octo-message` index (atomic, single-pointing) | **G4**: alias resolves to exactly one index |
+| 6 | Switch the reader to `es` (`OCTO_SEARCH_BACKEND=es`, recreate octo-server) | **G5**: reader on `es` and an alias-backed search succeeds |
+
+After a successful run, `docker/.env` ends up carrying:
+
+```dotenv
+COMPOSE_PROFILES=search
+OCTO_SEARCH_BACKEND=es
+OCTO_SEARCH_PRODUCER_ON=true
+```
+
+> `G5` asserts the alias-backed search **succeeds** (the alias resolves and
+> OpenSearch answers), not that the corpus is non-empty — a brand-new install
+> with zero messages upgrades correctly and passes.
+
+**Why each step matters**
+
+- **Step 2 before step 3 (cursor seed before producer):** the searchetl cursor
+  defaults to `0`. If the producer starts there, it re-streams the entire
+  message history into Kafka on top of the one-shot backfill — a full double
+  ingest. Seeding each shard cursor to its current `MAX(id)` first means the
+  producer only carries messages newer than the cut-over. The seed is
+  idempotent and monotonic (`GREATEST`), so re-running never rewinds a cursor.
+- **Step 3 before step 4 (producer before backfill):** turning the live stream
+  on first guarantees no message written *during* the historical load is lost;
+  the overlap is safe because of `_id=message_id` idempotency.
+- **Step 5 after step 4 (alias only after reconcile passes):** the read alias
+  `wukongim-messages-read` is what the reader queries; the indexer/backfill
+  write the *physical* `octo-message` index and deliberately do **not**
+  auto-bind the alias. Binding it only after the reconcile gate (G3) passes
+  guarantees the reader never sees a half-loaded corpus.
+- **Step 6 last (reader flip last):** octo-server only reads OpenSearch once
+  `OCTO_SEARCH_BACKEND=es`. Until then the search entry is hidden client-side
+  and the corpus can be built in the background with zero user-visible impact.
+
+> The two upgrade jobs live behind a **separate** `search-tools` profile, so the
+> everyday `--profile search up -d` never triggers a history reload or a cursor
+> mutation as a side effect. They only run when the script invokes them
+> explicitly (`--profile search-tools run --rm …`).
+
+#### Manual run-through (if you are not using the script)
+
+If you run the steps by hand, the inline env overrides below only affect that
+one recreate. **Persist the flips into `docker/.env`** (`COMPOSE_PROFILES=search`,
+`OCTO_SEARCH_PRODUCER_ON=true`, `OCTO_SEARCH_BACKEND=es`) so a later
+`docker compose up -d` does not revert to the search-off defaults — the script
+does this for you automatically.
+
+```bash
+cd docker
+export COMPOSE_PROFILES=search
+
+# 1. infra
+docker compose up -d --build search-opensearch search-kafka search-kafka-init es-indexer
+
+# 2. seed cursor to high-watermark  (G1)
+COMPOSE_PROFILES=search-tools docker compose run --rm search-cursor-seed
+
+# 3. producer on  (G2)
+OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server
+
+# 4. backfill + inline reconcile gate  (G3 — non-zero exit STOPs here)
+COMPOSE_PROFILES=search-tools docker compose run --rm search-backfill
+
+# 5. bind alias atomically  (G4)
+docker compose exec -T search-opensearch curl -sS -XPOST \
+  http://localhost:9200/_aliases -H 'Content-Type: application/json' -d '{
+    "actions":[
+      {"remove":{"index":"*","alias":"wukongim-messages-read","must_exist":false}},
+      {"add":{"index":"octo-message","alias":"wukongim-messages-read"}}
+    ]}'
+
+# 6. reader -> es  (G5)
+OCTO_SEARCH_BACKEND=es OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server
+
+# 7. persist the end state so `up -d` keeps search on
+printf 'COMPOSE_PROFILES=search\nOCTO_SEARCH_PRODUCER_ON=true\nOCTO_SEARCH_BACKEND=es\n' >> .env
+```
+
+#### Rollback
+
+Search can be turned off (or rolled back to the legacy Zinc path) without data
+loss, because MySQL is the source of truth and OpenSearch is rebuildable:
+
+- **Reader rollback (fastest):** set `OCTO_SEARCH_BACKEND=disabled` (search off,
+  entry hidden) or `=zinc` (legacy path) in `docker/.env` and
+  `docker compose up -d octo-server`. The OpenSearch corpus is left intact for a
+  later retry.
+- **Alias rollback:** if you keep an older physical index around, re-point the
+  alias with the same atomic `_aliases` call (swap the `add` target). See
+  `scripts/forward-migrate.sh` in the octo-search-indexer repo for the staged
+  reindex/alias pattern.
+- **Stop the producer:** set `OCTO_SEARCH_PRODUCER_ON=false` and recreate
+  octo-server; the searchetl scheduler then idles (zero overhead). The cursor is
+  preserved, so re-enabling resumes from where it left off (no re-seed needed).
+
+### Resource baseline (with vs without search)
+
+The `search` profile adds three long-running containers on top of the core
+stack. Rough single-node footprint (idle-to-light load; tune via the `.env`
+vars noted):
+
+| Component | Extra memory (default) | Notes |
+|-----------|------------------------|-------|
+| OpenSearch (single node, IK) | ~1 GiB | JVM heap is `-Xms512m -Xmx512m` (`OCTO_SEARCH_OPENSEARCH_JAVA_OPTS`); the box wants roughly 2× heap headroom. Raise heap for larger corpora. |
+| Kafka (KRaft single broker) | ~0.5–1 GiB | Single broker, RF=1; fine for a single-host deployment. |
+| es-indexer (consumer) | ~50–100 MiB | Lightweight Go worker. |
+
+Plus disk for three named volumes (`opensearch-data`, `kafka-data`,
+`search-dlq-spill`) and a transient `search-backfill-state` volume for the
+backfill checkpoint. A search-off deployment carries **none** of this — the core
+stack (server/nginx/mysql/redis/minio/wukongim) is byte-for-byte unchanged.
 
 ### End-to-end check (local)
 
@@ -1283,14 +1452,14 @@ cd docker
 # 1. Stop + remove ONLY the search-profile containers (by name). -p octo pins
 #    the project so this never touches another stack; core services are not
 #    listed, so they are left running and untouched.
-docker compose -p octo rm -sf search-kafka search-kafka-init search-opensearch es-indexer
+docker compose -p octo rm -sf search-kafka search-kafka-init search-opensearch es-indexer search-cursor-seed search-backfill
 
 # 2. (local validation only) Remove ONLY the search-specific named volumes.
 #    Core volumes (mysql-data, redis-data, ...) are NOT listed and NOT touched.
 #    Volume names follow `name: ${COMPOSE_PROJECT_NAME:-octo}_*` from the
 #    compose file; for the default project that is the `octo_` prefix. If you
 #    run a non-default COMPOSE_PROJECT_NAME, substitute it here.
-docker volume rm octo_opensearch-data octo_kafka-data octo_search-dlq-spill
+docker volume rm octo_opensearch-data octo_kafka-data octo_search-dlq-spill octo_search-backfill-state
 ```
 
 If you set a custom `COMPOSE_PROJECT_NAME` (e.g. `octo-fz`), use `-p <name>` in
