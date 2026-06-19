@@ -1260,8 +1260,8 @@ The whole flow is scripted with an exit-code gate (`G1`..`G5`) after each step:
 
 ```bash
 cd docker
-docker/scripts/search-upgrade.sh            # run all 6 steps from the start
-# or resume mid-flow:  docker/scripts/search-upgrade.sh --from 4
+scripts/search-upgrade.sh                    # run all 6 steps from the start
+# or resume mid-flow:  scripts/search-upgrade.sh --from 4
 # or just re-run the gates against the current state: --check
 ```
 
@@ -1327,9 +1327,20 @@ one recreate. **Persist the flips into `docker/.env`** (`COMPOSE_PROFILES=search
 `docker compose up -d` does not revert to the search-off defaults — the script
 does this for you automatically.
 
+> ⚠️ **`COMPOSE_PROFILES` is a single comma-separated list — union, never
+> overwrite.** If you already run another profile (e.g. `summary`), a bare
+> `COMPOSE_PROFILES=search` (exported here, or appended to `.env`) silently drops
+> it, because Compose takes the *last* assignment of a key. Add `search` to the
+> existing value instead of replacing it. The script's `persist_profile` does
+> this merge for you; the manual steps below show the equivalent by hand.
+
 ```bash
 cd docker
-export COMPOSE_PROFILES=search
+# Union `search` into any profile you already run (e.g. summary), don't clobber.
+# Read only the COMPOSE_PROFILES line from .env — never `source` .env (it holds
+# passwords / DSNs that are not safe to eval as shell).
+existing="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2-)"
+export COMPOSE_PROFILES="${existing:+$existing,}search"
 
 # 1. infra
 docker compose up -d --build search-opensearch search-kafka search-kafka-init es-indexer
@@ -1354,8 +1365,19 @@ docker compose exec -T search-opensearch curl -sS -XPOST \
 # 6. reader -> es  (G5)
 OCTO_SEARCH_BACKEND=es OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server
 
-# 7. persist the end state so `up -d` keeps search on
-printf 'COMPOSE_PROFILES=search\nOCTO_SEARCH_PRODUCER_ON=true\nOCTO_SEARCH_BACKEND=es\n' >> .env
+# 7. persist the end state so `up -d` keeps search on.
+#    NOTE: append OCTO_SEARCH_* freely, but COMPOSE_PROFILES must be MERGED, not
+#    appended — a second COMPOSE_PROFILES=search line would override (drop) any
+#    profile already in .env. Rewrite the single COMPOSE_PROFILES line in place
+#    (portable awk, no sed -i flavor issues):
+printf 'OCTO_SEARCH_PRODUCER_ON=true\nOCTO_SEARCH_BACKEND=es\n' >> .env
+if grep -qE '^COMPOSE_PROFILES=' .env; then
+  awk -F= 'BEGIN{OFS="="}
+    $1=="COMPOSE_PROFILES" && $0 !~ /(,|=)search(,|$)/ {$0=$0",search"}
+    {print}' .env > .env.tmp && mv .env.tmp .env
+else
+  echo 'COMPOSE_PROFILES=search' >> .env
+fi
 ```
 
 #### Rollback

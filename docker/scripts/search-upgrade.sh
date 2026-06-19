@@ -332,6 +332,16 @@ case "${1:-}" in
   *) echo "usage: $0 [--from N | --check]"; exit 2 ;;
 esac
 
+# Validate --from: must be an integer 1..6 (the step count). Without this guard,
+# `--from 7` would skip every step and `--from foo` would crash inside the `-le`
+# arithmetic — either way the script could fall through to "Upgrade complete" and
+# report a false success without having run anything.
+if ! [[ "$FROM_STEP" =~ ^[1-6]$ ]]; then
+  echo "error: --from must be an integer 1..6 (got '${FROM_STEP}')" >&2
+  echo "usage: $0 [--from N | --check]" >&2
+  exit 2
+fi
+
 [ "$FROM_STEP" -le 1 ] && step1_infra_up
 [ "$FROM_STEP" -le 2 ] && step2_seed_cursor
 [ "$FROM_STEP" -le 3 ] && step3_producer_on
