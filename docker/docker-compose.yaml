@@ -1235,6 +1235,89 @@ services:
       - octo-net
 
   # ===========================================================================
+  # Standalone realtime producer (MySQL -> Kafka) — `search-producer` profile
+  # ===========================================================================
+  # The octo-search-indexer image also bundles a standalone searchetl-producer
+  # binary (MySQL shards -> Kafka), an ALTERNATIVE to octo-server's BUILT-IN
+  # producer (TS_KAFKA_ON / OCTO_SEARCH_PRODUCER_ON).
+  #
+  # 🔴 MUTUAL EXCLUSION — NEVER run both producers at once. They share the SAME
+  # extraction cursor table (octo_etl_es_cursor) and the SAME Redis run-lock
+  # (searchetl:etl:run). The lock only serializes a single tick; it does NOT
+  # stop both from advancing the cursor and double-writing/reordering Kafka.
+  #
+  # Defense in depth:
+  #   (1) own profile `search-producer` — neither a vanilla `up` nor
+  #       COMPOSE_PROFILES=search instantiates it;
+  #   (2) opt-in OFF — PRODUCER_ENABLED defaults to false even when instantiated;
+  #   (3) HARD compose-time guard — search-producer-guard (below) refuses to let
+  #       this service start while the built-in producer is also on. This is the
+  #       mechanical mutual-exclusion gate, not just a comment.
+  # The cut-over (enable standalone + disable built-in) is a SEPARATE manual gate
+  # validated on im-test.xming.ai first — NOT part of bringing this up.
+  search-producer-guard:
+    image: ${OCTO_PREFLIGHT_IMAGE:-busybox:1.36}
+    restart: "no"
+    profiles: ["search-producer"]
+    environment:
+      STANDALONE_ON: ${OCTO_SEARCH_STANDALONE_PRODUCER_ON:-false}
+      BUILTIN_ON: ${OCTO_SEARCH_PRODUCER_ON:-false}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # Mirrors the `preflight` / `minio-init` guard pattern: a one-shot
+        # busybox assertion gated by service_completed_successfully. Fail-fast
+        # (exit 1) on the forbidden state so the standalone producer can never
+        # boot alongside the built-in one — the P0 double-write guard.
+        std=$$(printf %s "$$STANDALONE_ON" | tr 'A-Z' 'a-z')
+        blt=$$(printf %s "$$BUILTIN_ON" | tr 'A-Z' 'a-z')
+        if [ "$$std" = "true" ] && [ "$$blt" = "true" ]; then
+          echo "[search-producer-guard] FATAL: both producers enabled —" >&2
+          echo "[search-producer-guard]   OCTO_SEARCH_STANDALONE_PRODUCER_ON=true AND OCTO_SEARCH_PRODUCER_ON=true." >&2
+          echo "[search-producer-guard]   They share the cursor + Redis lock; running both double-writes Kafka." >&2
+          echo "[search-producer-guard]   Set exactly ONE to true. Refusing to start." >&2
+          exit 1
+        fi
+        echo "[search-producer-guard] ok: standalone=$$std builtin=$$blt (not both on)"
+    networks:
+      - octo-net
+
+  search-producer:
+    image: ${OCTO_SEARCH_INDEXER_IMAGE:-mininglamposs/octo-search-indexer:latest}
+    entrypoint: ["/usr/local/bin/searchetl-producer"]
+    restart: unless-stopped
+    profiles: ["search-producer"]
+    environment:
+      TZ: ${TZ:-UTC}
+      # Master switch — OFF by default. Distinct from the built-in producer's
+      # OCTO_SEARCH_PRODUCER_ON. Both true is the forbidden state the guard blocks.
+      PRODUCER_ENABLED: ${OCTO_SEARCH_STANDALONE_PRODUCER_ON:-false}
+      # Required when PRODUCER_ENABLED=true (binary fail-fasts otherwise).
+      # Same passwordless redis:6379 + root DSN convention as the rest of the stack.
+      PRODUCER_MYSQL_DSN: "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local"
+      PRODUCER_KAFKA_BROKERS: ${OCTO_SEARCH_KAFKA_BROKERS:-search-kafka:9092}
+      PRODUCER_REDIS_ADDR: redis:6379
+      # Defaulted by the binary; pinned to match the rest of the pipeline.
+      PRODUCER_KAFKA_TOPIC: ${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}
+      PRODUCER_KAFKA_DLQ_TOPIC: ${OCTO_SEARCH_KAFKA_DLQ_TOPIC:-octo.message.v1.dlq}
+      PRODUCER_TABLES: ${OCTO_SEARCH_SHARD_TABLES:-message,message1,message2,message3,message4}
+      PRODUCER_LAG_SECONDS: ${OCTO_SEARCH_STANDALONE_PRODUCER_LAG_SECONDS:-600}
+    # mysql/redis are core; the guard is same-profile so this depends_on is safe.
+    # search-kafka is in the `search` profile — NO cross-profile depends_on (see
+    # search-backfill note). Operator must bring `search` infra up first; the
+    # producer idles cleanly (or, if enabled without brokers, fail-fasts loudly).
+    depends_on:
+      search-producer-guard:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - octo-net
+
+  # ===========================================================================
   # Search upgrade tooling (one-shot) — `search-tools` profile, NOT `search`
   # ===========================================================================
   # These two jobs implement the irreversible "light search up" steps of the
