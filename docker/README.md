@@ -1380,6 +1380,36 @@ else
 fi
 ```
 
+> ⚠️ **互斥守卫现已双向生效 — 在 standalone 仍在跑时单独 `up -d octo-server` 会让 octo-server 短暂宕机**
+>
+> `search-producer-guard` 已升格为无 profile 的共享守卫：`octo-server`（内置 producer）与 `search-producer`（standalone）都 `depends_on` 它。任一方在「两个 producer 同时为真」的禁忌态下启动/重建都会被守卫 `exit 1` 拦下。
+>
+> 具体到本 runbook 上面第 3/6 步的 `OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server`：**如果 standalone producer（`OCTO_SEARCH_STANDALONE_PRODUCER_ON=true` + `search-producer` profile）此刻仍在运行**，这条命令不仅会被守卫 fail-fast 拒绝，**还会先把正在运行的 octo-server 一起拆掉**——因为 `OCTO_SEARCH_PRODUCER_ON` 同时改了 octo-server 自身的 `TS_KAFKA_ON`，compose 会 recreate octo-server：旧的 running 实例被销毁，新实例因守卫失败卡在 `Created` 永不 running。**净结果：octo-server 直接下线**，不是「旧实例继续跑、只是拒绝新配置」。
+>
+> 这是 **fail-closed 的预期行为**（宕机优于两个 producer 双写共享 cursor + Kafka），只在 both-on 禁忌态触发，默认路径 / 单开任一路径都不受影响。但操作时务必知道这一点。
+>
+> **正确切流顺序：先关 standalone，再开内置。**
+> ```bash
+> cd docker
+> # 1. 关掉 standalone producer
+> docker compose stop search-producer
+> # 2. 在 docker/.env 把 standalone toggle 关掉，并从 COMPOSE_PROFILES 去掉 search-producer
+> #    OCTO_SEARCH_STANDALONE_PRODUCER_ON=false
+> # 3. 再开内置 producer
+> OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server
+> ```
+>
+> **如果已经手滑撞了守卫（octo-server 已经 down）：** 把冲突的 toggle 改回去再 `up` 即可**干净恢复**——守卫会重跑并 `exit 0`，octo-server 回到 running/healthy（实测无残留、无不可恢复状态）。二选一：
+> ```bash
+> cd docker
+> # (a) 仍想用 standalone → 把内置关回去，octo-server 以 builtin=off 恢复
+> OCTO_SEARCH_PRODUCER_ON=false docker compose up -d octo-server
+>
+> # (b) 想切到内置 → 先停 standalone（并在 .env 关掉 standalone toggle），再开内置
+> docker compose stop search-producer
+> OCTO_SEARCH_PRODUCER_ON=true docker compose up -d octo-server
+> ```
+
 #### Rollback
 
 Search can be turned off (or rolled back to the legacy Zinc path) without data
