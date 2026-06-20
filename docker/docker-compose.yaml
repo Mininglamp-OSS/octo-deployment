@@ -1270,16 +1270,33 @@ services:
         # busybox assertion gated by service_completed_successfully. Fail-fast
         # (exit 1) on the forbidden state so the standalone producer can never
         # boot alongside the built-in one — the P0 double-write guard.
-        std=$$(printf %s "$$STANDALONE_ON" | tr 'A-Z' 'a-z')
-        blt=$$(printf %s "$$BUILTIN_ON" | tr 'A-Z' 'a-z')
-        if [ "$$std" = "true" ] && [ "$$blt" = "true" ]; then
+        # Truthy normalization (fail-closed). The two guarded producers parse
+        # their enable flags with DIFFERENT, non-identical truthy sets:
+        #   - built-in producer: octo-server TS_KAFKA_ON -> Viper cast.ToBool ->
+        #     strconv.ParseBool, which accepts 1 t T TRUE true True (NOT on/yes).
+        #   - standalone: PRODUCER_ENABLED -> strings.EqualFold(env,"true"),
+        #     i.e. only the "true" variants.
+        # A literal `= "true"` check let OCTO_SEARCH_PRODUCER_ON=1 slip past the
+        # guard (ParseBool("1") is ON) so BOTH producers ran and double-wrote the
+        # shared cursor + Kafka. The guard now normalizes with the UNION of both
+        # parsers' truthy sets PLUS conservative ops aliases (on/yes): if a value
+        # would be ON for EITHER producer, the guard counts it ON. This is the
+        # fail-closed bias — over-block rather than let both run.
+        is_on() {
+          v=$$(printf %s "$${1:-}" | tr 'A-Z' 'a-z')
+          case "$$v" in
+            1|t|true|on|yes) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+        if is_on "$$STANDALONE_ON" && is_on "$$BUILTIN_ON"; then
           echo "[search-producer-guard] FATAL: both producers enabled —" >&2
-          echo "[search-producer-guard]   OCTO_SEARCH_STANDALONE_PRODUCER_ON=true AND OCTO_SEARCH_PRODUCER_ON=true." >&2
+          echo "[search-producer-guard]   OCTO_SEARCH_STANDALONE_PRODUCER_ON=$$STANDALONE_ON AND OCTO_SEARCH_PRODUCER_ON=$$BUILTIN_ON (both truthy)." >&2
           echo "[search-producer-guard]   They share the cursor + Redis lock; running both double-writes Kafka." >&2
-          echo "[search-producer-guard]   Set exactly ONE to true. Refusing to start." >&2
+          echo "[search-producer-guard]   Set exactly ONE to a truthy value. Refusing to start." >&2
           exit 1
         fi
-        echo "[search-producer-guard] ok: standalone=$$std builtin=$$blt (not both on)"
+        echo "[search-producer-guard] ok: standalone=$$STANDALONE_ON builtin=$$BUILTIN_ON (not both on)"
     networks:
       - octo-net
 
