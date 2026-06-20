@@ -40,7 +40,15 @@ kubectl apply -k kustomize/search -n <ns>
 - `search-kafka.yaml` — Kafka (KRaft single broker) StatefulSet + headless Service.
 - `search-kafka-init.yaml` — one-shot Job creating the body + DLQ topics.
 - `search-opensearch.yaml` — OpenSearch (single node, IK) StatefulSet + headless Service.
-- `es-indexer.yaml` — es-indexer Deployment (DLQ spill on a PVC).
+- `es-indexer.yaml` — es-indexer Deployment (Kafka → OpenSearch consumer; DLQ spill on a PVC).
+- `searchetl-producer.yaml` — searchetl-producer Deployment (MySQL → Kafka write side).
+  **Opt-in, OFF by default**: `PRODUCER_ENABLED=false`, so applying this
+  kustomization deploys the workload but it idles (connects to no backend) —
+  zero behavior change. It reads the source MySQL DSN + Redis addr from the
+  existing `octo-server-secret` (`DM_MYSQL_DSN` / `DM_REDIS_ADDR`). Turn it on
+  (`PRODUCER_ENABLED=true`) only at the runtime cut-over, after stopping the
+  octo-server built-in producer — the two share the cursor + Redis run-lock and
+  must not run together. Seed the cursor to the high-watermark first.
 - `search-pvc.yaml` — PVCs: OpenSearch data, Kafka data, DLQ spill.
 
 The DLQ-spill PVC is required: without durable spill storage the indexer's

@@ -1234,6 +1234,80 @@ services:
     networks:
       - octo-net
 
+  # searchetl-producer (MySQL shards -> Kafka polling ETL). The realtime WRITE
+  # side of the search pipeline, run as a standalone service alongside es-indexer
+  # (the READ side: Kafka -> OpenSearch). Same image, different binary: the image
+  # default entrypoint is es-indexer, so this service overrides entrypoint to
+  # /usr/local/bin/searchetl-producer.
+  #
+  # 🔴 OFF BY DEPLOY, OPT-IN BY ROLLOUT: PRODUCER_ENABLED defaults to false even
+  # inside the search profile. Bringing the search profile up therefore deploys
+  # this container but it IDLES (connects to NO backend) — exactly zero behavior
+  # change. Turning the standalone producer ON is a deliberate, owner-gated
+  # runtime cut-over (set OCTO_SEARCH_STANDALONE_PRODUCER_ON=true) that the
+  # operator performs only AFTER stopping the octo-server built-in producer
+  # (OCTO_SEARCH_PRODUCER_ON=false). The two MUST NOT run at once against the same
+  # cursor — the Redis run-lock + cursor CAS make a brief overlap safe, but the
+  # supported posture is one active producer at a time.
+  #
+  # Cursor table prerequisite: like the built-in producer, this only INSERT
+  # IGNOREs the per-shard cursor row; the octo_etl_es_cursor table itself is
+  # created by octo-server's searchetl migration. Bring the core stack up once
+  # before turning the producer on (the same prerequisite as search-cursor-seed).
+  searchetl-producer:
+    image: ${OCTO_SEARCH_INDEXER_IMAGE:-mininglamposs/octo-search-indexer:latest}
+    restart: unless-stopped
+    profiles: ["search"]
+    entrypoint: ["/usr/local/bin/searchetl-producer"]
+    depends_on:
+      search-kafka-init:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-UTC}
+      # 🔴 Opt-in master switch — OFF by default. The producer binary idles (no
+      # MySQL/Kafka/Redis connection) unless PRODUCER_ENABLED=true AND brokers +
+      # DSN + Redis are all set. Defaulting to false makes the search-profile
+      # deploy behavior-neutral; flip OCTO_SEARCH_STANDALONE_PRODUCER_ON=true in
+      # .env only at the runtime cut-over.
+      PRODUCER_ENABLED: ${OCTO_SEARCH_STANDALONE_PRODUCER_ON:-false}
+      # Source MySQL (same host + schema as octo-server — the producer reads the
+      # message shards and the shared octo_etl_es_cursor watermark). Credentials
+      # come from the core stack's MYSQL_ROOT_PASSWORD; not echoed to logs.
+      PRODUCER_MYSQL_DSN: ${OCTO_SEARCH_PRODUCER_MYSQL_DSN:-root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE:-octo}?charset=utf8mb4&parseTime=true&loc=Local}
+      PRODUCER_TABLES: ${OCTO_SEARCH_SHARD_TABLES:-message,message1,message2,message3,message4}
+      # Kafka — same brokers + topics as es-indexer consumes (one body topic +
+      # one DLQ topic). The body topic carries the searchmsg contract; the DLQ
+      # topic carries the producer's forensic dead-letter envelopes.
+      PRODUCER_KAFKA_BROKERS: ${OCTO_SEARCH_KAFKA_BROKERS:-search-kafka:9092}
+      PRODUCER_KAFKA_TOPIC: ${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}
+      PRODUCER_KAFKA_DLQ_TOPIC: ${OCTO_SEARCH_KAFKA_DLQ_TOPIC:-octo.message.v1.dlq}
+      # Redis distributed run-lock (anti double-run across replicas AND across the
+      # old/new producer during cut-over). MUST be the same Redis host + logical
+      # DB as octo-server's built-in producer used, or the lock will not mutually
+      # exclude them. Password (when set) is mounted, never logged.
+      PRODUCER_REDIS_ADDR: ${OCTO_SEARCH_PRODUCER_REDIS_ADDR:-redis:6379}
+      PRODUCER_REDIS_PASSWORD: ${OCTO_SEARCH_PRODUCER_REDIS_PASSWORD:-}
+      PRODUCER_REDIS_TLS: ${OCTO_SEARCH_PRODUCER_REDIS_TLS:-false}
+      PRODUCER_REDIS_TLS_INSECURE_SKIP_VERIFY: ${OCTO_SEARCH_PRODUCER_REDIS_TLS_SKIP_VERIFY:-false}
+      PRODUCER_REDIS_TLS_CA_FILE: ${OCTO_SEARCH_PRODUCER_REDIS_TLS_CA_FILE:-}
+      # Polling cadence / safety. lag MUST stay > 0 (the producer rejects lag<=0;
+      # lag=0 risks silent missed reads). Defaults mirror the built-in producer
+      # (tick 60s, lag 600s, batch 5000).
+      PRODUCER_TICK_SECONDS: ${OCTO_SEARCH_PRODUCER_TICK_SECONDS:-60}
+      PRODUCER_LAG_SECONDS: ${OCTO_SEARCH_PRODUCER_LAG_SECONDS:-600}
+      PRODUCER_BATCH: ${OCTO_SEARCH_PRODUCER_BATCH:-5000}
+      # Connection pool (explicit — never bare driver defaults). ConnMaxLifetime
+      # must stay below MySQL wait_timeout.
+      PRODUCER_DB_MAX_OPEN_CONNS: ${OCTO_SEARCH_PRODUCER_DB_MAX_OPEN:-8}
+      PRODUCER_DB_MAX_IDLE_CONNS: ${OCTO_SEARCH_PRODUCER_DB_MAX_IDLE:-4}
+      PRODUCER_DB_CONN_MAX_LIFETIME: ${OCTO_SEARCH_PRODUCER_DB_CONN_MAX_LIFETIME:-30m}
+      # Observability HTTP server (healthz/readyz/metrics) inside the container.
+      PRODUCER_OBS_ADDR: ${OCTO_SEARCH_PRODUCER_OBS_ADDR:-:9090}
+    networks:
+      - octo-net
+
   # ===========================================================================
   # Search upgrade tooling (one-shot) — `search-tools` profile, NOT `search`
   # ===========================================================================

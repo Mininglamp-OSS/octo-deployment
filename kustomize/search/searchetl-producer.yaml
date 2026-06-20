@@ -1,0 +1,126 @@
+# searchetl-producer: the realtime WRITE side of the search pipeline. Polls the
+# MySQL message shards, enriches each row into the searchmsg contract, and
+# produces to Kafka octo.message.v1 (forensic envelopes to the .dlq topic) for
+# es-indexer to consume. Same image as es-indexer, different binary (the image
+# default entrypoint is es-indexer, so this overrides command).
+#
+# 🔴 OPT-IN, OFF BY DEFAULT: PRODUCER_ENABLED is "false" here, so applying this
+# kustomization DEPLOYS the workload but it IDLES (connects to no backend) — zero
+# behavior change. Turning it on is a deliberate, owner-gated runtime cut-over:
+# set PRODUCER_ENABLED=true (and stop the octo-server built-in producer first —
+# the two share the cursor + Redis run-lock; run one at a time). Seed the cursor
+# to the message high-watermark before enabling, or the producer re-streams all
+# history.
+#
+# NOTE: image is built only on v* tags / manual dispatch in octo-search-indexer.
+# Pin a real published tag in kustomization.yaml before applying.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searchetl-producer
+  labels:
+    app: searchetl-producer
+spec:
+  # Single active producer: cross-replica mutual exclusion is enforced by the
+  # Redis run-lock, but there is no benefit to extra replicas (single-active by
+  # design). Keep replicas at 1.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: searchetl-producer
+  template:
+    metadata:
+      labels:
+        app: searchetl-producer
+    spec:
+      containers:
+        - name: searchetl-producer
+          image: mininglamposs/octo-search-indexer:latest
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/searchetl-producer"]
+          env:
+            # 🔴 Opt-in master switch — OFF by default. Flip to "true" only at the
+            # runtime cut-over, after stopping the octo-server built-in producer.
+            - name: PRODUCER_ENABLED
+              value: "false"
+            # Source MySQL: reuse the IM database DSN the core stack already holds
+            # (the message shards + the shared octo_etl_es_cursor live there). For
+            # a least-privilege account, point this at a dedicated Secret key with
+            # message* read + octo_etl_es_cursor read/write.
+            - name: PRODUCER_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: octo-server-secret
+                  key: DM_MYSQL_DSN
+                  # optional: the disabled-by-default pod must reach its idle
+                  # /healthz+/readyz posture even before the search secret exists.
+                  # A non-optional ref makes k8s fail the pod (CreateContainerConfigError)
+                  # before the binary runs. When the producer is turned on the
+                  # operator ensures this key is present (cut-over prerequisite).
+                  optional: true
+            - name: PRODUCER_TABLES
+              value: "message,message1,message2,message3,message4"
+            # Kafka — same brokers + topics es-indexer consumes.
+            - name: PRODUCER_KAFKA_BROKERS
+              value: "search-kafka:9092"
+            - name: PRODUCER_KAFKA_TOPIC
+              value: "octo.message.v1"
+            - name: PRODUCER_KAFKA_DLQ_TOPIC
+              value: "octo.message.v1.dlq"
+            # Redis run-lock — MUST be the same Redis host + logical DB the
+            # built-in producer used, or the lock will not mutually exclude them.
+            - name: PRODUCER_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: octo-server-secret
+                  key: DM_REDIS_ADDR
+                  # optional for the same reason as PRODUCER_MYSQL_DSN above —
+                  # the idle default pod must not fail on a missing secret key.
+                  optional: true
+            # Polling cadence / safety (lag MUST stay > 0; the producer rejects
+            # lag<=0, which risks silent missed reads).
+            - name: PRODUCER_TICK_SECONDS
+              value: "60"
+            - name: PRODUCER_LAG_SECONDS
+              value: "600"
+            - name: PRODUCER_BATCH
+              value: "5000"
+            # Explicit connection pool (never bare driver defaults).
+            - name: PRODUCER_DB_MAX_OPEN_CONNS
+              value: "8"
+            - name: PRODUCER_DB_MAX_IDLE_CONNS
+              value: "4"
+            - name: PRODUCER_DB_CONN_MAX_LIFETIME
+              value: "30m"
+            # Observability HTTP server (healthz/readyz/metrics).
+            - name: PRODUCER_OBS_ADDR
+              value: ":9090"
+          ports:
+            - name: obs
+              containerPort: 9090
+          # Liveness: the process is up and serving HTTP. Readiness: the obs
+          # server reports ready. The binary serves /healthz + /readyz in BOTH
+          # states — actively producing AND idling (PRODUCER_ENABLED=false) — so a
+          # deliberately-disabled pod stays healthy/ready (idling-is-ready) under
+          # these probes instead of crashlooping. No backend is dialed while idle.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: obs
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: obs
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

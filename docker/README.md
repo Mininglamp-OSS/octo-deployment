@@ -1168,9 +1168,10 @@ above for why a ufw rule alone is not enough).
 ## Search profile (message-search pipeline)
 
 The message-search pipeline — Kafka + OpenSearch (with the `analysis-ik`
-Chinese analyzer) + the `es-indexer` consumer — is **opt-in** behind the
-Docker Compose `search` profile, exactly like smart-summary's `summary`
-profile. With no profile set it is completely inert:
+Chinese analyzer) + the `es-indexer` consumer + the `searchetl-producer`
+(realtime write side) — is **opt-in** behind the Docker Compose `search`
+profile, exactly like smart-summary's `summary` profile. With no profile set it
+is completely inert:
 
 - A default `docker compose up -d` (or `setup.sh`) starts **zero** search
   services. The rendered config for the default profile is byte-for-byte
@@ -1205,10 +1206,11 @@ docker build -t octo-search-indexer:local .
 OCTO_SEARCH_INDEXER_IMAGE=octo-search-indexer:local
 ```
 
-This one image carries all three pipeline binaries — `es-indexer` (the
-long-running consumer, the default entrypoint), `backfill` (the one-shot
-historical loader), and `reconcile` (the correctness gate) — so the upgrade
-flow below needs no separate Go toolchain or second image.
+This one image carries all four pipeline binaries — `es-indexer` (the
+long-running consumer, the default entrypoint), `searchetl-producer` (the
+long-running realtime write-side producer), `backfill` (the one-shot historical
+loader), and `reconcile` (the correctness gate) — so the upgrade flow below
+needs no separate Go toolchain or second image.
 
 > **Image availability (community deployments).** The published
 > `mininglamposs/octo-search-indexer:latest` tag only exists once a release tag
@@ -1245,6 +1247,46 @@ or flip octo-server onto OpenSearch — that is the "Turn search on" upgrade
 below. A fresh `octo-message` index at this point is empty and the alias is
 unbound; octo-server stays on `OCTO_SEARCH_BACKEND=disabled` until you complete
 the upgrade.
+
+### Standalone `searchetl-producer` service (write side)
+
+The realtime write side (poll MySQL message shards → enrich → Kafka) can run as
+its own container, `searchetl-producer`, instead of inside the octo-server
+process. It is part of the `search` profile (same image as `es-indexer`, with
+`entrypoint` overridden to `/usr/local/bin/searchetl-producer`), so it is
+**deployed** whenever the profile is up — but it is **OFF by default and idles**:
+
+- `PRODUCER_ENABLED` defaults to `false` (driven by
+  `OCTO_SEARCH_STANDALONE_PRODUCER_ON`). With it unset/false the binary connects
+  to **no** backend — bringing the search profile up is exactly zero behavior
+  change. The container exists but does nothing until you opt in.
+- The producer and the octo-server built-in producer
+  (`OCTO_SEARCH_PRODUCER_ON`) share the **same** extraction cursor
+  (`octo_etl_es_cursor`) and the **same** Redis run-lock. The supported posture
+  is **one active producer at a time**. The lock + cursor CAS make a brief
+  overlap safe (no double-ingest, no gap), but you should not run both
+  deliberately.
+
+To move the write side from octo-server to the standalone service on a running
+search deployment (owner-gated, after the cursor is already at the
+high-watermark from the steps below):
+
+```bash
+cd docker
+# 1. Stop the octo-server built-in producer.
+OCTO_SEARCH_PRODUCER_ON=false docker compose up -d octo-server
+# 2. Turn the standalone producer on (it picks up the shared cursor and the
+#    Redis lock, continuing from the current watermark within seconds).
+OCTO_SEARCH_STANDALONE_PRODUCER_ON=true docker compose up -d searchetl-producer
+```
+
+Roll back by reversing the two: stop the standalone producer
+(`OCTO_SEARCH_STANDALONE_PRODUCER_ON=false`, recreate `searchetl-producer`) and
+turn the built-in producer back on. The cursor is shared, so the rollback
+continues from the same watermark; snapshot the tiny `octo_etl_es_cursor` table
+before the cut-over so a corrupted cursor can be restored. In-container
+liveness/readiness/metrics are served on `PRODUCER_OBS_ADDR` (default `:9090`):
+`/healthz`, `/readyz`, `/metrics`.
 
 ### Turn search on (zero-downtime upgrade for a running stack)
 
