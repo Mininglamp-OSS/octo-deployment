@@ -18,6 +18,7 @@ resources:
   - search-kafka-init.yaml
   - search-opensearch.yaml
   - es-indexer.yaml
+  - searchetl-producer.yaml
 
 images:
   - name: apache/kafka
@@ -27,5 +28,10 @@ images:
   # at it. The plugin version MUST match the OpenSearch version.
   - name: octo-search-opensearch-ik
     newTag: "2.17.0"
+  # Shared by es-indexer AND searchetl-producer (one image, two binaries) —
+  # this image-name override pins BOTH to the same tag, which is correct: the
+  # two binaries are built together and must stay in lockstep. yuj5184 is a
+  # manual/temporary build that contains both. NOTE: applying this directory
+  # will also bounce any already-running es-indexer onto this tag.
   - name: mininglamposs/octo-search-indexer
-    newTag: latest
+    newTag: yuj5184
