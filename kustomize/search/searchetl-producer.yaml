@@ -21,6 +21,16 @@ spec:
   # PRODUCER_ENABLED=true (see README enable checklist). The initContainer
   # mutex guard only runs on scale-up — exactly when it is needed.
   replicas: 0
+  # Recreate (not the default RollingUpdate): this is a single-pod workload by
+  # design (replicas>1 is unsupported — Redis run-lock + cursor CAS serialize
+  # to one active producer). RollingUpdate would briefly run the old and new
+  # pod together during an image/env rollout; the init mutex guard only blocks
+  # the built-in producer, not a same-Deployment overlap. App-layer Redis
+  # run-lock + cursor CAS is the real safety net, so Recreate is defense in
+  # depth — it tears the old pod down before the new one starts, closing the
+  # one overlap window k8s would otherwise introduce.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: searchetl-producer

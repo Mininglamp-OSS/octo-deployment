@@ -73,6 +73,15 @@ Enabling is a deliberate, owner-gated action with data-layer consequences:
    Deployment that is Running but produces nothing, or a guard that passed but
    a workload idling — neither produces messages.
 
+> **Single-pod design — `replicas > 1` is not supported.** This is a
+> single-active-producer workload: the app-layer Redis run-lock + cursor CAS
+> serialize work to one producer, so a second replica would idle on the lock at
+> best (and any contention is wasted/risk). Keep `replicas: 1` when enabled.
+> The Deployment uses `strategy: Recreate` (not the default RollingUpdate) so an
+> image/env rollout tears the old pod down before starting the new one, instead
+> of briefly running two producer pods — the init mutex guard only blocks the
+> built-in producer, not a same-Deployment overlap.
+
 ### Mutual-exclusion guard (and its limits)
 
 The pod runs an init container (`producer-mutex-guard`) that reuses the same
