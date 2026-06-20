@@ -1,0 +1,124 @@
+# searchetl-producer: STANDALONE message-search producer (MySQL -> Kafka
+# octo.message.v1). It is the replacement for octo-server's built-in producer
+# (TS_KAFKA_ON); the two must never run together (shared cursor + Redis lock ->
+# double-write). This is the k8s equivalent of the compose `search-producer`
+# service + `search-producer-guard` (docker/docker-compose.yaml).
+#
+# OPT-IN, DEFAULT OFF. Shipped at replicas:0 and PRODUCER_ENABLED=false (double
+# opt-in). Enabling is owner-gated and has data-layer consequences — see
+# README.md "Standalone searchetl-producer".
+#
+# Shares the image with es-indexer (one image, two binaries) — the entrypoint
+# below selects the producer binary. Pin a real tag in kustomization.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searchetl-producer
+  labels:
+    app: searchetl-producer
+spec:
+  # Default OFF: no pod is created. Enabling requires BOTH replicas:1 and
+  # PRODUCER_ENABLED=true (see README enable checklist). The initContainer
+  # mutex guard only runs on scale-up — exactly when it is needed.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: searchetl-producer
+  template:
+    metadata:
+      labels:
+        app: searchetl-producer
+    spec:
+      initContainers:
+        # producer-mutex-guard: fail-closed mutual-exclusion check, the k8s
+        # equivalent of the compose `search-producer-guard`. Reuses the SAME
+        # is_on() union truthy logic (1|t|true|on|yes) — do NOT add a second
+        # truth table. If BOTH the standalone (this pod) and the built-in
+        # producer (octo-server TS_KAFKA_ON) are truthy, exit 1 so the pod
+        # never reaches Running. NOTE: this is single-direction (only blocks
+        # standalone start-up) and point-in-time (start-up only) — see README.
+        - name: producer-mutex-guard
+          image: busybox:1.36
+          env:
+            # Hardcoded true: the pod existing (operator scaled to replicas:1)
+            # is itself the statement of intent to run standalone. Driving this
+            # from PRODUCER_ENABLED would be a two-literal footgun (forget the
+            # guard env -> stale false -> guard bypassed). Hardcoding matches
+            # the compose fail-closed bias (over-block, never under-block).
+            - name: STANDALONE_ON
+              value: "true"
+            # Built-in producer toggle, read from octo-server's ConfigMap.
+            # optional:true covers BOTH "key missing" and "ConfigMap missing"
+            # -> empty -> treated as false.
+            - name: BUILTIN_ON
+              valueFrom:
+                configMapKeyRef:
+                  name: octo-server-env
+                  key: TS_KAFKA_ON
+                  optional: true
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              is_on() {
+                v=$(printf %s "${1:-}" | tr 'A-Z' 'a-z')
+                case "$v" in
+                  1|t|true|on|yes) return 0 ;;
+                  *) return 1 ;;
+                esac
+              }
+              # BUILTIN_ON may be UNSET (not just empty) when the optional
+              # configMapKeyRef's ConfigMap/key is absent — k8s omits the env
+              # var entirely. Under `set -u` a bare "$BUILTIN_ON" would abort;
+              # ${BUILTIN_ON:-} normalizes unset->empty so missing -> false.
+              if is_on "$STANDALONE_ON" && is_on "${BUILTIN_ON:-}"; then
+                echo "[guard] FATAL both producers on" >&2
+                exit 1
+              fi
+              echo "[guard] ok"
+      containers:
+        - name: searchetl-producer
+          image: mininglamposs/octo-search-indexer:latest
+          imagePullPolicy: Always
+          # Select the producer binary from the shared image.
+          command: ["/usr/local/bin/searchetl-producer"]
+          env:
+            # Master switch — OFF by default (defense in depth on top of
+            # replicas:0). Enabling needs this AND replicas:1.
+            - name: PRODUCER_ENABLED
+              value: "false"
+            # Required (no optional): the producer fail-fasts without these.
+            # Implicit prerequisite: the base octo-server-secret must already
+            # exist in the target namespace before scaling up.
+            - name: PRODUCER_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: octo-server-secret
+                  key: DM_MYSQL_DSN
+            - name: PRODUCER_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: octo-server-secret
+                  key: DM_REDIS_ADDR
+            - name: PRODUCER_KAFKA_BROKERS
+              value: "search-kafka:9092"
+            - name: PRODUCER_KAFKA_TOPIC
+              value: "octo.message.v1"
+            - name: PRODUCER_KAFKA_DLQ_TOPIC
+              value: "octo.message.v1.dlq"
+            - name: PRODUCER_TABLES
+              value: "message,message1,message2,message3,message4"
+            - name: PRODUCER_LAG_SECONDS
+              value: "600"
+            - name: TZ
+              value: "UTC"
+          # No liveness/readiness probe — parity with es-indexer (which has
+          # none). No PVC — the producer has no DLQ-spill volume.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
