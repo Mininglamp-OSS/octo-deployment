@@ -34,6 +34,15 @@ data:
   DM_SPACE_DISABLE_USER_CREATE: "true"
   DM_THREAD_ON: "true"
 
+  # Built-in searchetl producer toggle. "false" = OFF (current behavior:
+  # octo-server does NOT run its built-in message-search producer). This key is
+  # also read by the kustomize/search standalone searchetl-producer's
+  # init mutex guard (`producer-mutex-guard`, BUILTIN_ON via configMapKeyRef);
+  # defining it here arms that guard — with the key present, starting the
+  # standalone producer while this is truthy makes the init container exit 1.
+  # Keep "false" unless deliberately cutting over to the built-in producer.
+  TS_KAFKA_ON: "false"
+
   # WukongIM endpoints (public TCP/WS addresses — adjust to your deploy)
   DM_WUKONGIM_TCPADDR: "tcp.example.com:5100"
   DM_WUKONGIM_WSADDR: "ws://tcp.example.com:5200"
