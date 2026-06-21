@@ -34,13 +34,18 @@ data:
   DM_SPACE_DISABLE_USER_CREATE: "true"
   DM_THREAD_ON: "true"
 
-  # Built-in searchetl producer toggle. "false" = OFF (current behavior:
-  # octo-server does NOT run its built-in message-search producer). This key is
-  # also read by the kustomize/search standalone searchetl-producer's
-  # init mutex guard (`producer-mutex-guard`, BUILTIN_ON via configMapKeyRef);
-  # defining it here arms that guard — with the key present, starting the
-  # standalone producer while this is truthy makes the init container exit 1.
-  # Keep "false" unless deliberately cutting over to the built-in producer.
+  # Built-in searchetl producer toggle — PINNED "false" (OFF). DO NOT DELETE.
+  # The built-in (in-octo-server) message-search producer is being retired in
+  # favor of the standalone searchetl-producer (kustomize/search), so this key
+  # no longer arms a live producer here and is expected to stay "false"
+  # permanently. Its remaining purpose is to feed the standalone producer's
+  # init mutex guard (`producer-mutex-guard`), which reads this value as
+  # BUILTIN_ON via configMapKeyRef to enforce that the standalone and built-in
+  # producers never run at the same time (they share the cursor table
+  # octo_etl_es_cursor + a Redis lock; running both double-writes/reorders
+  # Kafka). Keep the key present and "false": deleting it silently neuters the
+  # guard (missing key -> treated as false -> no-op, weakening the both-on
+  # protection), and flipping it truthy makes the standalone guard exit 1.
   TS_KAFKA_ON: "false"
 
   # WukongIM endpoints (public TCP/WS addresses — adjust to your deploy)
