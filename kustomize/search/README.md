@@ -17,9 +17,11 @@ kubectl apply -k kustomize/search -n <ns>
    (OpenSearch + `analysis-ik`, versions pinned in lockstep), push to your
    registry, and set the `octo-search-opensearch-ik` image tag in
    `kustomization.yaml`.
-2. **es-indexer image**: published only on `v*` tags / manual dispatch in
-   octo-search-indexer — pin a real tag in `kustomization.yaml` (not a
-   floating `latest` for production).
+2. **es-indexer / searchetl-producer image**: shared one image, two binaries.
+   Already pinned in `kustomization.yaml` to a Tencent TCR **digest** (the
+   registry the dmwork-test cluster pulls from) — see "Image: pinned to a TCR
+   digest" below. Repoint the digest there to roll forward; do not use a
+   floating tag for production.
 3. **Topics**: created automatically by the `search-kafka-init` Job (the k8s
    equivalent of the compose init service) — required because broker
    auto-create is off and the indexer's DLQ producer uses
@@ -110,9 +112,10 @@ CDC is running until you have stopped CDC or decided replace-vs-coexist.**
 
 ### 🔴 apply knock-on: es-indexer gets bounced
 
-`kustomization.yaml` pins `mininglamposs/octo-search-indexer` to `yuj5184` for
-the whole directory. Because the override is by image name, applying this
-directory will also bounce any already-running **es-indexer** onto `yuj5184`
+`kustomization.yaml` pins `mininglamposs/octo-search-indexer` to a Tencent TCR
+digest (`tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer@sha256:…`)
+for the whole directory. Because the override is by image name, applying this
+directory will also bounce any already-running **es-indexer** onto that digest
 (one image, two binaries — they are meant to stay in lockstep).
 
 ### Rollback is data-layer, not k8s-layer
@@ -127,7 +130,94 @@ The producer is the first workload in this directory to consume
 `DM_MYSQL_DSN`, so it gets DB privileges equivalent to octo-server. A
 least-privilege Secret / RBAC narrowing is a follow-up, not done here.
 
-### Not pinned to a digest
+### Image: pinned to a TCR digest
 
-`yuj5184` is a tag (mutable), not a digest. A reproducible digest pin belongs
-to the CICD (`v*` tag) work, not this manifest.
+`kustomization.yaml` pins `mininglamposs/octo-search-indexer` to a Tencent TCR
+digest:
+
+```
+tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer@sha256:97c781154e1c9588deab7af29d6b7cb041188a072621122821391ac90272c7a0
+```
+
+- **Why TCR, not Docker Hub**: the dmwork-test (xiaotiao-tke) cluster pulls from
+  Tencent TCR; the es-indexer already running there is pinned by digest the same
+  way. Docker Hub (`mininglamposs/*`) is the GitHub `docker-publish.yml` track
+  and is a *separate* lane the cluster does not pull from.
+- **Why a digest, not a tag**: immutable + reproducible. The registry also
+  carries the human-readable `:v0.1.0` (git release) and `:94864fc`
+  (commit-hash) tags pointing at this same digest, but the manifest pins the
+  digest so a tag re-push can never silently change what is deployed.
+- **What it is**: the image built from octo-search-indexer origin/main `94864fc`
+  (git tag `v0.1.0`), containing all four binaries (es-indexer +
+  searchetl-producer among them).
+
+To roll the image forward, repoint the digest here (and, if needed, push a new
+`:vX.Y.Z` / `:<commit>` tag to TCR) — do not switch back to a floating tag.
+
+## Cut-over runbook (owner-gated; this PR does NOT cut over)
+
+> ⚠️ This directory ships **double-OFF** (`replicas: 0` **and**
+> `PRODUCER_ENABLED=false`) and `octo-server-env` ships `TS_KAFKA_ON=false`.
+> Nothing here applies or rolls anything out. The steps below are the path Yu
+> takes **after** explicit authorization — they are documentation, not an action
+> this PR performs.
+
+### Preconditions
+
+1. `octo-server-secret` exists in the target namespace (provides
+   `DM_MYSQL_DSN` / `DM_REDIS_ADDR` the producer needs).
+2. Built-in producer is OFF: `TS_KAFKA_ON=false` in ConfigMap
+   `octo-server-env` (the default shipped here). The init mutex guard reads
+   this key — if it is truthy, the producer pod's init container exits 1.
+3. CDC (`octo-messages-sync`) is stopped or a replace-vs-coexist decision is
+   made — see the CDC double-write warning above. The guard cannot see CDC.
+4. The producer cursor is seeded to the current high-water mark, otherwise the
+   producer re-streams history (full reload).
+
+### Apply (initial, still OFF)
+
+```bash
+kubectl apply -k kustomize/search -n <ns>
+```
+
+This creates the `searchetl-producer` Deployment at `replicas: 0` (no pod) and
+**bounces es-indexer onto the pinned TCR digest** (one image, two binaries — see
+the apply knock-on note above). Confirm es-indexer comes back healthy before
+proceeding.
+
+### Enable (the actual cut-over)
+
+Flip **both** switches together in `searchetl-producer.yaml`, then re-apply:
+
+```bash
+# searchetl-producer.yaml: spec.replicas: 0 -> 1
+#                          PRODUCER_ENABLED: "false" -> "true"
+kubectl apply -k kustomize/search -n <ns>
+kubectl rollout status deploy/searchetl-producer -n <ns>
+```
+
+On scale-up the `producer-mutex-guard` init container runs first: if
+`TS_KAFKA_ON` is truthy it exits 1 and the pod never reaches Running (fail-closed
+mutual exclusion). With `TS_KAFKA_ON=false` it logs `[guard] ok` and the
+producer starts.
+
+### Rollback path
+
+- **Before the producer has written anything** (or to stop producing): scale
+  down — `kubectl scale deploy/searchetl-producer --replicas=0 -n <ns>` (or set
+  `replicas: 0` + `PRODUCER_ENABLED=false` and re-apply). The pod stops.
+- **Data-layer state is NOT rolled back by k8s.** Once the producer has advanced
+  the cursor / written Kafka / DLQ / Redis, scaling down or reverting the
+  manifest does **not** undo that. Data-layer rollback (cursor reset, topic
+  purge) is a separate, deliberate exercise.
+- **es-indexer linkage**: reverting the image digest in `kustomization.yaml` and
+  re-applying will also bounce es-indexer back — plan for a brief es-indexer
+  restart whenever the shared image digest changes.
+
+### es-indexer co-movement (call-out)
+
+Because producer and es-indexer share one image-name override, **every
+`kubectl apply -k kustomize/search` re-reconciles es-indexer too**. Changing the
+digest, applying, or rolling back all imply an es-indexer pod restart. This is
+intentional (the two binaries must stay in lockstep) but means es-indexer is
+never a no-op bystander of a producer cut-over.
