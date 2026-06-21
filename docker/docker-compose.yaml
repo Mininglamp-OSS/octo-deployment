@@ -764,14 +764,16 @@ services:
       # OFF means the scheduler never starts (zero overhead) and is the correct
       # state for a no-search deployment.
       #
-      # In Docker the built-in producer is still the supported real-time path:
-      # the `search` profile "Turn search on" flow (scripted by
-      # scripts/search-upgrade.sh, see docker/README.md) turns this ON only
-      # AFTER the extraction cursor has been seeded to each message shard's
-      # high-watermark — otherwise the cursor starts at 0 and the producer
-      # re-streams the entire message history (a full double-ingest on top of
-      # the one-shot backfill). A standalone search-producer profile also exists
-      # below as an alternative producer.
+      # This Docker compose path still uses the built-in producer as the
+      # supported real-time flow: the `search` profile "Turn search on" runbook
+      # (scripted by scripts/search-upgrade.sh, see docker/README.md) turns this
+      # ON only AFTER the extraction cursor has been seeded to each message
+      # shard's high-watermark — otherwise the cursor starts at 0 and the
+      # producer re-streams the entire message history (a full double-ingest on
+      # top of the one-shot backfill). Keep this default OFF for a fresh /
+      # non-upgraded deploy. A standalone search-producer profile also exists
+      # below as an alternative producer; the standalone-producer cut-over
+      # currently applies to the Kubernetes path only.
       #
       # NOTE: do NOT delete this line. The key is read back as BUILTIN_ON by the
       # `search-producer-guard` service to enforce that the standalone and
