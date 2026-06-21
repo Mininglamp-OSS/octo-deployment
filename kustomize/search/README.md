@@ -162,63 +162,72 @@ connection (which may point at a different DB).
 
 The producer **owns** the cursor table `octo_etl_es_cursor` (it stores the
 per-shard polling watermark). At startup `searchetl-producer` runs
-`CREATE TABLE IF NOT EXISTS octo_etl_es_cursor` (`internal/producer/source.go`
-`EnsureSchema`, called unconditionally from `cmd/searchetl-producer/main.go`),
-then per shard `INSERT IGNORE` a seed row and `UPDATE ... SET last_id=...` to
-advance. So the DB account needs more than read access:
+`CREATE TABLE IF NOT EXISTS octo_etl_es_cursor` (`EnsureSchema` in
+[`internal/producer/source.go`](https://github.com/Mininglamp-OSS/octo-search-indexer/blob/main/internal/producer/source.go),
+called unconditionally from `cmd/searchetl-producer/main.go`), then per shard
+`INSERT IGNORE` a seed row and `UPDATE ... SET last_id=...` to advance. The shard
+set is the five `message` tables fixed in
+[`internal/producer/config.go`](https://github.com/Mininglamp-OSS/octo-search-indexer/blob/main/internal/producer/config.go)
+(`message`, `message1`..`message4`). So the DB account needs more than read
+access:
 
 | Producer operation (code) | SQL | Privilege |
 |---|---|---|
 | `EnsureSchema` (startup) | `CREATE TABLE IF NOT EXISTS octo_etl_es_cursor` | **CREATE** on the cursor table |
 | `EnsureCursor` | `INSERT IGNORE INTO octo_etl_es_cursor` | **INSERT** on the cursor table |
 | `AdvanceCursor` | `UPDATE octo_etl_es_cursor SET last_id=…` | **UPDATE** on the cursor table |
-| `ReadStableBatchTx` | `SELECT … FOR UPDATE` (cursor) + `SELECT …` (message shards) | **SELECT** on `im_test.*` |
+| `ReadStableBatchTx` | `SELECT … FOR UPDATE` (cursor) + `SELECT …` (message shards) | **SELECT** on the 5 message shards **and** the cursor table |
 
 > **`CREATE TABLE IF NOT EXISTS` still requires the CREATE privilege even when
 > the table already exists** — MySQL checks the privilege before evaluating
 > `IF NOT EXISTS`. So you cannot drop CREATE just because a prior run created the
 > table.
 
-This is the trap that bit YUJ-5206 acceptance: reusing the CDC replication
-account (`cdc_repl`, which has only `SELECT ON im_test.*` + REPLICATION) made the
-pod crash on startup with `Error 1142 (42000): CREATE command denied to user
-'cdc_repl'@'…' for table 'octo_etl_es_cursor'`. REPLICATION privileges are
-irrelevant here — the standalone producer is a SQL poller, **not** a binlog
+This is the trap that bit the first acceptance run: reusing the CDC replication
+account (`<cdc-account>`, which has only `SELECT` + REPLICATION on the message DB)
+made the pod crash on startup with `Error 1142 (42000): CREATE command denied to
+user '<cdc-account>'@'…' for table 'octo_etl_es_cursor'`. REPLICATION privileges
+are irrelevant here — the standalone producer is a SQL poller, **not** a binlog
 replica.
 
 #### Least-privilege account (run on the LIVE message DB instance — owner/DBA only)
 
-> 🔴 **Titan does not execute this.** Creating the user and granting privileges
-> on the message DB (`10.208.14.23:3306`) is an owner/DBA action — Yu (or the
-> DBA) runs it manually after review. The SQL below is the spec, not a step this
-> repo performs.
+> 🔴 **This is not executed from this repo.** Creating the user and granting
+> privileges on the message DB instance is an owner/DBA action — run manually
+> after review. The SQL below is the spec, not a step this repo performs.
+>
+> Substitute the placeholders for the real values (kept out of this public repo):
+> `<mysql-host>` = the live message DB host:port, `<db-name>` = the message
+> database, `<cdc-account>` = the existing CDC replication account.
 
 ```sql
--- Run as a MySQL admin on the LIVE message DB instance (10.208.14.23:3306).
+-- Run as a MySQL admin on the LIVE message DB instance (<mysql-host>).
 -- Dedicated least-privilege account for searchetl-producer.
--- Do NOT reuse cdc_repl (replication account, SELECT-only — no DDL) and do NOT
--- leave root in the Secret (blast radius too large).
+-- Do NOT reuse <cdc-account> (replication account, SELECT-only — no DDL) and do
+-- NOT leave root in the Secret (blast radius too large).
 CREATE USER 'searchetl_prod'@'%' IDENTIFIED BY '<STRONG_PASSWORD>';
 
--- Read the message shard tables (message, message1..message4) the producer polls.
--- This also covers the SELECT/FOR-UPDATE read of octo_etl_es_cursor.
-GRANT SELECT ON im_test.* TO 'searchetl_prod'@'%';
+-- Read the 5 message shard tables the producer polls (message, message1..message4).
+-- Table-level grants keep the account scoped to exactly what it reads.
+GRANT SELECT ON `<db-name>`.message  TO 'searchetl_prod'@'%';
+GRANT SELECT ON `<db-name>`.message1 TO 'searchetl_prod'@'%';
+GRANT SELECT ON `<db-name>`.message2 TO 'searchetl_prod'@'%';
+GRANT SELECT ON `<db-name>`.message3 TO 'searchetl_prod'@'%';
+GRANT SELECT ON `<db-name>`.message4 TO 'searchetl_prod'@'%';
 
 -- The producer OWNS its cursor table octo_etl_es_cursor:
 --   CREATE -> EnsureSchema: CREATE TABLE IF NOT EXISTS at startup
 --   INSERT -> EnsureCursor: INSERT IGNORE seed row per shard
 --   UPDATE -> AdvanceCursor: UPDATE ... SET last_id=...
---   (SELECT already covered by the im_test.* grant above)
-GRANT CREATE, INSERT, UPDATE ON im_test.octo_etl_es_cursor TO 'searchetl_prod'@'%';
+--   SELECT -> ReadStableBatchTx: SELECT last_id ... FOR UPDATE
+GRANT CREATE, INSERT, UPDATE, SELECT ON `<db-name>`.octo_etl_es_cursor TO 'searchetl_prod'@'%';
 
 FLUSH PRIVILEGES;
 ```
 
-Nothing else is needed (`宁缺勿滥`): no `ALTER`, `INDEX`, `DROP`, `DELETE`, or
-any `REPLICATION` privilege. If you prefer to scope reads more tightly than
-`im_test.*`, replace that line with table-level `SELECT` on the five message
-shards (`message`, `message1`..`message4`) plus the cursor table; `'%'` host can
-likewise be narrowed to the cluster's pod CIDR.
+Nothing else is needed (least privilege): no `ALTER`, `INDEX`, `DROP`, `DELETE`,
+or any `REPLICATION` privilege. The `'%'` host can be narrowed to the cluster's
+pod CIDR if you want to scope the account further.
 
 #### Switching the Secret to the dedicated account
 
@@ -227,21 +236,28 @@ query params stay identical** (same live message DB, same `octo_etl_es_cursor`):
 
 ```
 # before (temporary, retire this):
-PRODUCER_MYSQL_DSN: "root:<pwd>@tcp(10.208.14.23:3306)/im_test?charset=utf8mb4&parseTime=true&loc=Local"
+PRODUCER_MYSQL_DSN: "root:<pwd>@tcp(<mysql-host>)/<db-name>?charset=utf8mb4&parseTime=true&loc=Local"
 # after:
-PRODUCER_MYSQL_DSN: "searchetl_prod:<pwd>@tcp(10.208.14.23:3306)/im_test?charset=utf8mb4&parseTime=true&loc=Local"
+PRODUCER_MYSQL_DSN: "searchetl_prod:<pwd>@tcp(<mysql-host>)/<db-name>?charset=utf8mb4&parseTime=true&loc=Local"
 ```
 
-Apply the updated Secret, then restart the producer so it picks up the new env:
+Apply the updated Secret, then roll the producer so it picks up the new env:
 
 ```bash
 kubectl apply -n <ns> -f searchetl-producer-secret.yaml
-kubectl rollout restart deploy/searchetl-producer -n <ns>   # only if a pod is running
+kubectl rollout restart deploy/searchetl-producer -n <ns>
 ```
 
-After verification, retire the temporary root credential: scale the producer to
-`replicas: 0` + `PRODUCER_ENABLED=false`, and remove the root DSN from the
-Secret entirely (do not leave root in `searchetl-producer-secret`).
+> **This is a credential rotation, not a teardown — keep the producer running.**
+> Once cut over, the standalone producer **is** the live search-ingestion path
+> (it replaces octo-server's built-in producer), so scaling it to `replicas: 0`
+> would stop real-time ingestion, not retire a credential. To retire root: swap
+> `PRODUCER_MYSQL_DSN` from the root account to `searchetl_prod` in the Secret,
+> re-apply, and `rollout restart` (one brief restart blip as the pod re-reads the
+> Secret). Then remove the root DSN from `searchetl-producer-secret` entirely so
+> no root credential lingers. `replicas: 0` + `PRODUCER_ENABLED=false` belongs to
+> the *decommission the producer* path (see Rollback below), **not** to credential
+> rotation — do not conflate the two.
 
 ### Image: pinned to a TCR digest
 
