@@ -39,6 +39,17 @@ spec:
       labels:
         app: searchetl-producer
     spec:
+      # Private-registry pull secret. The image above resolves (via the
+      # image-name override in kustomization.yaml) to a private Tencent TCR
+      # (tbj7-xtiao-tcr1.tencentcloudcr.com/...), which needs a pull secret —
+      # without it the pod ImagePullBackOffs and never starts. The default
+      # `tcr-image-xtiao` matches the dmwork-test (xiaotiao-tke) cluster, which
+      # is also the cluster the digest in kustomization.yaml is pinned for.
+      # Other clusters MUST override this name (patch in an overlay) AND ensure
+      # the secret exists in the target namespace — see README "Private TCR
+      # pull secret".
+      imagePullSecrets:
+        - name: tcr-image-xtiao
       initContainers:
         # producer-mutex-guard: fail-closed mutual-exclusion check, the k8s
         # equivalent of the compose `search-producer-guard`. Reuses the SAME
