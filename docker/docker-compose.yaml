@@ -757,25 +757,27 @@ services:
       # set a random value in .env for any real search deployment.
       OCTO_SEARCH_CURSOR_HMAC: ${OCTO_SEARCH_CURSOR_HMAC:-}
       # -----------------------------------------------------------------
-      # Real-time search producer (searchetl → Kafka) — PINNED OFF
+      # Real-time search producer (searchetl → Kafka) — OFF by default
       # -----------------------------------------------------------------
       # The searchetl module streams new messages into Kafka for the indexer
       # to consume. It is gated by Kafka.On (Viper key kafka.on ← TS_KAFKA_ON);
       # OFF means the scheduler never starts (zero overhead) and is the correct
       # state for a no-search deployment.
       #
-      # NOTE: the built-in (in-octo-server) producer is being retired in favor
-      # of the standalone search-producer service, so TS_KAFKA_ON is expected to
-      # stay OFF here permanently — keep OCTO_SEARCH_PRODUCER_ON=false. The key
-      # is NOT dead: it is read back as BUILTIN_ON by the `search-producer-guard`
-      # service to enforce that the standalone and built-in producers never run
-      # together (they share the cursor table octo_etl_es_cursor + a Redis lock;
-      # running both double-writes/reorders Kafka). Do not delete this line.
-      # (Historically the `search` profile turned this on only AFTER the
-      # extraction cursor was seeded to each message shard's high-watermark,
-      # otherwise the cursor started at 0 and the producer re-streamed the entire
-      # message history. The standalone path now carries that cut-over; see
-      # docker/README.md "Turn search on".)
+      # In Docker the built-in producer is still the supported real-time path:
+      # the `search` profile "Turn search on" flow (scripted by
+      # scripts/search-upgrade.sh, see docker/README.md) turns this ON only
+      # AFTER the extraction cursor has been seeded to each message shard's
+      # high-watermark — otherwise the cursor starts at 0 and the producer
+      # re-streams the entire message history (a full double-ingest on top of
+      # the one-shot backfill). A standalone search-producer profile also exists
+      # below as an alternative producer.
+      #
+      # NOTE: do NOT delete this line. The key is read back as BUILTIN_ON by the
+      # `search-producer-guard` service to enforce that the standalone and
+      # built-in producers never run together (they share the cursor table
+      # octo_etl_es_cursor + a Redis lock; running both double-writes/reorders
+      # Kafka). A missing key reads as false and silently neuters that guard.
       TS_KAFKA_ON: ${OCTO_SEARCH_PRODUCER_ON:-false}
       TS_KAFKA_BROKERS: ${OCTO_SEARCH_KAFKA_BROKERS:-search-kafka:9092}
       TS_KAFKA_TOPIC: ${OCTO_SEARCH_KAFKA_TOPIC:-octo.message.v1}
