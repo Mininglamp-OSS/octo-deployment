@@ -92,7 +92,7 @@ The pod runs an init container (`producer-mutex-guard`) that reuses the same
 ConfigMap `octo-server-env`) is also truthy, the init container exits 1 and the
 producer pod never reaches Running.
 
-Two limits this guard does **not** cover (operator responsibility):
+Three limits this guard does **not** cover (operator responsibility):
 
 - **Single-direction**: it only blocks *standalone start-up while the built-in
   is on*. It does **not** block the reverse — starting/rolling out octo-server
@@ -101,6 +101,21 @@ Two limits this guard does **not** cover (operator responsibility):
 - **Point-in-time**: the init container runs only at pod start. Flipping
   `TS_KAFKA_ON` to on **while the producer is already Running** does not
   re-trigger the check — verify this manually before changing the toggle.
+- **Depends on base's ConfigMap existing in the target namespace.** This
+  overlay only *references* `octo-server-env` (an `optional: true`
+  `configMapKeyRef`); it does **not** define it. `optional: true` means a
+  missing ConfigMap/key is treated as `BUILTIN_ON=false`, so applying this
+  directory **on its own** into a namespace that does not already have base's
+  `octo-server-env` silently degrades the guard to a no-op — it logs
+  `[guard] ok` and starts the producer regardless of the real built-in state.
+  The guard only protects you if `octo-server-env` (from `kustomize/base`)
+  already lives in the same namespace. **Before cut-over, confirm the
+  ConfigMap is present and carries `TS_KAFKA_ON`:**
+  ```bash
+  kubectl get configmap octo-server-env -n <ns> -o jsonpath='{.data.TS_KAFKA_ON}'
+  ```
+  An empty/`NotFound` result means the guard is armed against nothing — apply
+  base (or otherwise ensure `octo-server-env` exists in `<ns>`) first.
 
 ### 🔴 CDC double-write warning
 
@@ -169,6 +184,13 @@ To roll the image forward, repoint the digest here (and, if needed, push a new
 2. Built-in producer is OFF: `TS_KAFKA_ON=false` in ConfigMap
    `octo-server-env` (the default shipped here). The init mutex guard reads
    this key — if it is truthy, the producer pod's init container exits 1.
+   **The ConfigMap must actually exist in `<ns>`** — this overlay only
+   references it (`optional: true`), so a missing `octo-server-env` makes the
+   guard a no-op (see "Mutual-exclusion guard" above). Confirm:
+   ```bash
+   kubectl get configmap octo-server-env -n <ns> -o jsonpath='{.data.TS_KAFKA_ON}'
+   # expect: false  (empty / NotFound => apply base first; the guard is armed against nothing)
+   ```
 3. CDC (`octo-messages-sync`) is stopped or a replace-vs-coexist decision is
    made — see the CDC double-write warning above. The guard cannot see CDC.
 4. The producer cursor is seeded to the current high-water mark, otherwise the
