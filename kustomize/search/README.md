@@ -69,9 +69,16 @@ opt-in). Applying this directory creates the Deployment but no pod.
 
 Enabling is a deliberate, owner-gated action with data-layer consequences:
 
-1. Confirm the base Secret `octo-server-secret` already exists in the target
-   namespace — the producer's `PRODUCER_MYSQL_DSN` / `PRODUCER_REDIS_ADDR` are
-   **required** `secretKeyRef`s and the pod will not start without it.
+1. Create the dedicated Secret `searchetl-producer-secret` in the target
+   namespace — copy `searchetl-producer-secret.example.yaml` to
+   `searchetl-producer-secret.yaml`, fill in `PRODUCER_MYSQL_DSN` /
+   `PRODUCER_REDIS_ADDR`, then `kubectl apply -f`. These are **required**
+   `secretKeyRef`s and the pod will not start without them
+   (`CreateContainerConfigError`). 🔴 The DSN MUST point at the **live message
+   DB** the IM backend writes to (the DB whose `message` 5-shard tables the
+   producer polls — NOT necessarily the DB octo-server itself points at), and
+   `PRODUCER_REDIS_ADDR` MUST be the **same Redis the built-in producer uses**
+   so the shared run-lock actually achieves mutual exclusion.
 2. Confirm the producer cursor is seeded to the current high-water mark —
    otherwise the producer re-streams history (a full reload).
 3. Flip **both** switches together: set `replicas: 1` **and**
@@ -145,9 +152,12 @@ Redis cursor state. Data-layer rollback is a separate exercise.
 
 ### Credentials surface
 
-The producer is the first workload in this directory to consume
-`DM_MYSQL_DSN`, so it gets DB privileges equivalent to octo-server. A
-least-privilege Secret / RBAC narrowing is a follow-up, not done here.
+The producer reads the live message DB directly, so its DSN
+(`searchetl-producer-secret`) carries DB privileges over that data. It uses its
+own dedicated Secret rather than borrowing octo-server-secret — this keeps the
+producer's DB/Redis target explicit and decoupled from octo-server's own
+connection (which may point at a different DB). A least-privilege DB user / RBAC
+narrowing is a follow-up, not done here.
 
 ### Image: pinned to a TCR digest
 
@@ -228,11 +238,11 @@ spec:
 
 ### Preconditions
 
-1. `octo-server-secret` exists in the target namespace (provides
-   `DM_MYSQL_DSN` / `DM_REDIS_ADDR` the producer needs).
-2. Built-in producer is OFF: `TS_KAFKA_ON=false` in ConfigMap
-   `octo-server-env` (the default shipped here). The init mutex guard reads
-   this key — if it is truthy, the producer pod's init container exits 1.
+1. `searchetl-producer-secret` exists in the target namespace (provides
+   `PRODUCER_MYSQL_DSN` / `PRODUCER_REDIS_ADDR` — the live message DB DSN and
+   the shared-lock Redis addr the producer needs). See the Enable checklist.
+2. Built-in producer is OFF. The init mutex guard reads `TS_KAFKA_ON` from
+   ConfigMap `octo-server-env` (the default shipped here is `false`).
    **The ConfigMap must actually exist in `<ns>`** — this overlay only
    references it (`optional: true`), so a missing `octo-server-env` makes the
    guard a no-op (see "Mutual-exclusion guard" above). Confirm:
@@ -240,6 +250,11 @@ spec:
    kubectl get configmap octo-server-env -n <ns> -o jsonpath='{.data.TS_KAFKA_ON}'
    # expect: false  (empty / NotFound => apply base first; the guard is armed against nothing)
    ```
+   🔴 But `TS_KAFKA_ON` is only the OSS octo-server's toggle. In a fork/dmwork
+   deployment the real running built-in producer may be a different workload
+   (e.g. the IM backend's own `kafka.on` in its `tsdd.yaml`) that the guard
+   CANNOT see — confirm every built-in producer is off before enabling, not
+   just `TS_KAFKA_ON`.
 3. CDC (`octo-messages-sync`) is stopped or a replace-vs-coexist decision is
    made — see the CDC double-write warning above. The guard cannot see CDC.
 4. The producer cursor is seeded to the current high-water mark, otherwise the
