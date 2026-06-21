@@ -22,7 +22,11 @@ kubectl apply -k kustomize/search -n <ns>
    registry the dmwork-test cluster pulls from) — see "Image: pinned to a TCR
    digest" below. Repoint the digest there to roll forward; do not use a
    floating tag for production.
-3. **Topics**: created automatically by the `search-kafka-init` Job (the k8s
+3. **Private TCR pull secret**: the image lives in a **private** Tencent TCR, so
+   the target namespace MUST already hold an image-pull Secret and the manifests
+   MUST reference it (they do — see "Private TCR pull secret" below). Without it
+   both pods `ImagePullBackOff` and never start.
+4. **Topics**: created automatically by the `search-kafka-init` Job (the k8s
    equivalent of the compose init service) — required because broker
    auto-create is off and the indexer's DLQ producer uses
    `AllowAutoTopicCreation=false`. The Job waits for the broker, then creates
@@ -169,6 +173,51 @@ tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer@sha2
 To roll the image forward, repoint the digest here (and, if needed, push a new
 `:vX.Y.Z` / `:<commit>` tag to TCR) — do not switch back to a floating tag.
 
+### Private TCR pull secret
+
+The image lives in a **private** Tencent TCR
+(`tbj7-xtiao-tcr1.tencentcloudcr.com/...`), so every pod that runs it needs an
+image-pull Secret. Both `es-indexer.yaml` and `searchetl-producer.yaml` declare:
+
+```yaml
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: tcr-image-xtiao
+```
+
+- **Why it is required**: without a pull secret the kubelet cannot authenticate
+  to the private registry — the pod `ImagePullBackOff`s and never starts. This is
+  exactly the P1 found on dmwork-test: the raw `es-indexer` manifest running there
+  carried `imagePullSecrets` (the `tcr-image-xtiao` secret) while the kustomize
+  render did not, so the kustomize-managed producer would never have come up.
+- **Default `tcr-image-xtiao`**: this is the secret that exists on the
+  dmwork-test (xiaotiao-tke) cluster — the same cluster the digest above is
+  pinned for — so the default is self-consistent.
+- **🔴 Per-cluster override**: the secret name is **cluster-specific**. On any
+  other cluster you MUST (a) create the pull secret in the target namespace and
+  (b) override the name here. Prefer an overlay patch rather than editing this
+  base, e.g.:
+  ```yaml
+  # kustomize/overlays/<cluster>/imagepullsecret-patch.yaml
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: es-indexer          # repeat for searchetl-producer
+  spec:
+    template:
+      spec:
+        imagePullSecrets:
+          - name: <your-cluster-tcr-secret>
+  ```
+  Create the secret with, for example:
+  ```bash
+  kubectl create secret docker-registry <your-cluster-tcr-secret> \
+    --docker-server=tbj7-xtiao-tcr1.tencentcloudcr.com \
+    --docker-username=<user> --docker-password=<token> -n <ns>
+  ```
+
 ## Cut-over runbook (owner-gated; this PR does NOT cut over)
 
 > ⚠️ This directory ships **double-OFF** (`replicas: 0` **and**
@@ -195,6 +244,11 @@ To roll the image forward, repoint the digest here (and, if needed, push a new
    made — see the CDC double-write warning above. The guard cannot see CDC.
 4. The producer cursor is seeded to the current high-water mark, otherwise the
    producer re-streams history (full reload).
+5. The private-TCR image-pull Secret exists in the target namespace and is
+   referenced by the manifests. The default is `tcr-image-xtiao` (present on
+   dmwork-test); on any other cluster create the secret and override the name
+   via an overlay patch — see "Private TCR pull secret" above. Missing this →
+   `ImagePullBackOff`, the pod never starts.
 
 ### Apply (initial, still OFF)
 
