@@ -110,18 +110,28 @@ spec:
             - name: PRODUCER_ENABLED
               value: "false"
             # Required (no optional): the producer fail-fasts without these.
-            # Implicit prerequisite: the base octo-server-secret must already
-            # exist in the target namespace before scaling up.
+            # Sourced from the producer's OWN dedicated Secret
+            # (searchetl-producer-secret), NOT octo-server-secret. Rationale:
+            # octo-server-secret does not reliably carry DM_MYSQL_DSN /
+            # DM_REDIS_ADDR in real clusters (e.g. dmwork-test's only has the 5
+            # *_KEY/*_TOKEN/*_SECRET keys), so a hard secretKeyRef into it fails
+            # the pod with CreateContainerConfigError; and the producer must read
+            # the LIVE message DB, which is not necessarily the DB octo-server
+            # points at. Mirrors the sibling same-repo MySQL reader
+            # (octo-search-batch), which uses its own dedicated Secret too.
+            # Implicit prerequisite: searchetl-producer-secret must exist in the
+            # target namespace before scaling up — copy
+            # searchetl-producer-secret.example.yaml, fill in real values, apply.
             - name: PRODUCER_MYSQL_DSN
               valueFrom:
                 secretKeyRef:
-                  name: octo-server-secret
-                  key: DM_MYSQL_DSN
+                  name: searchetl-producer-secret
+                  key: PRODUCER_MYSQL_DSN
             - name: PRODUCER_REDIS_ADDR
               valueFrom:
                 secretKeyRef:
-                  name: octo-server-secret
-                  key: DM_REDIS_ADDR
+                  name: searchetl-producer-secret
+                  key: PRODUCER_REDIS_ADDR
             - name: PRODUCER_KAFKA_BROKERS
               value: "search-kafka:9092"
             - name: PRODUCER_KAFKA_TOPIC
