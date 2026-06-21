@@ -156,8 +156,92 @@ The producer reads the live message DB directly, so its DSN
 (`searchetl-producer-secret`) carries DB privileges over that data. It uses its
 own dedicated Secret rather than borrowing octo-server-secret — this keeps the
 producer's DB/Redis target explicit and decoupled from octo-server's own
-connection (which may point at a different DB). A least-privilege DB user / RBAC
-narrowing is a follow-up, not done here.
+connection (which may point at a different DB).
+
+#### 🔴 Gotcha: the producer needs DDL on its cursor table — a SELECT-only account is NOT enough
+
+The producer **owns** the cursor table `octo_etl_es_cursor` (it stores the
+per-shard polling watermark). At startup `searchetl-producer` runs
+`CREATE TABLE IF NOT EXISTS octo_etl_es_cursor` (`internal/producer/source.go`
+`EnsureSchema`, called unconditionally from `cmd/searchetl-producer/main.go`),
+then per shard `INSERT IGNORE` a seed row and `UPDATE ... SET last_id=...` to
+advance. So the DB account needs more than read access:
+
+| Producer operation (code) | SQL | Privilege |
+|---|---|---|
+| `EnsureSchema` (startup) | `CREATE TABLE IF NOT EXISTS octo_etl_es_cursor` | **CREATE** on the cursor table |
+| `EnsureCursor` | `INSERT IGNORE INTO octo_etl_es_cursor` | **INSERT** on the cursor table |
+| `AdvanceCursor` | `UPDATE octo_etl_es_cursor SET last_id=…` | **UPDATE** on the cursor table |
+| `ReadStableBatchTx` | `SELECT … FOR UPDATE` (cursor) + `SELECT …` (message shards) | **SELECT** on `im_test.*` |
+
+> **`CREATE TABLE IF NOT EXISTS` still requires the CREATE privilege even when
+> the table already exists** — MySQL checks the privilege before evaluating
+> `IF NOT EXISTS`. So you cannot drop CREATE just because a prior run created the
+> table.
+
+This is the trap that bit YUJ-5206 acceptance: reusing the CDC replication
+account (`cdc_repl`, which has only `SELECT ON im_test.*` + REPLICATION) made the
+pod crash on startup with `Error 1142 (42000): CREATE command denied to user
+'cdc_repl'@'…' for table 'octo_etl_es_cursor'`. REPLICATION privileges are
+irrelevant here — the standalone producer is a SQL poller, **not** a binlog
+replica.
+
+#### Least-privilege account (run on the LIVE message DB instance — owner/DBA only)
+
+> 🔴 **Titan does not execute this.** Creating the user and granting privileges
+> on the message DB (`10.208.14.23:3306`) is an owner/DBA action — Yu (or the
+> DBA) runs it manually after review. The SQL below is the spec, not a step this
+> repo performs.
+
+```sql
+-- Run as a MySQL admin on the LIVE message DB instance (10.208.14.23:3306).
+-- Dedicated least-privilege account for searchetl-producer.
+-- Do NOT reuse cdc_repl (replication account, SELECT-only — no DDL) and do NOT
+-- leave root in the Secret (blast radius too large).
+CREATE USER 'searchetl_prod'@'%' IDENTIFIED BY '<STRONG_PASSWORD>';
+
+-- Read the message shard tables (message, message1..message4) the producer polls.
+-- This also covers the SELECT/FOR-UPDATE read of octo_etl_es_cursor.
+GRANT SELECT ON im_test.* TO 'searchetl_prod'@'%';
+
+-- The producer OWNS its cursor table octo_etl_es_cursor:
+--   CREATE -> EnsureSchema: CREATE TABLE IF NOT EXISTS at startup
+--   INSERT -> EnsureCursor: INSERT IGNORE seed row per shard
+--   UPDATE -> AdvanceCursor: UPDATE ... SET last_id=...
+--   (SELECT already covered by the im_test.* grant above)
+GRANT CREATE, INSERT, UPDATE ON im_test.octo_etl_es_cursor TO 'searchetl_prod'@'%';
+
+FLUSH PRIVILEGES;
+```
+
+Nothing else is needed (`宁缺勿滥`): no `ALTER`, `INDEX`, `DROP`, `DELETE`, or
+any `REPLICATION` privilege. If you prefer to scope reads more tightly than
+`im_test.*`, replace that line with table-level `SELECT` on the five message
+shards (`message`, `message1`..`message4`) plus the cursor table; `'%'` host can
+likewise be narrowed to the cluster's pod CIDR.
+
+#### Switching the Secret to the dedicated account
+
+Only the credential part of `PRODUCER_MYSQL_DSN` changes — **host, database, and
+query params stay identical** (same live message DB, same `octo_etl_es_cursor`):
+
+```
+# before (temporary, retire this):
+PRODUCER_MYSQL_DSN: "root:<pwd>@tcp(10.208.14.23:3306)/im_test?charset=utf8mb4&parseTime=true&loc=Local"
+# after:
+PRODUCER_MYSQL_DSN: "searchetl_prod:<pwd>@tcp(10.208.14.23:3306)/im_test?charset=utf8mb4&parseTime=true&loc=Local"
+```
+
+Apply the updated Secret, then restart the producer so it picks up the new env:
+
+```bash
+kubectl apply -n <ns> -f searchetl-producer-secret.yaml
+kubectl rollout restart deploy/searchetl-producer -n <ns>   # only if a pod is running
+```
+
+After verification, retire the temporary root credential: scale the producer to
+`replicas: 0` + `PRODUCER_ENABLED=false`, and remove the root DSN from the
+Secret entirely (do not leave root in `searchetl-producer-secret`).
 
 ### Image: pinned to a TCR digest
 
