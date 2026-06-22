@@ -19,7 +19,7 @@ kubectl apply -k kustomize/search -n <ns>
    `kustomization.yaml`.
 2. **es-indexer / searchetl-producer image**: shared one image, two binaries.
    Already pinned in `kustomization.yaml` to a Tencent TCR **digest** (the
-   registry the dmwork-test cluster pulls from) — see "Image: pinned to a TCR
+   registry the reference cluster pulls from) — see "Image: pinned to a TCR
    digest" below. Repoint the digest there to roll forward; do not use a
    floating tag for production.
 3. **Private TCR pull secret**: the image lives in a **private** Tencent TCR, so
@@ -130,7 +130,7 @@ Three limits this guard does **not** cover (operator responsibility):
 
 ### 🔴 CDC double-write warning
 
-dmwork-test runs `octo-messages-sync` (CDC binlog → Kafka) writing the **same**
+Some clusters run `octo-messages-sync` (CDC binlog → Kafka) writing the **same**
 topic `octo.message.v1`. That CDC pipeline is **not** in this kustomize tree, so
 this guard cannot see it and cannot mechanically prevent a standalone↔CDC
 double-write. **Do not enable this standalone producer in an environment where
@@ -268,7 +268,7 @@ digest:
 tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer@sha256:97c781154e1c9588deab7af29d6b7cb041188a072621122821391ac90272c7a0
 ```
 
-- **Why TCR, not Docker Hub**: the dmwork-test (xiaotiao-tke) cluster pulls from
+- **Why TCR, not Docker Hub**: the reference cluster pulls from
   Tencent TCR; the es-indexer already running there is pinned by digest the same
   way. Docker Hub (`mininglamposs/*`) is the GitHub `docker-publish.yml` track
   and is a *separate* lane the cluster does not pull from.
@@ -306,11 +306,11 @@ spec:
 
 - **Why it is required**: without a pull secret the kubelet cannot authenticate
   to the private registry — the pod `ImagePullBackOff`s and never starts. This is
-  exactly the P1 found on dmwork-test: the raw `es-indexer` manifest running there
+  exactly the P1 found on the reference cluster: the raw `es-indexer` manifest running there
   carried `imagePullSecrets` (the `tcr-image-xtiao` secret) while the kustomize
   render did not, so the kustomize-managed producer would never have come up.
 - **Default `tcr-image-xtiao`**: this is the secret that exists on the
-  dmwork-test (xiaotiao-tke) cluster — the same cluster the digest above is
+  reference cluster — the same cluster the digest above is
   pinned for — so the default is self-consistent.
 - **🔴 Per-cluster override**: the secret name is **cluster-specific**. On any
   other cluster you MUST (a) create the pull secret in the target namespace and
@@ -368,7 +368,7 @@ spec:
    producer re-streams history (full reload).
 5. The private-TCR image-pull Secret exists in the target namespace and is
    referenced by the manifests. The default is `tcr-image-xtiao` (present on
-   dmwork-test); on any other cluster create the secret and override the name
+   the reference cluster); on any other cluster create the secret and override the name
    via an overlay patch — see "Private TCR pull secret" above. Missing this →
    `ImagePullBackOff`, the pod never starts.
 

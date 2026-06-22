@@ -43,7 +43,7 @@ spec:
       # image-name override in kustomization.yaml) to a private Tencent TCR
       # (tbj7-xtiao-tcr1.tencentcloudcr.com/...), which needs a pull secret —
       # without it the pod ImagePullBackOffs and never starts. The default
-      # `tcr-image-xtiao` matches the dmwork-test (xiaotiao-tke) cluster, which
+      # `tcr-image-xtiao` matches the reference cluster, which
       # is also the cluster the digest in kustomization.yaml is pinned for.
       # Other clusters MUST override this name (patch in an overlay) AND ensure
       # the secret exists in the target namespace — see README "Private TCR
@@ -113,7 +113,7 @@ spec:
             # Sourced from the producer's OWN dedicated Secret
             # (searchetl-producer-secret), NOT octo-server-secret. Rationale:
             # octo-server-secret does not reliably carry DM_MYSQL_DSN /
-            # DM_REDIS_ADDR in real clusters (e.g. dmwork-test's only has the 5
+            # DM_REDIS_ADDR in real clusters (on some it only has the 5
             # *_KEY/*_TOKEN/*_SECRET keys), so a hard secretKeyRef into it fails
             # the pod with CreateContainerConfigError; and the producer must read
             # the LIVE message DB, which is not necessarily the DB octo-server
