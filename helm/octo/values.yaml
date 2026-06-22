@@ -346,6 +346,72 @@ summary:
     resources: {}
 
 # =============================================================================
+# Search pipeline (Kafka + OpenSearch[analysis-ik] + es-indexer) — OPT-IN.
+# Default OFF: with search.enabled=false NO search resources are rendered.
+# Enabling deploys search INFRASTRUCTURE ONLY; it does NOT wire octo-server onto
+# OpenSearch (reader/producer cut-over is a separate owner-gated step — parity
+# with kustomize/search, which is also infra-only).
+#
+# 🔴 PREREQUISITE before search.enabled=true is actually installable:
+#   - opensearch.image MUST be a registry image with analysis-ik baked in
+#     (build docker/opensearch/Dockerfile, push, set repository/tag below).
+#     The default name below is a LOCAL build name and will NOT pull as-is.
+#   - indexer.image is published only on v* tags; pin a real tag/digest for prod.
+#
+# NOTE (china overlay): the new search images (self-built opensearch-ik +
+# private indexer) are NOT yet mirrored for values-china.yaml; wiring the china
+# overlay's search image overrides is a separate follow-up, out of scope here.
+# =============================================================================
+search:
+  enabled: false
+  opensearch:
+    image: { repository: octo-search-opensearch-ik, tag: "2.17.0", pullPolicy: IfNotPresent }
+    javaOpts: "-Xms512m -Xmx512m"
+    disableSecurityPlugin: true
+    storage: { size: 20Gi, storageClass: "" }
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits:   { cpu: "2", memory: 2Gi }
+  kafka:
+    image: { repository: apache/kafka, tag: "3.8.0", pullPolicy: IfNotPresent }
+    # 🔴 IMMUTABLE after first install: this UUID formats the KRaft metadata on
+    # the PVC. Changing it on an existing PVC crash-loops the broker. Regenerate
+    # (kafka-storage.sh random-uuid) ONLY for a fresh deploy / fresh PVC.
+    clusterId: "3kNqlPkyT16sjDguh9qqKA"
+    storage: { size: 10Gi, storageClass: "" }
+    resources:
+      requests: { cpu: 250m, memory: 512Mi }
+      limits:   { cpu: "1", memory: 1Gi }
+  indexer:
+    image: { repository: mininglamposs/octo-search-indexer, tag: "latest", pullPolicy: Always }
+    batchSize: 500
+    dlqSpill: { size: 1Gi, storageClass: "" }
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+  # Standalone searchetl-producer — DISABLED-ARTIFACT-ONLY in this chart.
+  # Double-OFF (enabled:false AND replicas:0), parity with kustomize/search.
+  # 🔴 ACTUALLY ENABLING the producer (replicas>0) is OUT OF SCOPE for this
+  # chart revision — it reads the LIVE message DB + shares cursor/Redis lock
+  # with octo-server's built-in producer (double-write risk) and is owner-gated.
+  # The template fail-fasts on illegal enable states (see helm README).
+  producer:
+    enabled: false
+    replicas: 0
+    # When (later) enabled, reference a PRE-CREATED Secret rather than inlining
+    # the DSN — inline --set leaks the DSN into the release Secret, values
+    # history, and shell history. existingSecret keeps the credential out of the
+    # chart, mirroring kustomize/search's dedicated searchetl-producer-secret.
+    existingSecret: ""            # name of a Secret holding the two keys below
+    mysqlDsnKey: "PRODUCER_MYSQL_DSN"
+    redisAddrKey: "PRODUCER_REDIS_ADDR"
+    tables: "message,message1,message2,message3,message4"
+    lagSeconds: 600
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+
+# =============================================================================
 # Nginx reverse proxy
 # =============================================================================
 nginx:

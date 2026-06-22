@@ -31,6 +31,7 @@ DOMAIN="localhost"
 EXTERNAL_IP=""
 ENABLE_HTTPS=false
 ENABLE_SUMMARY=false
+ENABLE_SEARCH=false
 NON_INTERACTIVE=false
 FORCE_OVERWRITE=false
 RUN_UP=false
@@ -51,11 +52,26 @@ DOMAIN_SET_VIA_CLI=false
 IP_SET_VIA_CLI=false
 HTTPS_SET_VIA_CLI=false
 SUMMARY_SET_VIA_CLI=false
+SEARCH_SET_VIA_CLI=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
 ENV_OUT="${SCRIPT_DIR}/docker/.env"
 DOCKER_DIR="${SCRIPT_DIR}/docker"
+
+# One-shot init services: jobs that run to completion and whose PASS state
+# is a clean `Exited (0)` (every OTHER service is long-running and must stay
+# `Up`). This single pipe-delimited alternation is the ONLY place the set is
+# named — both the health contract checker
+# (`verify_all_services_running_or_healthy`) and the `--verify` failure
+# classifier consume it, so the two allowlists can never drift apart, and any
+# future profile-activated one-shot only has to be added here once.
+#   - preflight          : token/secret validation gate (always on)
+#   - minio-init         : MinIO user/policy/bucket bootstrap (always on)
+#   - search-kafka-init  : Kafka topic creation, activated by --search
+#                          (COMPOSE_PROFILES=search). `restart: "no"`, so it
+#                          legitimately ends at `Exited (0)` once topics exist.
+ONESHOT_SERVICES_RE='preflight|minio-init|search-kafka-init'
 
 # YUJ-1084 / GH#46: root's primary group differs by OS — Linux uses `root`,
 # macOS (BSD) uses `wheel`. Hard-coding `chown root:root` aborts on macOS
@@ -124,6 +140,42 @@ sed_inplace() {
   fi
 }
 
+# Merge a compose profile into COMPOSE_PROFILES in ${ENV_OUT} without
+# clobbering already-enabled profiles (summary + search must coexist).
+# Pure-bash membership test (mirrors the intent of search-upgrade.sh
+# persist_profile union, but operates on the .env file only — setup.sh
+# does NOT read the shell COMPOSE_PROFILES env var).
+#
+# The CURRENT value is read ONLY from an uncommented `COMPOSE_PROFILES=`
+# line. The shipped .env.example carries a COMMENTED template hint
+# (`# COMPOSE_PROFILES=summary`), and .env is re-copied from it on every
+# run, so a live .env normally has NO uncommented line — the commented hint
+# must NEVER be read as the current value (that would resurrect `summary`
+# for a bare `--search`). When no uncommented line exists `current` is "",
+# and an empty current concatenates with no leading comma.
+add_compose_profile() {
+  local add="$1" line current merged
+  if line="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}")"; then
+    current="${line#COMPOSE_PROFILES=}"
+  else
+    current=""
+  fi
+  if [[ -z "${current}" ]]; then
+    merged="${add}"
+  elif [[ ",${current}," != *",${add},"* ]]; then
+    merged="${current},${add}"
+  else
+    merged="${current}"
+  fi
+  if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
+    sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${merged}|" "${ENV_OUT}"
+  elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
+    sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${merged}|" "${ENV_OUT}"
+  else
+    printf '\n# Activate optional compose profiles\nCOMPOSE_PROFILES=%s\n' "${merged}" >> "${ENV_OUT}"
+  fi
+}
+
 # Pick `docker compose` v2 or fall back to standalone `docker-compose`.
 # Echoes the command tokens; callers wrap in `$(...)` and pass as a list.
 compose_cmd() {
@@ -176,7 +228,8 @@ compose_supports_wait() {
 #               long-running svcs must never exit), `Restarting (…)`,
 #               `Dead`, `Paused`, `Removing`, or missing container row.
 #
-#   one-shot service (preflight, minio-init):
+#   one-shot service (preflight, minio-init, search-kafka-init — the
+#   ${ONESHOT_SERVICES_RE} set):
 #     PASS   →  `Exited (0)` (job ran and finished cleanly).
 #     WAIT   →  still `Up …` / `Created` (job has not finished yet).
 #     FATAL  →  `Exited (n>0)`, `Restarting (…)`, `Dead`, or missing
@@ -208,37 +261,34 @@ verify_all_services_running_or_healthy() {
       continue
     fi
     status="${row#*	}"
-    case "${svc}" in
-      preflight|minio-init)
-        case "${status}" in
-          "Exited (0)"*)                 : ;;  # PASS — one-shot finished
-          Exited*|Restarting*|Dead*)     out="${out}FATAL	${row}
+    if [[ "${svc}" =~ ^(${ONESHOT_SERVICES_RE})$ ]]; then
+      case "${status}" in
+        "Exited (0)"*)                 : ;;  # PASS — one-shot finished
+        Exited*|Restarting*|Dead*)     out="${out}FATAL	${row}
 " ;;
-          *)                             out="${out}WAIT	${row}
+        *)                             out="${out}WAIT	${row}
 " ;;
-        esac
-        ;;
-      *)
-        case "${status}" in
-          Up*"(unhealthy)"*|Up*"(health: starting)"*|Created*)
-            # `Created` on a long-running svc is the cold-boot race
-            # window: `compose up -d` ordered it after a depends_on
-            # gate (e.g. preflight exit 0, mysql health) and Compose
-            # has not yet `Start`-ed it. From `compose_poll_healthy`
-            # this is WAIT (poll again — `Created` will flip to `Up`
-            # once the gate clears); from `--verify` (stack already
-            # steady) WAIT is treated as a failure by the caller,
-            # which is what we want — a `Created` row at that point
-            # means the gate never cleared.
-            out="${out}WAIT	${row}
+      esac
+    else
+      case "${status}" in
+        Up*"(unhealthy)"*|Up*"(health: starting)"*|Created*)
+          # `Created` on a long-running svc is the cold-boot race
+          # window: `compose up -d` ordered it after a depends_on
+          # gate (e.g. preflight exit 0, mysql health) and Compose
+          # has not yet `Start`-ed it. From `compose_poll_healthy`
+          # this is WAIT (poll again — `Created` will flip to `Up`
+          # once the gate clears); from `--verify` (stack already
+          # steady) WAIT is treated as a failure by the caller,
+          # which is what we want — a `Created` row at that point
+          # means the gate never cleared.
+          out="${out}WAIT	${row}
 "
-            ;;
-          Up*)                           : ;;  # PASS — healthy or no healthcheck
-          *)                             out="${out}FATAL	${row}
+          ;;
+        Up*)                           : ;;  # PASS — healthy or no healthcheck
+        *)                             out="${out}FATAL	${row}
 " ;;
-        esac
-        ;;
-    esac
+      esac
+    fi
   done <<< "${expected}"
   if [[ -n "${out}" ]]; then
     printf '%s' "${out}"
@@ -479,14 +529,15 @@ _compose_up_and_wait_once() {
     # Extract concrete failing service names from
     # `ps --format '{{.Service}}\t{{.Status}}'`. We flag anything that
     # is (unhealthy), Restarting, Dead, or Exited(non-zero). One-shot
-    # services (preflight / minio-init) are normally expected to be
+    # services (preflight / minio-init / search-kafka-init — the
+    # ${ONESHOT_SERVICES_RE} set) are normally expected to be
     # `Exited (0)` and so are NOT a fail in that state — but if they
     # crash with `Exited (1)` / `Restarting` / `Dead` they MUST surface,
     # because they gate the rest of the stack. So instead of stripping
     # them by name, we strip the specific benign one-shot status
     # (`Exited (0)`) and let everything else flow into the fail grep.
     failing_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
-                      | grep -vE '^(preflight|minio-init)	Exited \(0\)' \
+                      | grep -vE "^(${ONESHOT_SERVICES_RE})	Exited \(0\)" \
                       | grep -E '	.*(\(unhealthy\)|Restarting|Dead|Exited \([1-9])' \
                       | awk -F'	' '{print $1}' | sort -u || true)"
     err ""
@@ -764,6 +815,7 @@ while [[ $# -gt 0 ]]; do
     --ip)       EXTERNAL_IP="${2:?--ip requires a value}";  IP_SET_VIA_CLI=true;      shift 2 ;;
     --https)    ENABLE_HTTPS=true;   HTTPS_SET_VIA_CLI=true;   shift ;;
     --summary)  ENABLE_SUMMARY=true; SUMMARY_SET_VIA_CLI=true; shift ;;
+    --search)   ENABLE_SEARCH=true;  SEARCH_SET_VIA_CLI=true;  shift ;;
     --up)         RUN_UP=true; shift ;;
     --smoke-test) RUN_VERIFY=true; shift ;;
     # `--verify` is the original spelling, retained as a deprecated alias
@@ -778,7 +830,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage: setup.sh [--non-interactive] [--force] [--domain <d>] [--ip <ip>]
-                [--https] [--summary] [--up]
+                [--https] [--summary] [--search] [--up]
        setup.sh --smoke-test (or --verify, deprecated alias)
        setup.sh --uninstall
 
@@ -795,12 +847,21 @@ Generation:
                       See docker/certs/README.md for the full procedure.
   --summary           Enable the optional LLM summary services
                       (COMPOSE_PROFILES=summary).
+  --search            Enable the optional message-search pipeline
+                      (COMPOSE_PROFILES=search): Kafka + OpenSearch +
+                      es-indexer. Merges with --summary if both are given.
+                      This only provisions the search INFRASTRUCTURE; to
+                      index history and flip the reader onto OpenSearch,
+                      run `cd docker && scripts/search-upgrade.sh` after
+                      the stack is up (see docker/README.md "Search
+                      profile" / "Turn search on").
   --up                START-ONLY subcommand (peer of --smoke-test /
                       --uninstall): requires an existing docker/.env and
                       runs `docker compose up -d --wait --wait-timeout
                       240`, blocking until every long-running service is
                       healthy AND every one-shot init job (preflight /
-                      minio-init) exited 0. On a cold-boot soft timeout
+                      minio-init, plus search-kafka-init under --search)
+                      exited 0. On a cold-boot soft timeout
                       the wait retries ONCE on the warm mysql / image
                       cache (typically <10s). NEVER regenerates secrets
                       — run `./setup.sh` first to create docker/.env, or
@@ -847,11 +908,12 @@ Smoke test / tear-down (work against an already-existing docker/.env):
   --uninstall         Tear down the stack. Interactively offers three
                       granularity levels (full / data-only / containers-only).
 
-When any of --domain / --ip / --https / --summary is given without
---non-interactive, setup.sh treats the flags as your decisions and runs
-non-interactively so the documented one-liner forms (see docker/README.md)
-work as written. --up is a start-only subcommand (peer of --smoke-test
-/ --uninstall) and never participates in the decision-flag handling.
+When any of --domain / --ip / --https / --summary / --search is given
+without --non-interactive, setup.sh treats the flags as your decisions
+and runs non-interactively so the documented one-liner forms (see
+docker/README.md) work as written. --up is a start-only subcommand
+(peer of --smoke-test / --uninstall) and never participates in the
+decision-flag handling.
 USAGE
       exit 0
       ;;
@@ -1486,14 +1548,15 @@ if [[ "${RUN_UNINSTALL}" == "true" ]]; then
 fi
 
 # If the operator supplied any "decision" flag (--domain / --ip / --https
-# / --summary) but did not pass --non-interactive, treat those flags as
-# the decision and skip the prompts. (--up no longer participates: R6
+# / --summary / --search) but did not pass --non-interactive, treat those
+# flags as the decision and skip the prompts. (--up no longer participates: R6
 # made it a start-only subcommand that exits before the prompts.)
 if [[ "${NON_INTERACTIVE}" == "false" ]]; then
   if [[ "${DOMAIN_SET_VIA_CLI}" == "true" \
      || "${IP_SET_VIA_CLI}" == "true" \
      || "${HTTPS_SET_VIA_CLI}" == "true" \
-     || "${SUMMARY_SET_VIA_CLI}" == "true" ]]; then
+     || "${SUMMARY_SET_VIA_CLI}" == "true" \
+     || "${SEARCH_SET_VIA_CLI}" == "true" ]]; then
     info "CLI flags supplied; switching to non-interactive mode."
     info "(Pass no flags, or only --force, to get the interactive prompts.)"
     NON_INTERACTIVE=true
@@ -1884,6 +1947,13 @@ if [[ "${NON_INTERACTIVE}" == "false" ]]; then
     [yY]|[yY][eE][sS]) ENABLE_SUMMARY=true ;;
     *) ENABLE_SUMMARY=false ;;
   esac
+
+  # Search (message-search pipeline)
+  read -rp "Enable message-search pipeline (Kafka + OpenSearch + es-indexer)? [y/N]: " user_search
+  case "${user_search}" in
+    [yY]|[yY][eE][sS]) ENABLE_SEARCH=true ;;
+    *) ENABLE_SEARCH=false ;;
+  esac
 else
   # Non-interactive: auto-detect IP if not provided via --ip
   if [[ -z "${EXTERNAL_IP}" ]]; then
@@ -1896,6 +1966,7 @@ info "Domain:     ${DOMAIN}"
 info "External IP: ${EXTERNAL_IP}"
 info "HTTPS:      ${ENABLE_HTTPS}"
 info "Summary:    ${ENABLE_SUMMARY}"
+info "Search:     ${ENABLE_SEARCH}"
 
 # ── Generate secrets ────────────────────────────────────────────────────────
 info "Generating random secrets…"
@@ -1969,16 +2040,9 @@ sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_O
 # diffing against R6 sees the intentional removal.
 # (was: sed_inplace "s|^OCTO_TLS_ENABLED=.*|OCTO_TLS_ENABLED=...|" ...)
 
-# Summary setting
-if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
-  if grep -q '^COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed_inplace "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
-  elif grep -q '^# *COMPOSE_PROFILES=' "${ENV_OUT}"; then
-    sed_inplace "s|^# *COMPOSE_PROFILES=.*|COMPOSE_PROFILES=summary|" "${ENV_OUT}"
-  else
-    printf '\n# Activate summary services (summary-api + summary-worker)\nCOMPOSE_PROFILES=summary\n' >> "${ENV_OUT}"
-  fi
-fi
+# Optional compose profiles (merge, not clobber — summary + search coexist).
+if [[ "${ENABLE_SUMMARY}" == "true" ]]; then add_compose_profile summary; fi
+if [[ "${ENABLE_SEARCH}"  == "true" ]]; then add_compose_profile search;  fi
 
 # ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
 # INCIDENT-2026-05-16-001 follow-up: the interactive preflight may
@@ -2174,6 +2238,13 @@ fi
 
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then
   info "Summary service enabled. Set LLM_API_KEY in docker/.env before using."
+fi
+
+if [[ "${ENABLE_SEARCH}" == "true" ]]; then
+  info "Search profile enabled (infra only). To index history + flip the reader"
+  info "onto OpenSearch, run the zero-downtime upgrade after the stack is up:"
+  info "  cd docker && scripts/search-upgrade.sh"
+  info "See docker/README.md \"Search profile\" / \"Turn search on\"."
 fi
 
 # R6 (YUJ-1020): we are always on the generation path here (--up exits

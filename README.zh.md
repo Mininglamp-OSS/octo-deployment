@@ -139,6 +139,23 @@ OCTO 不内置 IM 引擎，通过 HTTP API + webhook gRPC 调用 [WuKongIM](http
 | `webhook.grpcAddr`（WuKongIM 回调地址） | `<octo-server-svc>:6979`，让 IM 消息事件能回到 OCTO |
 | `external.ip` / `external.wsAddr` / `external.wssAddr`（WuKongIM 对客户端暴露的公网地址） | 与终端客户端经 ingress / LB 访问 WuKongIM 的实际地址一致 |
 
+## 可选消息搜索
+
+消息搜索（Kafka + OpenSearch[analysis-ik] + es-indexer）是**可选**组件，
+**在每个部署入口都默认关闭**。每个入口都需显式 opt-in；默认安装路径渲染**零**个
+搜索资源。
+
+| 部署入口 | 开启方式 | 默认 |
+|---|---|---|
+| Docker Compose | `./setup.sh --search`（或 `COMPOSE_PROFILES=search`） | 关 |
+| Helm | `--set search.enabled=true` | 关 |
+| Kustomize | `kubectl apply -k kustomize/search`（独立，不被 base/overlays 引用） | 关 |
+
+三者都只部署搜索**基础设施**；将 octo-server 接到 OpenSearch 是独立的、需 owner
+把关的步骤。详见 [`docker/README.zh.md`](./docker/README.zh.md) "Search profile"、
+[`helm/octo/README.zh.md`](./helm/octo/README.zh.md) "搜索（可选）" 和
+[`kustomize/search/README.md`](./kustomize/search/README.md)。
+
 ## 目录结构
 
 ```

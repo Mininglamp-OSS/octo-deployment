@@ -160,6 +160,24 @@ Whichever you pick, three things must line up between WuKongIM and `octo-server`
 | `webhook.grpcAddr` (the address WuKongIM dials back into) | `<octo-server-svc>:6979` so message events reach OCTO |
 | `external.ip` / `external.wsAddr` / `external.wssAddr` (the public endpoints WuKongIM advertises to clients) | should match how end-user clients reach WuKongIM via your ingress / LB |
 
+## Optional message search
+
+Message search (Kafka + OpenSearch[analysis-ik] + es-indexer) is an **optional**
+component and is **default OFF on every entry point**. Each entry point opts in
+explicitly; the default install path renders **zero** search resources.
+
+| Entry point | Opt-in | Default |
+|---|---|---|
+| Docker Compose | `./setup.sh --search` (or `COMPOSE_PROFILES=search`) | off |
+| Helm | `--set search.enabled=true` | off |
+| Kustomize | `kubectl apply -k kustomize/search` (standalone, not referenced by base/overlays) | off |
+
+All three deploy the search **infrastructure** only; wiring octo-server onto
+OpenSearch is a separate, owner-gated step. See
+[`docker/README.md`](./docker/README.md) "Search profile",
+[`helm/octo/README.md`](./helm/octo/README.md) "Search (optional)", and
+[`kustomize/search/README.md`](./kustomize/search/README.md).
+
 ## Layout
 
 ```

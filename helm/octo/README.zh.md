@@ -53,7 +53,7 @@ server:
 查看所有可用配置项：
 
 ```bash
-helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.4
+helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.0
 ```
 
 ### 2. 安装
@@ -70,7 +70,7 @@ helm install octo ./helm/octo \
 海外用户不加 `-f values-china.yaml`，默认从 Docker Hub 拉取。
 
 ```bash
-helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
+helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
   --namespace octo --create-namespace \
   -f my-values.yaml \
   --set secrets.mysqlRootPassword="$(openssl rand -hex 16)" \
@@ -122,7 +122,7 @@ kubectl port-forward -n octo svc/octo-nginx 8080:80
 ## 升级
 
 ```bash
-helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
+helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
   --namespace octo \
   --reuse-values \
   -f my-values.yaml
@@ -265,6 +265,74 @@ ingress:
     enabled: false
     secretName: ""       # 已存在的 TLS Secret 名称
 ```
+
+---
+
+## 搜索（可选）
+
+消息搜索（Kafka + OpenSearch[analysis-ik] + es-indexer）是**可选**组件，**默认关闭**。
+当 `search.enabled=false`（默认）时，chart 渲染**零**个搜索资源——与 `docker`
+（`--search` / `COMPOSE_PROFILES=search`）和 `kustomize/search` 对齐。
+
+```yaml
+search:
+  enabled: true        # 默认 false → 不渲染任何搜索资源
+```
+
+开启后只部署搜索**基础设施**，**不会**将 octo-server 接到 OpenSearch（reader 后端 /
+producer 切换）。后者是独立的、需 owner 把关的步骤，**不在本 chart 范围内**——与
+`kustomize/search` 一致（同样只装基础设施）。本开关**不改动**
+`deployment-octo-server` 及其 ConfigMap。
+
+### 开启清单
+
+1. **构建并推送 OpenSearch 镜像。** `search.opensearch.image` 默认为
+   `octo-search-opensearch-ik:2.17.0`，这是**本地构建名，直接拉取会失败**。请构建
+   `docker/opensearch/Dockerfile`（内置 analysis-ik，插件版本必须与 OpenSearch 版本一致），
+   推送到你的 registry，并设置 `search.opensearch.image.repository`/`tag`
+   （或 `global.imageRegistry`）。
+2. **固定 indexer 镜像。** `search.indexer.image` 仅在 `v*` tag / 手动触发时发布；
+   生产环境请固定到真实 tag/digest。
+3. 私有 registry 的**拉取凭据**通过 `global.imagePullSecrets`（chart 级）统一配置，
+   而非每个 pod 单独配置。
+
+### `clusterId` 不可变
+
+`search.kafka.clusterId` 在首次安装时会在 Kafka PVC 上格式化 KRaft 元数据。
+**在已有 PVC 上修改它会导致 broker 崩溃循环。** 只有在全新部署 / 全新 PVC 时才重新
+生成（`kafka-storage.sh random-uuid`）。
+
+### 独立 producer 为禁用产物
+
+`search.producer` 以**禁用产物**形式发布：`enabled: false` + `replicas: 0`。
+实际运行它（`replicas>0`）**需 owner 把关，且超出本 chart 版本范围**——chart 会在
+**渲染期对任何 `replicas>0` fail-fast**。本 chart **比 `kustomize/search` 收紧**：
+kustomize 依赖**运行时**互斥（Redis run-lock + cursor CAS + `producer-mutex-guard`
+initContainer），渲染期守卫无法替代；本 chart 额外在渲染期挡掉 `replicas>0`。
+`producer-mutex-guard` initContainer 作为运行时兜底保留。后续票放开此路径时，请通过
+`search.producer.existingSecret`（预建 Secret）引用凭据，不要用 `--set` 内联 DSN
+（会泄漏到 release Secret、values 历史和 shell 历史）。
+
+### 生产加固
+
+OpenSearch 安全插件**默认关闭**（`search.opensearch.disableSecurityPlugin: true`），
+且 chart**不附带 NetworkPolicy**。生产环境请将搜索运行在网络隔离的 namespace，
+开启 OpenSearch 安全插件（设 `disableSecurityPlugin: false` 并在 es-indexer 上配置
+`ES_USERNAME`/`ES_PASSWORD`），并限制对 OpenSearch/Kafka Service 的访问。
+
+### 验证就绪
+
+```bash
+# OpenSearch 健康
+kubectl exec -n <ns> sts/octo-search-opensearch -- \
+  curl -s localhost:9200/_cluster/health
+# 验证 post-install hook 创建的 Kafka topic
+kubectl exec -n <ns> sts/octo-search-kafka -- \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+> **china overlay 说明：** 新增的搜索镜像（自建 opensearch-ik + 私有 indexer）
+> 尚未为 `values-china.yaml` 镜像化；接通 china overlay 的搜索镜像覆盖是后续票。
 
 ---
 

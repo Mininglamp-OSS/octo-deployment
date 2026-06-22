@@ -61,6 +61,15 @@ kustomize/
     └── prod/                   Multi-replica production overlay
 ```
 
+`kustomize/search/` (Kafka + OpenSearch + es-indexer) is an **optional**,
+standalone search overlay, **default OFF**: it is intentionally **not**
+referenced by `base` or any overlay, so `kubectl apply -k base|overlays/dev|
+overlays/prod` renders **zero** search resources. Opt in explicitly with
+`kubectl apply -k kustomize/search`. See
+[`kustomize/search/README.md`](./search/README.md). This mirrors the optional
+search toggles on the other entry points (docker `--search`, helm
+`search.enabled`).
+
 ## Open items
 
 - [ ] Ingress / Gateway example for `octo-web` + `octo-admin`

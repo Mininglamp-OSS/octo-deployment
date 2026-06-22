@@ -283,6 +283,13 @@ tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer@sha2
 To roll the image forward, repoint the digest here (and, if needed, push a new
 `:vX.Y.Z` / `:<commit>` tag to TCR) — do not switch back to a floating tag.
 
+**OSS / non-dmwork users**: the TCR digest above is a **private** image and will
+`ImagePullBackOff` without TCR pull credentials. To pull from public Docker Hub
+instead, replace the `newName`/`digest` pair for `mininglamposs/octo-search-indexer`
+in `kustomization.yaml` with a floating/pinned tag, e.g. `newTag: "latest"` (or a
+pinned `:vX.Y.Z` for reproducibility) and drop the `newName` override. See the
+escape-hatch comment in `kustomization.yaml`. The TCR digest stays the default.
+
 ### Private TCR pull secret
 
 The image lives in a **private** Tencent TCR

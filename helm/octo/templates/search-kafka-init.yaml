@@ -1,0 +1,63 @@
+{{- if .Values.search.enabled }}
+# One-shot topic creation for the search pipeline, run as a Helm hook. REQUIRED
+# because broker auto-create is off and the es-indexer DLQ producer runs with
+# AllowAutoTopicCreation=false — the body + DLQ topics must pre-exist. This is
+# the chart equivalent of the compose/kustomize search-kafka-init step. The
+# topic script is idempotent (--if-not-exists), so re-running on every upgrade
+# is safe.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "octo.searchKafkaInit.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-kafka-init
+  annotations:
+    # post-install,post-upgrade: create topics after the broker StatefulSet is
+    # (re)applied. hook-failed is REQUIRED — without it a failed hook Job is
+    # left as an orphan. before-hook-creation avoids the Job-immutable conflict
+    # when a prior hook Job with the same name still exists.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+spec:
+  backoffLimit: 30
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: search-kafka-init
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: {{ include "octo.image" (dict "repo" .Values.search.kafka.image.repository "tag" .Values.search.kafka.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.search.kafka.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              BOOT={{ include "octo.searchKafka.fullname" . }}:9092
+              # Wait for the broker to accept API calls (cross-object readiness
+              # is not visible to a Job, so poll here).
+              i=0
+              until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server "$BOOT" >/dev/null 2>&1; do
+                i=$((i+1))
+                if [ "$i" -gt 60 ]; then echo "[init] broker not ready after 5m" >&2; exit 1; fi
+                echo "[init] waiting for $BOOT ..."; sleep 5
+              done
+              for t in octo.message.v1 octo.message.v1.dlq; do
+                /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$BOOT" \
+                  --create --if-not-exists --topic "$t" \
+                  --partitions 1 --replication-factor 1
+              done
+              echo "[init] topics ready"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+{{- end }}

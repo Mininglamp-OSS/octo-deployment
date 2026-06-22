@@ -1,0 +1,102 @@
+{{- if .Values.search.enabled }}
+# OpenSearch (single node, analysis-ik) for the message-search pipeline.
+# The image MUST have the analysis-ik plugin baked in and the plugin version
+# MUST match the OpenSearch version (build docker/opensearch/Dockerfile, push to
+# your registry, then set search.opensearch.image below). Infra only — this does
+# NOT wire octo-server onto OpenSearch (separate owner-gated step).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.searchOpensearch.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-opensearch
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 9200
+      targetPort: http
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: search-opensearch
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "octo.searchOpensearch.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-opensearch
+spec:
+  serviceName: {{ include "octo.searchOpensearch.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search-opensearch
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: search-opensearch
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      # OpenSearch runs as a non-root user (uid/gid 1000). Freshly provisioned
+      # PVCs are often root-owned, so set fsGroup to make the data mount
+      # group-writable — otherwise OpenSearch cannot create files under
+      # /usr/share/opensearch/data and the pod exits before readiness.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: opensearch
+          image: {{ include "octo.image" (dict "repo" .Values.search.opensearch.image.repository "tag" .Values.search.opensearch.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.search.opensearch.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 9200
+          env:
+            - name: discovery.type
+              value: single-node
+            # Memory locking is OFF for k8s: bootstrap.memory_lock=true requires
+            # the IPC_LOCK capability + an unlimited memlock rlimit on the pod,
+            # which a plain StatefulSet does not have — with it on, OpenSearch
+            # fails its memory-lock bootstrap check and stays unready.
+            - name: bootstrap.memory_lock
+              value: "false"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: {{ .Values.search.opensearch.javaOpts | quote }}
+            # Local/in-cluster default disables the security plugin. For a
+            # hardened deployment set this to false and wire ES_USERNAME /
+            # ES_PASSWORD on the es-indexer (see README "Search (optional)").
+            - name: DISABLE_SECURITY_PLUGIN
+              value: {{ .Values.search.opensearch.disableSecurityPlugin | quote }}
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 18
+          {{- with .Values.search.opensearch.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.search.opensearch.storage.storageClass }}
+        storageClassName: {{ .Values.search.opensearch.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.search.opensearch.storage.size | default "20Gi" }}
+{{- end }}

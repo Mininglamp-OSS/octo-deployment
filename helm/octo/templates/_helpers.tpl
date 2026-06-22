@@ -115,6 +115,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-summary-worker" (include "octo.fullname" .) }}
 {{- end }}
 
+{{- define "octo.searchOpensearch.fullname" -}}
+{{- printf "%s-search-opensearch" (include "octo.fullname" .) }}
+{{- end }}
+
+{{- define "octo.searchKafka.fullname" -}}
+{{- printf "%s-search-kafka" (include "octo.fullname" .) }}
+{{- end }}
+
+{{- define "octo.searchKafkaInit.fullname" -}}
+{{- printf "%s-search-kafka-init" (include "octo.fullname" .) }}
+{{- end }}
+
+{{- define "octo.esIndexer.fullname" -}}
+{{- printf "%s-es-indexer" (include "octo.fullname" .) }}
+{{- end }}
+
+{{- define "octo.searchetlProducer.fullname" -}}
+{{- printf "%s-searchetl-producer" (include "octo.fullname" .) }}
+{{- end }}
+
 {{- define "octo.nginx.fullname" -}}
 {{- printf "%s-nginx" (include "octo.fullname" .) }}
 {{- end }}

@@ -1,0 +1,124 @@
+{{- if .Values.search.enabled }}
+# Kafka (KRaft single broker) for the message-search pipeline. Single-node,
+# in-cluster only. Topics are created by the search-kafka-init hook Job (broker
+# auto-create is off; the es-indexer DLQ producer runs AllowAutoTopicCreation=
+# false, so the body + DLQ topics must pre-exist).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.searchKafka.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-kafka
+spec:
+  clusterIP: None
+  # Publish the broker's DNS A record before it is Ready. KRaft resolves the
+  # broker name for KAFKA_CONTROLLER_QUORUM_VOTERS during startup, which happens
+  # before the readiness probe passes — without this the name can be
+  # unresolvable and the single broker deadlocks unready.
+  publishNotReadyAddresses: true
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: broker
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: search-kafka
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "octo.searchKafka.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: search-kafka
+spec:
+  serviceName: {{ include "octo.searchKafka.fullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: search-kafka
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: search-kafka
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      # apache/kafka runs as a non-root user (uid/gid 1000). Freshly provisioned
+      # PVCs are often root-owned, so set fsGroup to make the data mount
+      # group-writable — otherwise the broker cannot format/write KRaft metadata
+      # under KAFKA_LOG_DIRS and the pod crash-loops before readiness.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: kafka
+          image: {{ include "octo.image" (dict "repo" .Values.search.kafka.image.repository "tag" .Values.search.kafka.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.search.kafka.image.pullPolicy }}
+          ports:
+            - name: broker
+              containerPort: 9092
+          env:
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: "broker,controller"
+            - name: KAFKA_LISTENERS
+              value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: "PLAINTEXT://{{ include "octo.searchKafka.fullname" . }}:9092"
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@{{ include "octo.searchKafka.fullname" . }}:9093"
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: "CONTROLLER"
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: "PLAINTEXT"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "false"
+            # Valid Kafka UUID (22-char URL-safe Base64). IMMUTABLE on an
+            # existing PVC — see search.kafka.clusterId in values.yaml.
+            - name: CLUSTER_ID
+              value: {{ .Values.search.kafka.clusterId | quote }}
+            # apache/kafka defaults log.dirs to /tmp/kraft-combined-logs (NOT
+            # the PVC mount) — set it to the mounted path so topics + KRaft
+            # metadata survive a pod replacement/reschedule.
+            - name: KAFKA_LOG_DIRS
+              value: "/var/lib/kafka/data"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 12
+          {{- with .Values.search.kafka.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.search.kafka.storage.storageClass }}
+        storageClassName: {{ .Values.search.kafka.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.search.kafka.storage.size | default "10Gi" }}
+{{- end }}

@@ -1,0 +1,138 @@
+{{- if .Values.search.enabled }}
+# searchetl-producer: STANDALONE message-search producer (MySQL -> Kafka
+# octo.message.v1). DISABLED-ARTIFACT-ONLY in this chart revision: it is
+# rendered as a Deployment with replicas:0 + PRODUCER_ENABLED=false so the
+# resource exists for review but no pod ever starts.
+#
+# Fail-fast state matrix (producer.enabled x producer.replicas). This chart is
+# DELIBERATELY STRICTER than kustomize/search: kustomize relies on RUNTIME
+# mutual exclusion (Redis run-lock + cursor CAS + the producer-mutex-guard
+# initContainer), which a template-time render guard cannot replace; here we ALSO
+# block any replicas>0 at render time so a standalone producer cannot be brought
+# up by this revision at all. Actually running the producer is owner-gated and
+# out of scope — see README "Search (optional)".
+{{- if gt (int .Values.search.producer.replicas) 0 }}
+{{- if not .Values.search.producer.enabled }}
+{{- fail "search.producer.replicas>0 requires producer.enabled=true" }}
+{{- else }}
+{{- fail "running the standalone producer is owner-gated and out of scope for this chart revision; see README" }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.searchetlProducer.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: searchetl-producer
+spec:
+  # Default OFF: replicas 0 → no pod. Per the fail-fast matrix above, any
+  # replicas>0 fails the render in this revision (disabled artifact only).
+  replicas: {{ .Values.search.producer.replicas }}
+  # Recreate (not the default RollingUpdate): single-pod workload by design
+  # (replicas>1 is unsupported — Redis run-lock + cursor CAS serialize to one
+  # active producer). Recreate tears the old pod down before the new one starts,
+  # closing the one overlap window k8s would otherwise introduce. Defense in
+  # depth on top of the app-layer run-lock.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: searchetl-producer
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: searchetl-producer
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        # producer-mutex-guard: fail-closed mutual-exclusion check, the chart
+        # equivalent of the compose/kustomize search-producer-guard. This
+        # initContainer is REQUIRED and must NOT be removed: a template-time
+        # render guard only blocks at render, it cannot stop a producer that is
+        # later enabled at runtime, so the guard stays as the runtime backstop.
+        # Reuses the SAME is_on() union truthy logic (1|t|true|on|yes).
+        - name: producer-mutex-guard
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          env:
+            # Hardcoded true: the pod existing (operator scaled to replicas>=1)
+            # is itself the statement of intent to run standalone.
+            - name: STANDALONE_ON
+              value: "true"
+            # Built-in producer toggle. Hardcoded "false" here because this helm
+            # chart has NO built-in producer leg at all — octo-server in this
+            # chart ships zero producer/kafka wiring (no TS_KAFKA_ON env, no
+            # producer ConfigMap), so there is nothing to read.
+            #
+            # 🔴 FORWARD-NOTE: a future owner-gated ticket that actually enables
+            # octo-server's built-in producer MUST change BUILTIN_ON back to read
+            # the octo-server ConfigMap (configMapKeyRef TS_KAFKA_ON, optional:
+            # true — aligning with kustomize/search). Leaving it hardcoded false
+            # once a built-in producer exists would silently DISABLE the
+            # double-producer mutex on the helm side (both producers could run).
+            - name: BUILTIN_ON
+              value: "false"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              is_on() {
+                v=$(printf %s "${1:-}" | tr 'A-Z' 'a-z')
+                case "$v" in
+                  1|t|true|on|yes) return 0 ;;
+                  *) return 1 ;;
+                esac
+              }
+              if is_on "$STANDALONE_ON" && is_on "${BUILTIN_ON:-}"; then
+                echo "[guard] FATAL both producers on" >&2
+                exit 1
+              fi
+              echo "[guard] ok"
+      containers:
+        - name: searchetl-producer
+          image: {{ include "octo.image" (dict "repo" .Values.search.indexer.image.repository "tag" .Values.search.indexer.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.search.indexer.image.pullPolicy }}
+          # Select the producer binary from the shared image (one image, two
+          # binaries — es-indexer + searchetl-producer built in lockstep).
+          command: ["/usr/local/bin/searchetl-producer"]
+          env:
+            # Master switch — OFF by default (defense in depth on top of
+            # replicas:0).
+            - name: PRODUCER_ENABLED
+              value: {{ .Values.search.producer.enabled | quote }}
+            {{- if .Values.search.producer.existingSecret }}
+            # DSN + Redis addr sourced from a PRE-CREATED Secret rather than
+            # inlined via --set (inline leaks the DSN into the release Secret,
+            # values history, and shell history). Mirrors kustomize/search's
+            # dedicated searchetl-producer-secret.
+            - name: PRODUCER_MYSQL_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.search.producer.existingSecret }}
+                  key: {{ .Values.search.producer.mysqlDsnKey }}
+            - name: PRODUCER_REDIS_ADDR
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.search.producer.existingSecret }}
+                  key: {{ .Values.search.producer.redisAddrKey }}
+            {{- end }}
+            - name: PRODUCER_KAFKA_BROKERS
+              value: "{{ include "octo.searchKafka.fullname" . }}:9092"
+            - name: PRODUCER_KAFKA_TOPIC
+              value: "octo.message.v1"
+            - name: PRODUCER_KAFKA_DLQ_TOPIC
+              value: "octo.message.v1.dlq"
+            - name: PRODUCER_TABLES
+              value: {{ .Values.search.producer.tables | quote }}
+            - name: PRODUCER_LAG_SECONDS
+              value: {{ .Values.search.producer.lagSeconds | quote }}
+            - name: TZ
+              value: "UTC"
+          {{- with .Values.search.producer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
