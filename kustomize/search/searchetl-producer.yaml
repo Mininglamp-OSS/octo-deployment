@@ -140,8 +140,20 @@ spec:
               value: "octo.message.v1.dlq"
             - name: PRODUCER_TABLES
               value: "message,message1,message2,message3,message4"
+            # 🔴 dmwork-test NEAR-REAL-TIME OVERRIDE (rollback: LAG=600 / TICK=60).
+            # LAG=10 + TICK=5 drops end-to-end indexing latency to seconds (~5-16s)
+            # for dmwork-test validation ONLY. lag MUST exceed the source DB's
+            # longest single-message INSERT transaction or low ids are silently
+            # missed (C1 visibility gate); chat-message commits are sub-second, so
+            # LAG=10 has ample margin in this test environment. Before promoting to
+            # any other environment, confirm that environment's source DB has no
+            # minute-scale long transactions, then restore LAG=600 / TICK=60 there.
             - name: PRODUCER_LAG_SECONDS
-              value: "600"
+              value: "10"
+            # TICK=5 is the binary's minimum (clamped to [5, 3600] in
+            # octo-search-indexer internal/producer/config.go).
+            - name: PRODUCER_TICK_SECONDS
+              value: "5"
             - name: TZ
               value: "UTC"
           # No liveness/readiness probe — parity with es-indexer (which has

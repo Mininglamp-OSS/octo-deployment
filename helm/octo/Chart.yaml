@@ -2,7 +2,7 @@ apiVersion: v2
 name: octo
 description: OCTO Server — self-hosted enterprise messaging platform (IM + AI)
 type: application
-version: 0.3.0
+version: 0.3.1
 appVersion: "latest"
 keywords:
   - octo

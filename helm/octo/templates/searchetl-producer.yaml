@@ -129,6 +129,8 @@ spec:
               value: {{ .Values.search.producer.tables | quote }}
             - name: PRODUCER_LAG_SECONDS
               value: {{ .Values.search.producer.lagSeconds | quote }}
+            - name: PRODUCER_TICK_SECONDS
+              value: {{ .Values.search.producer.tickSeconds | quote }}
             - name: TZ
               value: "UTC"
           {{- with .Values.search.producer.resources }}
