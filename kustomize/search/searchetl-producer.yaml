@@ -140,20 +140,24 @@ spec:
               value: "octo.message.v1.dlq"
             - name: PRODUCER_TABLES
               value: "message,message1,message2,message3,message4"
-            # 🔴 dmwork-test NEAR-REAL-TIME OVERRIDE (rollback: LAG=600 / TICK=60).
-            # LAG=10 + TICK=5 drops end-to-end indexing latency to seconds (~5-16s)
-            # for dmwork-test validation ONLY. lag MUST exceed the source DB's
-            # longest single-message INSERT transaction or low ids are silently
-            # missed (C1 visibility gate); chat-message commits are sub-second, so
-            # LAG=10 has ample margin in this test environment. Before promoting to
-            # any other environment, confirm that environment's source DB has no
-            # minute-scale long transactions, then restore LAG=600 / TICK=60 there.
+            # SAFE DEFAULT — DO NOT lower here. This shared/base manifest keeps
+            # the conservative LAG=600 / TICK=60: the cursor only advances to
+            # DB_NOW - lag, so lag MUST exceed the source DB's longest
+            # single-message INSERT transaction or low ids in a long-running
+            # transaction are silently missed (C1 visibility gate). 600 (10 min)
+            # has wide margin for sub-second message commits in any environment.
+            # Near-real-time (LAG=10 / TICK=5) is NOT applied here — it is
+            # structurally scoped to the kustomize/overlays/search-near-real-time
+            # overlay, so a plain `kubectl apply -k kustomize/search` always gets
+            # the safe default. See that overlay for the seconds-latency override
+            # and the long-transaction precondition it requires.
             - name: PRODUCER_LAG_SECONDS
-              value: "10"
-            # TICK=5 is the binary's minimum (clamped to [5, 3600] in
-            # octo-search-indexer internal/producer/config.go).
+              value: "600"
+            # TICK is clamped to [5, 3600] by the binary (octo-search-indexer
+            # internal/producer/config.go). Default 60 keeps existing
+            # environments unchanged; the near-real-time overlay lowers it to 5.
             - name: PRODUCER_TICK_SECONDS
-              value: "5"
+              value: "60"
             - name: TZ
               value: "UTC"
           # No liveness/readiness probe — parity with es-indexer (which has

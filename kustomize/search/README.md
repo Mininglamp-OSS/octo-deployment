@@ -65,6 +65,27 @@ binaries); the Deployment overrides the entrypoint to `searchetl-producer`.
 It is shipped **OFF**: `replicas: 0` **and** `PRODUCER_ENABLED=false` (double
 opt-in). Applying this directory creates the Deployment but no pod.
 
+### Latency tuning: safe default vs. near-real-time overlay
+
+This base manifest pins the **safe** producer cadence: `PRODUCER_LAG_SECONDS=600`
+/ `PRODUCER_TICK_SECONDS=60`. The cursor only advances to `DB_NOW - lag`, so the
+lag MUST exceed the source DB's longest single-message INSERT transaction or low
+ids in a long-running transaction are silently missed (the C1 visibility gate).
+600 (10 min) has wide margin for any environment. **Applying the base
+(`kubectl apply -k kustomize/search`) always gets this safe default.**
+
+For seconds-latency validation, opt in to the **near-real-time overlay**
+(`LAG=10` / `TICK=5`, ~5-16s end-to-end), which is structurally isolated so the
+aggressive value never leaks into a plain base apply:
+
+```
+kubectl apply -k kustomize/overlays/search-near-real-time -n <ns>
+```
+
+Apply that overlay **only** where you have confirmed the source DB has no
+minute-scale long transactions; everywhere else apply the base. (`TICK` is
+clamped by the binary to `[5, 3600]`.)
+
 ### Enable checklist (owner-gated)
 
 Enabling is a deliberate, owner-gated action with data-layer consequences:
