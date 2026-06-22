@@ -10,6 +10,19 @@ Service endpoints (internal cluster):
 {{- if .Values.summary.enabled }}
   Summary: http://{{ include "octo.summaryApi.fullname" . }}:8080
 {{- end }}
+{{- if .Values.search.enabled }}
+  Search:  http://{{ include "octo.searchOpensearch.fullname" . }}:9200 (OpenSearch)
+           {{ include "octo.searchKafka.fullname" . }}:9092 (Kafka)
+
+Search INFRASTRUCTURE is deployed (OpenSearch + Kafka + es-indexer). Notes:
+  - This deploys infra ONLY; it does NOT wire octo-server onto OpenSearch
+    (reader/producer cut-over is a separate owner-gated step).
+  - The standalone searchetl-producer is a DISABLED ARTIFACT in this revision
+    (replicas:0); enabling it (replicas>0) is owner-gated and fails the render.
+  - The opensearch image MUST have analysis-ik baked in and be pushed to your
+    registry (the default name is a LOCAL build name and will not pull as-is).
+  See helm/octo/README.md "Search (optional)".
+{{- end }}
 
 Get the public nginx address:
 {{- if eq .Values.nginx.service.type "LoadBalancer" }}

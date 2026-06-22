@@ -1,0 +1,85 @@
+{{- if .Values.search.enabled }}
+# es-indexer: consumes Kafka octo.message.v1 and bulk-indexes into OpenSearch
+# (idempotent _id=message_id upsert; IK analyzers via the embedded mapping). The
+# DLQ spill mounts a PVC so DLQ-write outages survive a pod restart.
+#
+# NOTE: the indexer image is published only on v* tags / manual dispatch — pin a
+# real tag/digest in values (search.indexer.image) before enabling for prod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "octo.esIndexer.fullname" . }}-dlq-spill
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: es-indexer
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- if .Values.search.indexer.dlqSpill.storageClass }}
+  storageClassName: {{ .Values.search.indexer.dlqSpill.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.search.indexer.dlqSpill.size | default "1Gi" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.esIndexer.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: es-indexer
+spec:
+  replicas: 1
+  # Recreate (NOT the default RollingUpdate): single-pod workload bound to an
+  # RWO DLQ-spill PVC. RollingUpdate would start the new pod before the old one
+  # terminates; both would try to mount the same ReadWriteOnce PVC and the new
+  # pod would wedge on a Multi-Attach error. Recreate tears the old pod down
+  # first, so the single RWO volume is free when the replacement starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: es-indexer
+  template:
+    metadata:
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: es-indexer
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: es-indexer
+          image: {{ include "octo.image" (dict "repo" .Values.search.indexer.image.repository "tag" .Values.search.indexer.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.search.indexer.image.pullPolicy }}
+          env:
+            - name: ES_INDEXER_ENABLED
+              value: "true"
+            - name: KAFKA_BROKERS
+              value: "{{ include "octo.searchKafka.fullname" . }}:9092"
+            - name: KAFKA_TOPIC
+              value: "octo.message.v1"
+            - name: KAFKA_DLQ_TOPIC
+              value: "octo.message.v1.dlq"
+            - name: KAFKA_GROUP_ID
+              value: "octo-search-indexer"
+            - name: ES_ADDRESSES
+              value: "http://{{ include "octo.searchOpensearch.fullname" . }}:9200"
+            - name: ES_INDEX
+              value: "octo-message"
+            - name: INDEXER_BATCH_SIZE
+              value: {{ .Values.search.indexer.batchSize | quote }}
+            - name: INDEXER_DLQ_SPILL_DIR
+              value: "/var/lib/es-indexer/dlq-spill"
+          volumeMounts:
+            - name: dlq-spill
+              mountPath: /var/lib/es-indexer/dlq-spill
+          {{- with .Values.search.indexer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: dlq-spill
+          persistentVolumeClaim:
+            claimName: {{ include "octo.esIndexer.fullname" . }}-dlq-spill
+{{- end }}
