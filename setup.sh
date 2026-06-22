@@ -59,6 +59,20 @@ ENV_EXAMPLE="${SCRIPT_DIR}/docker/.env.example"
 ENV_OUT="${SCRIPT_DIR}/docker/.env"
 DOCKER_DIR="${SCRIPT_DIR}/docker"
 
+# One-shot init services: jobs that run to completion and whose PASS state
+# is a clean `Exited (0)` (every OTHER service is long-running and must stay
+# `Up`). This single pipe-delimited alternation is the ONLY place the set is
+# named — both the health contract checker
+# (`verify_all_services_running_or_healthy`) and the `--verify` failure
+# classifier consume it, so the two allowlists can never drift apart, and any
+# future profile-activated one-shot only has to be added here once.
+#   - preflight          : token/secret validation gate (always on)
+#   - minio-init         : MinIO user/policy/bucket bootstrap (always on)
+#   - search-kafka-init  : Kafka topic creation, activated by --search
+#                          (COMPOSE_PROFILES=search). `restart: "no"`, so it
+#                          legitimately ends at `Exited (0)` once topics exist.
+ONESHOT_SERVICES_RE='preflight|minio-init|search-kafka-init'
+
 # YUJ-1084 / GH#46: root's primary group differs by OS — Linux uses `root`,
 # macOS (BSD) uses `wheel`. Hard-coding `chown root:root` aborts on macOS
 # with `chown: root: illegal group name`, which leaves docker/.env half-
@@ -214,7 +228,8 @@ compose_supports_wait() {
 #               long-running svcs must never exit), `Restarting (…)`,
 #               `Dead`, `Paused`, `Removing`, or missing container row.
 #
-#   one-shot service (preflight, minio-init):
+#   one-shot service (preflight, minio-init, search-kafka-init — the
+#   ${ONESHOT_SERVICES_RE} set):
 #     PASS   →  `Exited (0)` (job ran and finished cleanly).
 #     WAIT   →  still `Up …` / `Created` (job has not finished yet).
 #     FATAL  →  `Exited (n>0)`, `Restarting (…)`, `Dead`, or missing
@@ -246,37 +261,34 @@ verify_all_services_running_or_healthy() {
       continue
     fi
     status="${row#*	}"
-    case "${svc}" in
-      preflight|minio-init)
-        case "${status}" in
-          "Exited (0)"*)                 : ;;  # PASS — one-shot finished
-          Exited*|Restarting*|Dead*)     out="${out}FATAL	${row}
+    if [[ "${svc}" =~ ^(${ONESHOT_SERVICES_RE})$ ]]; then
+      case "${status}" in
+        "Exited (0)"*)                 : ;;  # PASS — one-shot finished
+        Exited*|Restarting*|Dead*)     out="${out}FATAL	${row}
 " ;;
-          *)                             out="${out}WAIT	${row}
+        *)                             out="${out}WAIT	${row}
 " ;;
-        esac
-        ;;
-      *)
-        case "${status}" in
-          Up*"(unhealthy)"*|Up*"(health: starting)"*|Created*)
-            # `Created` on a long-running svc is the cold-boot race
-            # window: `compose up -d` ordered it after a depends_on
-            # gate (e.g. preflight exit 0, mysql health) and Compose
-            # has not yet `Start`-ed it. From `compose_poll_healthy`
-            # this is WAIT (poll again — `Created` will flip to `Up`
-            # once the gate clears); from `--verify` (stack already
-            # steady) WAIT is treated as a failure by the caller,
-            # which is what we want — a `Created` row at that point
-            # means the gate never cleared.
-            out="${out}WAIT	${row}
+      esac
+    else
+      case "${status}" in
+        Up*"(unhealthy)"*|Up*"(health: starting)"*|Created*)
+          # `Created` on a long-running svc is the cold-boot race
+          # window: `compose up -d` ordered it after a depends_on
+          # gate (e.g. preflight exit 0, mysql health) and Compose
+          # has not yet `Start`-ed it. From `compose_poll_healthy`
+          # this is WAIT (poll again — `Created` will flip to `Up`
+          # once the gate clears); from `--verify` (stack already
+          # steady) WAIT is treated as a failure by the caller,
+          # which is what we want — a `Created` row at that point
+          # means the gate never cleared.
+          out="${out}WAIT	${row}
 "
-            ;;
-          Up*)                           : ;;  # PASS — healthy or no healthcheck
-          *)                             out="${out}FATAL	${row}
+          ;;
+        Up*)                           : ;;  # PASS — healthy or no healthcheck
+        *)                             out="${out}FATAL	${row}
 " ;;
-        esac
-        ;;
-    esac
+      esac
+    fi
   done <<< "${expected}"
   if [[ -n "${out}" ]]; then
     printf '%s' "${out}"
@@ -517,14 +529,15 @@ _compose_up_and_wait_once() {
     # Extract concrete failing service names from
     # `ps --format '{{.Service}}\t{{.Status}}'`. We flag anything that
     # is (unhealthy), Restarting, Dead, or Exited(non-zero). One-shot
-    # services (preflight / minio-init) are normally expected to be
+    # services (preflight / minio-init / search-kafka-init — the
+    # ${ONESHOT_SERVICES_RE} set) are normally expected to be
     # `Exited (0)` and so are NOT a fail in that state — but if they
     # crash with `Exited (1)` / `Restarting` / `Dead` they MUST surface,
     # because they gate the rest of the stack. So instead of stripping
     # them by name, we strip the specific benign one-shot status
     # (`Exited (0)`) and let everything else flow into the fail grep.
     failing_svcs="$(cd "${DOCKER_DIR}" && ${cc} ps --all --format '{{.Service}}	{{.Status}}' 2>/dev/null \
-                      | grep -vE '^(preflight|minio-init)	Exited \(0\)' \
+                      | grep -vE "^(${ONESHOT_SERVICES_RE})	Exited \(0\)" \
                       | grep -E '	.*(\(unhealthy\)|Restarting|Dead|Exited \([1-9])' \
                       | awk -F'	' '{print $1}' | sort -u || true)"
     err ""
@@ -847,7 +860,8 @@ Generation:
                       runs `docker compose up -d --wait --wait-timeout
                       240`, blocking until every long-running service is
                       healthy AND every one-shot init job (preflight /
-                      minio-init) exited 0. On a cold-boot soft timeout
+                      minio-init, plus search-kafka-init under --search)
+                      exited 0. On a cold-boot soft timeout
                       the wait retries ONCE on the warm mysql / image
                       cache (typically <10s). NEVER regenerates secrets
                       — run `./setup.sh` first to create docker/.env, or
