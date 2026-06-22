@@ -41,6 +41,14 @@ images:
   # tags pointing at this same digest.
   # NOTE: applying this directory will also bounce any already-running
   # es-indexer onto this digest (see README "apply knock-on").
+  #
+  # OSS / non-dmwork users: the digest below is a PRIVATE Tencent TCR image and
+  # will ImagePullBackOff without TCR pull credentials. To pull from public
+  # Docker Hub instead, REPLACE the newName/digest pair below with a floating/pinned tag:
+  #   - name: mininglamposs/octo-search-indexer
+  #     newTag: "latest"     # or a pinned :vX.Y.Z for reproducibility
+  # The TCR digest stays the DEFAULT (dmwork-test reproducibility); this is the
+  # documented escape hatch, not a behavior change.
   - name: mininglamposs/octo-search-indexer
     newName: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer
     digest: sha256:97c781154e1c9588deab7af29d6b7cb041188a072621122821391ac90272c7a0
