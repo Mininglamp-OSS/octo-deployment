@@ -7,13 +7,16 @@ docker/.env.bak.*
 kustomize/**/*-secret.yaml
 !kustomize/**/*-secret.example.yaml
 
-# Only the canonical OSS-template overlays (dev/prod) are tracked.
+# Only the canonical OSS-template overlays are tracked (dev/prod, plus the
+# credential-free search-near-real-time latency overlay).
 # Any environment-specific overlay (with real credentials) stays local.
 kustomize/overlays/**
 !kustomize/overlays/dev/
 !kustomize/overlays/dev/**
 !kustomize/overlays/prod/
 !kustomize/overlays/prod/**
+!kustomize/overlays/search-near-real-time/
+!kustomize/overlays/search-near-real-time/**
 
 # nginx TLS material — keep certificates / keys out of the repo. The
 # active TLS mount path is `docker/certs/` (see below); the older

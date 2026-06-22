@@ -1,0 +1,25 @@
+# Near-real-time search overlay — OPT-IN, validation-scoped.
+#
+# Structurally isolates the seconds-latency producer override (LAG=10 / TICK=5)
+# from the shared search base. The base (kustomize/search) ships the SAFE
+# default (LAG=600 / TICK=60); applying it never picks up the aggressive value.
+# Only an explicit, separate opt-in to THIS overlay does:
+#
+#   kubectl apply -k kustomize/overlays/search-near-real-time -n <ns>
+#
+# PRECONDITION (see searchetl-producer-patch.yaml): apply only where the source
+# DB has no minute-scale long transactions — otherwise the low lag can silently
+# skip messages (C1 visibility gate). Everything else (replicas:0,
+# PRODUCER_ENABLED=false double opt-in, image pins) is inherited unchanged from
+# the search base.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../search
+
+patches:
+  - path: searchetl-producer-patch.yaml
+    target:
+      kind: Deployment
+      name: searchetl-producer

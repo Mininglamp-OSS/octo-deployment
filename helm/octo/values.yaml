@@ -406,7 +406,17 @@ search:
     mysqlDsnKey: "PRODUCER_MYSQL_DSN"
     redisAddrKey: "PRODUCER_REDIS_ADDR"
     tables: "message,message1,message2,message3,message4"
+    # lagSeconds: the producer only advances its cursor to DB_NOW - lag, so a new
+    # message is not produced until lag + one tick elapses. lag MUST exceed the
+    # longest single-message INSERT transaction on the source DB or low ids in a
+    # long-running transaction are silently missed (C1 visibility gate). Default
+    # 600 (10 min) has wide margin for sub-second message commits.
     lagSeconds: 600
+    # tickSeconds: slow-cursor poll period. The producer binary clamps this to
+    # [5, 3600] (octo-search-indexer internal/producer/config.go). Default 60
+    # keeps existing environments unchanged; lower it (toward 5) only where
+    # near-real-time indexing is required AND lagSeconds is also lowered.
+    tickSeconds: 60
     resources:
       requests: { cpu: 100m, memory: 128Mi }
       limits:   { cpu: 500m, memory: 512Mi }

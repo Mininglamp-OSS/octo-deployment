@@ -1,0 +1,29 @@
+# Near-real-time override patch (strategic merge). env is merged by the `name`
+# key, so this overrides ONLY PRODUCER_LAG_SECONDS / PRODUCER_TICK_SECONDS on
+# the base searchetl-producer Deployment and leaves every other env var,
+# container field, and the replicas:0 / PRODUCER_ENABLED=false double opt-in
+# untouched.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searchetl-producer
+spec:
+  template:
+    spec:
+      containers:
+        - name: searchetl-producer
+          env:
+            # LAG=10 + TICK=5 drops end-to-end indexing latency to seconds
+            # (~5-16s). PRECONDITION: lag MUST exceed the source DB's longest
+            # single-message INSERT transaction or low ids in a long-running
+            # transaction are silently missed (C1 visibility gate). Chat-message
+            # commits are sub-second, so LAG=10 has ample margin in a validation
+            # environment. Apply this overlay ONLY where you have confirmed the
+            # source DB has no minute-scale long transactions; everywhere else
+            # apply the base (kustomize/search), which keeps LAG=600 / TICK=60.
+            - name: PRODUCER_LAG_SECONDS
+              value: "10"
+            # TICK=5 is the binary's minimum (clamped to [5, 3600] in
+            # octo-search-indexer internal/producer/config.go).
+            - name: PRODUCER_TICK_SECONDS
+              value: "5"

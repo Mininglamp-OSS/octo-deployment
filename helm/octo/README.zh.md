@@ -53,7 +53,7 @@ server:
 查看所有可用配置项：
 
 ```bash
-helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.0
+helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.1
 ```
 
 ### 2. 安装
@@ -70,7 +70,7 @@ helm install octo ./helm/octo \
 海外用户不加 `-f values-china.yaml`，默认从 Docker Hub 拉取。
 
 ```bash
-helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
+helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
   --namespace octo --create-namespace \
   -f my-values.yaml \
   --set secrets.mysqlRootPassword="$(openssl rand -hex 16)" \
@@ -122,7 +122,7 @@ kubectl port-forward -n octo svc/octo-nginx 8080:80
 ## 升级
 
 ```bash
-helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
+helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
   --namespace octo \
   --reuse-values \
   -f my-values.yaml
