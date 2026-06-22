@@ -53,7 +53,7 @@ server:
 To see all available options:
 
 ```bash
-helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.2.4
+helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.0
 ```
 
 ### 2. Install
@@ -70,7 +70,7 @@ helm install octo ./helm/octo \
 For overseas users, omit `-f values-china.yaml` — defaults pull from Docker Hub.
 
 ```bash
-helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
+helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
   --namespace octo --create-namespace \
   -f my-values.yaml \
   --set secrets.mysqlRootPassword="$(openssl rand -hex 16)" \
@@ -122,7 +122,7 @@ kubectl port-forward -n octo svc/octo-nginx 8080:80
 ## Upgrade
 
 ```bash
-helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.2.4 \
+helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.0 \
   --namespace octo \
   --reuse-values \
   -f my-values.yaml
@@ -256,6 +256,83 @@ ingress:
     enabled: false
     secretName: ""       # existing TLS secret name
 ```
+
+---
+
+## Search (optional)
+
+Message search (Kafka + OpenSearch[analysis-ik] + es-indexer) is an **opt-in**
+component, **default OFF**. With `search.enabled=false` (the default) the chart
+renders **zero** search resources — parity with `docker` (`--search` /
+`COMPOSE_PROFILES=search`) and `kustomize/search`.
+
+```yaml
+search:
+  enabled: true        # default false → no search resources rendered
+```
+
+Enabling deploys search **infrastructure only**. It does **not** wire
+octo-server onto OpenSearch (reader backend / producer cut-over). That is a
+separate, owner-gated step and is **out of scope** for this chart — parity with
+`kustomize/search`, which is also infra-only. `deployment-octo-server` and its
+ConfigMap are untouched by this toggle.
+
+### Enable checklist
+
+1. **Build & push the OpenSearch image.** `search.opensearch.image` defaults to
+   `octo-search-opensearch-ik:2.17.0`, which is a **local build name and will
+   NOT pull as-is**. Build `docker/opensearch/Dockerfile` (analysis-ik baked in;
+   plugin version MUST match the OpenSearch version), push to your registry, and
+   set `search.opensearch.image.repository`/`tag` (or `global.imageRegistry`).
+2. **Pin the indexer image.** `search.indexer.image` is published only on `v*`
+   tags / manual dispatch; pin a real tag/digest for prod.
+3. **Pull secrets** for private registries go through `global.imagePullSecrets`
+   (chart-wide), not a per-pod secret.
+
+### `clusterId` is immutable
+
+`search.kafka.clusterId` formats the KRaft metadata on the Kafka PVC on first
+install. **Changing it on an existing PVC crash-loops the broker.** Regenerate
+(`kafka-storage.sh random-uuid`) ONLY for a fresh deploy / fresh PVC.
+
+### Standalone producer is a disabled artifact
+
+`search.producer` is shipped **disabled-artifact-only**: `enabled: false` +
+`replicas: 0`. Actually running it (`replicas>0`) is **owner-gated and out of
+scope for this chart revision** — the chart **fail-fasts at render time** on any
+`replicas>0`. This chart is **deliberately stricter than `kustomize/search`**:
+kustomize relies on **runtime** mutual exclusion (Redis run-lock + cursor CAS +
+the `producer-mutex-guard` initContainer), which a template-time render guard
+cannot replace; this chart additionally blocks `replicas>0` at render. The
+`producer-mutex-guard` initContainer is preserved as the runtime backstop. When
+a future ticket opens this path, reference credentials via
+`search.producer.existingSecret` (a pre-created Secret) rather than inlining the
+DSN with `--set` (which would leak it into the release Secret, values history,
+and shell history).
+
+### Production hardening
+
+The OpenSearch security plugin is **disabled by default**
+(`search.opensearch.disableSecurityPlugin: true`) and the chart ships **no
+NetworkPolicy**. For production, run search on a network-isolated namespace,
+enable the OpenSearch security plugin (set `disableSecurityPlugin: false` and
+wire `ES_USERNAME`/`ES_PASSWORD` on the es-indexer), and restrict access to the
+OpenSearch/Kafka Services.
+
+### Verify readiness
+
+```bash
+# OpenSearch health
+kubectl exec -n <ns> sts/octo-search-opensearch -- \
+  curl -s localhost:9200/_cluster/health
+# Kafka topics created by the post-install hook
+kubectl exec -n <ns> sts/octo-search-kafka -- \
+  /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+```
+
+> **china overlay note:** the new search images (self-built opensearch-ik +
+> private indexer) are not yet mirrored for `values-china.yaml`; wiring the
+> china overlay's search image overrides is a separate follow-up.
 
 ---
 

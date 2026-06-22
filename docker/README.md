@@ -244,6 +244,21 @@ To enable the optional LLM summary services, add `--summary`:
 sudo ./setup.sh --up
 ```
 
+To enable the optional message-search pipeline (Kafka + OpenSearch +
+es-indexer), add `--search` (it writes `COMPOSE_PROFILES=search` and merges
+with `--summary` when both are given):
+
+```bash
+./setup.sh --search --domain octo.example.com --ip 1.2.3.4
+# or both: ./setup.sh --summary --search ...
+sudo ./setup.sh --up
+```
+
+`--search` only provisions the search **infrastructure**. To index history and
+flip the reader onto OpenSearch, run the zero-downtime upgrade after the stack
+is up: `cd docker && scripts/search-upgrade.sh` (see "Search profile" /
+"Turn search on" below).
+
 `setup.sh` writes `docker/.env` with rotated random secrets and a
 generated `OCTO_ADMIN_PWD`, then **prints the admin URL + password at
 the end of the run** so you do not have to grep `.env` for them. It is
@@ -1189,6 +1204,12 @@ profile. With no profile set it is completely inert:
 > Merging these manifests deploys nothing. Bringing the profile up is an
 > explicit operator action and, in any shared/staging/production environment,
 > is gated on owner sign-off.
+
+> **Shortcut:** `./setup.sh --search` writes `COMPOSE_PROFILES=search` into
+> `docker/.env` for you (and merges with `--summary` when both are passed), so
+> you do not have to hand-edit `COMPOSE_PROFILES`. It provisions infra only; run
+> `scripts/search-upgrade.sh` afterwards to index history and flip the reader
+> (see "Turn search on" below).
 
 ### Build the es-indexer image for local validation
 
