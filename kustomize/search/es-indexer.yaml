@@ -22,9 +22,9 @@ spec:
     spec:
       # Private-registry pull secret — same private Tencent TCR as the producer
       # (one image, two binaries). The raw manifest already running on
-      # dmwork-test carries this; once kustomize formally owns es-indexer the
+      # the reference cluster carries this; once kustomize formally owns es-indexer the
       # render must carry it too, or the pod ImagePullBackOffs. Default
-      # `tcr-image-xtiao` matches dmwork-test; other clusters MUST override the
+      # `tcr-image-xtiao` matches the reference cluster; other clusters MUST override the
       # name (overlay patch) and ensure the secret exists — see README
       # "Private TCR pull secret".
       imagePullSecrets:
