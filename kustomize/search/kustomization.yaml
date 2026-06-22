@@ -33,7 +33,7 @@ images:
   # two binaries are built together and must stay in lockstep.
   #
   # Tencent TCR + digest pin (immutable, reproducible) — this is the registry
-  # the dmwork-test (xiaotiao-tke) cluster actually pulls from, NOT Docker Hub.
+  # the maintainers' reference cluster actually pulls from, NOT Docker Hub.
   # The es-indexer already running there is pinned by digest the same way, so
   # both binaries resolve to the same byte-identical build. The digest below is
   # the image built from octo-search-indexer origin/main 94864fc (git tag
@@ -47,8 +47,8 @@ images:
   # Docker Hub instead, REPLACE the newName/digest pair below with a floating/pinned tag:
   #   - name: mininglamposs/octo-search-indexer
   #     newTag: "latest"     # or a pinned :vX.Y.Z for reproducibility
-  # The TCR digest stays the DEFAULT (dmwork-test reproducibility); this is the
-  # documented escape hatch, not a behavior change.
+  # The TCR digest stays the DEFAULT (reproducibility on the reference cluster);
+  # this is the documented escape hatch, not a behavior change.
   - name: mininglamposs/octo-search-indexer
     newName: tbj7-xtiao-tcr1.tencentcloudcr.com/xtiao-release/dmwork/octo-search-indexer
     digest: sha256:97c781154e1c9588deab7af29d6b7cb041188a072621122821391ac90272c7a0
