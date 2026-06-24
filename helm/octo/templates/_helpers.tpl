@@ -1,13 +1,20 @@
 {{/*
 Build a full image reference, optionally prefixed with global.imageRegistry.
+Fully-qualified repositories (registry host contains "." or ":" or is
+"localhost") bypass the global prefix.
 Usage: include "octo.image" (dict "repo" .Values.foo.image.repository "tag" .Values.foo.image.tag "ctx" .)
 */}}
 {{- define "octo.image" -}}
 {{- $reg := .ctx.Values.global.imageRegistry | default "" -}}
-{{- if $reg -}}
-{{- printf "%s/%s:%s" ($reg | trimSuffix "/") .repo .tag -}}
+{{- $repo := .repo | default "" -}}
+{{- $tag := .tag | default "" -}}
+{{- $repoParts := splitList "/" $repo -}}
+{{- $repoHost := first $repoParts | default "" -}}
+{{- $qualified := or (contains "." $repoHost) (contains ":" $repoHost) (eq $repoHost "localhost") -}}
+{{- if and $reg (not $qualified) -}}
+{{- printf "%v/%v:%v" ($reg | trimSuffix "/") $repo $tag -}}
 {{- else -}}
-{{- printf "%s:%s" .repo .tag -}}
+{{- printf "%v:%v" $repo $tag -}}
 {{- end -}}
 {{- end -}}
 
@@ -76,71 +83,89 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* ── Component fully-qualified names ─────────────────────────────────────── */}}
 
 {{- define "octo.mysql.fullname" -}}
-{{- printf "%s-mysql" (include "octo.fullname" .) }}
+{{- printf "%s-mysql" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.redis.fullname" -}}
-{{- printf "%s-redis" (include "octo.fullname" .) }}
+{{- printf "%s-redis" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.minio.fullname" -}}
-{{- printf "%s-minio" (include "octo.fullname" .) }}
+{{- printf "%s-minio" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.wukongim.fullname" -}}
-{{- printf "%s-wukongim" (include "octo.fullname" .) }}
+{{- printf "%s-wukongim" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.server.fullname" -}}
-{{- printf "%s-server" (include "octo.fullname" .) }}
+{{- printf "%s-server" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.web.fullname" -}}
-{{- printf "%s-web" (include "octo.fullname" .) }}
+{{- printf "%s-web" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.admin.fullname" -}}
-{{- printf "%s-admin" (include "octo.fullname" .) }}
+{{- printf "%s-admin" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.matter.fullname" -}}
-{{- printf "%s-matter" (include "octo.fullname" .) }}
+{{- printf "%s-matter" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.summaryApi.fullname" -}}
-{{- printf "%s-summary-api" (include "octo.fullname" .) }}
+{{- printf "%s-summary-api" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.summaryWorker.fullname" -}}
-{{- printf "%s-summary-worker" (include "octo.fullname" .) }}
+{{- printf "%s-summary-worker" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "octo.searchOpensearch.fullname" -}}
-{{- printf "%s-search-opensearch" (include "octo.fullname" .) }}
+{{- define "octo.speech.fullname" -}}
+{{- printf "%s-speech" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "octo.searchKafka.fullname" -}}
-{{- printf "%s-search-kafka" (include "octo.fullname" .) }}
-{{- end }}
-
-{{- define "octo.searchKafkaInit.fullname" -}}
-{{- printf "%s-search-kafka-init" (include "octo.fullname" .) }}
-{{- end }}
-
-{{- define "octo.esIndexer.fullname" -}}
-{{- printf "%s-es-indexer" (include "octo.fullname" .) }}
-{{- end }}
-
-{{- define "octo.searchetlProducer.fullname" -}}
-{{- printf "%s-searchetl-producer" (include "octo.fullname" .) }}
+{{- define "octo.speechAdmin.fullname" -}}
+{{- printf "%s-speech-admin" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.nginx.fullname" -}}
-{{- printf "%s-nginx" (include "octo.fullname" .) }}
+{{- printf "%s-nginx" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.secretName" -}}
-{{- printf "%s-secrets" (include "octo.fullname" .) }}
+{{- printf "%s-secrets" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.ingress.tlsSecretName" -}}
+{{- .Values.ingress.tls.secretName | default (printf "%s-qcloud-cert" (include "octo.fullname" .) | trunc 63 | trimSuffix "-") }}
+{{- end }}
+
+{{/* ── Inline resource names (ConfigMap, ServiceAccount, PVC, etc.) ─────────── */}}
+
+{{- define "octo.configMap.misc" -}}
+{{- printf "%s-misc" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.configMap.nginx" -}}
+{{- printf "%s-nginx-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.configMap.server" -}}
+{{- printf "%s-server-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.configMap.wukongim" -}}
+{{- printf "%s-wukongim-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.speechBootstrap" -}}
+{{- printf "%s-speech-bootstrap" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.speech.pvc" -}}
+{{- printf "%s-logs" (include "octo.speech.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/* ── Connection helpers ────────────────────────────────────────────────────── */}}
@@ -207,9 +232,12 @@ Redis addr (host:port).
 
 {{/*
 MinIO internal endpoint (host:port) used by server-side calls.
+Returns empty when cloud storage is active (endpoint is irrelevant).
 */}}
 {{- define "octo.minio.endpoint" -}}
-{{- if .Values.minio.enabled }}
+{{- if include "octo.isCloudStorage" . }}
+{{- "" }}
+{{- else if .Values.minio.enabled }}
 {{- printf "%s:%v" (include "octo.minio.fullname" .) (.Values.minio.service.apiPort | default 9000) }}
 {{- else }}
 {{- required "externalMinio.endpoint is required when minio.enabled=false" .Values.externalMinio.endpoint }}
@@ -217,18 +245,22 @@ MinIO internal endpoint (host:port) used by server-side calls.
 {{- end }}
 
 {{/*
-MinIO internal URL (http://host:port).
+MinIO internal URL (http://host:port). Returns empty when endpoint is empty (cloud storage mode).
 */}}
 {{- define "octo.minio.url" -}}
-{{- printf "http://%s" (include "octo.minio.endpoint" .) }}
+{{- $ep := include "octo.minio.endpoint" . -}}
+{{- if $ep -}}{{- printf "http://%s" $ep -}}{{- end -}}
 {{- end }}
 
 {{/*
-MinIO app user (IAM).
+MinIO app user (IAM). Only meaningful when fileService=minio.
+Returns empty string in cloud storage mode — callers are already guarded by octo.isCloudStorage.
 */}}
 {{- define "octo.minio.appUser" -}}
 {{- if .Values.minio.enabled }}
 {{- .Values.minio.auth.appUser | default "octo-app" }}
+{{- else if include "octo.isCloudStorage" . }}
+{{- "" }}
 {{- else }}
 {{- .Values.externalMinio.appUser | default "octo-app" }}
 {{- end }}
@@ -266,8 +298,14 @@ External base URL (used for presigned URLs and OIDC callbacks).
 {{- define "octo.externalBaseURL" -}}
 {{- if .Values.externalBaseURL }}
 {{- .Values.externalBaseURL }}
-{{- else }}
+{{- else if .Values.domain }}
+{{- if eq (include "octo.nginx.port" .) "80" -}}
+{{- printf "http://%s" .Values.domain }}
+{{- else -}}
 {{- printf "http://%s:%v" .Values.domain (include "octo.nginx.port" .) }}
+{{- end -}}
+{{- else }}
+{{- "" }}
 {{- end }}
 {{- end }}
 
@@ -288,8 +326,29 @@ WuKongIM external WebSocket address.
 {{- define "octo.wukongim.wsAddr" -}}
 {{- if .Values.wukongim.wsAddr }}
 {{- .Values.wukongim.wsAddr }}
-{{- else }}
+{{- else if or .Values.externalBaseURL .Values.domain }}
 {{- $base := include "octo.externalBaseURL" . }}
 {{- $base | replace "https://" "wss://" | replace "http://" "ws://" }}/ws
+{{- else }}
+{{- "" }}
 {{- end }}
 {{- end }}
+
+{{/*
+Returns "true" when the bundled MinIO StatefulSet is active.
+True only when minio.enabled=true AND fileService=minio.
+Setting fileService to a cloud provider implicitly disables bundled MinIO
+without requiring the user to also set minio.enabled=false.
+*/}}
+{{- define "octo.minio.active" -}}
+{{- if and (not (include "octo.isCloudStorage" .)) .Values.minio.enabled -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Returns "true" when server.config.fileService is a cloud provider (not "minio").
+Use with: {{- if include "octo.isCloudStorage" . }}
+*/}}
+{{- define "octo.isCloudStorage" -}}
+{{- $fs := (.Values.server.config | default dict).fileService | default "minio" -}}
+{{- if ne $fs "minio" -}}true{{- end -}}
+{{- end -}}
