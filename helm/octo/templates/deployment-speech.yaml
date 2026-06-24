@@ -1,0 +1,285 @@
+{{- if .Values.speech.enabled }}
+{{- $engine := .Values.speech.config.engine }}
+{{- $selectedModels := .Values.speech.config.selectedModels }}
+{{- $selectedURL := .Values.speech.config.selectedURL }}
+{{- if eq $engine "qwen" }}
+{{- $selectedModels = $selectedModels | default .Values.speech.config.qwenModels }}
+{{- $selectedURL = $selectedURL | default .Values.speech.config.qwenURL | default .Values.speech.config.liteLLMURL }}
+{{- else if eq $engine "gpt" }}
+{{- $selectedModels = $selectedModels | default .Values.speech.config.gptModels }}
+{{- $selectedURL = $selectedURL | default .Values.speech.config.liteLLMURL }}
+{{- else if eq $engine "gemini" }}
+{{- $selectedModels = $selectedModels | default .Values.speech.config.models }}
+{{- $selectedURL = $selectedURL | default .Values.speech.config.liteLLMURL }}
+{{- else }}
+{{- fail "speech.config.engine must be one of: gemini, gpt, qwen" }}
+{{- end }}
+{{- if not $selectedModels }}
+{{- fail "speech.config.selectedModels must be set when speech.enabled=true" }}
+{{- end }}
+{{- if not $selectedURL }}
+{{- fail "speech.config.selectedURL must be set when speech.enabled=true" }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.speech.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: speech
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: speech
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.speech.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: speech
+spec:
+  replicas: {{ .Values.speech.replicas | default 1 }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: speech
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: speech
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.speech.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-mysql
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+      containers:
+        - name: octo-speech
+          image: {{ include "octo.image" (dict "repo" .Values.speech.image.repository "tag" .Values.speech.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.speech.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8780
+          env:
+            - name: TZ
+              value: {{ .Values.timezone | default "UTC" | quote }}
+            - name: SPEECH_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_DB_PASSWORD
+            - name: SPEECH_DB_DSN
+              value: "speech:$(SPEECH_DB_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/octo_speech?charset=utf8mb4&parseTime=true"
+            - name: VOICE_ENGINE
+              value: {{ $engine | quote }}
+            {{- if eq $engine "qwen" }}
+            - name: VOICE_QWEN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: VOICE_QWEN_KEY
+            - name: VOICE_QWEN_MODELS
+              value: {{ $selectedModels | quote }}
+            - name: VOICE_QWEN_URL
+              value: {{ $selectedURL | quote }}
+            {{- else }}
+            - name: VOICE_LITELLM_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: VOICE_LITELLM_KEY
+            {{- if eq $engine "gpt" }}
+            - name: VOICE_GPT_MODELS
+              value: {{ $selectedModels | quote }}
+            {{- else }}
+            - name: VOICE_MODELS
+              value: {{ $selectedModels | quote }}
+            {{- end }}
+            - name: VOICE_LITELLM_URL
+              value: {{ $selectedURL | quote }}
+            - name: VOICE_LITELLM_TIMEOUT
+              value: {{ .Values.speech.config.liteLLMTimeout | quote }}
+            {{- end }}
+            - name: VOICE_TOTAL_TIMEOUT
+              value: {{ .Values.speech.config.totalTimeout | quote }}
+            - name: ASR_LOG_DIR
+              value: /data/dmwork/asr-log-dir
+            - name: ASR_LOG_BUFFER_SIZE
+              value: {{ .Values.speech.config.logBufferSize | quote }}
+            - name: ASR_LOG_RETENTION_DAYS
+              value: {{ .Values.speech.config.logRetentionDays | quote }}
+            {{- if .Values.speech.config.feedbackURL }}
+            - name: VOICE_FEEDBACK_URL
+              value: {{ .Values.speech.config.feedbackURL | quote }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: asr-logs
+              mountPath: /data/dmwork/asr-log-dir
+          {{- with .Values.speech.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: asr-logs
+          {{- if .Values.speech.storage.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "octo.speech.pvc" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.speechAdmin.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: speech-admin
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: speech-admin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.speechAdmin.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: speech-admin
+spec:
+  replicas: {{ .Values.speech.admin.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: speech-admin
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: speech-admin
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: wait-for-mysql
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+      containers:
+        - name: octo-speech-admin
+          image: {{ include "octo.image" (dict "repo" .Values.speech.admin.image.repository "tag" .Values.speech.admin.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.speech.admin.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8781
+          env:
+            - name: TZ
+              value: {{ .Values.timezone | default "UTC" | quote }}
+            - name: SPEECH_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_DB_PASSWORD
+            - name: SPEECH_DB_DSN
+              value: "speech:$(SPEECH_DB_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/octo_speech?charset=utf8mb4&parseTime=true"
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_ADMIN_USERNAME
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_ADMIN_PASSWORD
+            - name: ADMIN_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_ADMIN_JWT_SECRET
+            - name: ADMIN_SECURE_COOKIE
+              value: {{ .Values.speech.admin.secureCookie | quote }}
+            - name: ADMIN_TOKEN_EXPIRE
+              value: {{ .Values.speech.admin.tokenExpire | quote }}
+            - name: ADMIN_READ_TIMEOUT
+              value: {{ .Values.speech.admin.readTimeout | quote }}
+            - name: ADMIN_WRITE_TIMEOUT
+              value: {{ .Values.speech.admin.writeTimeout | quote }}
+            - name: ADMIN_IDLE_TIMEOUT
+              value: {{ .Values.speech.admin.idleTimeout | quote }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with .Values.speech.admin.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- if .Values.speech.storage.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "octo.speech.pvc" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: speech
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.speech.storage.storageClass }}
+  storageClassName: {{ .Values.speech.storage.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.speech.storage.size | quote }}
+{{- end }}
+{{- end }}
