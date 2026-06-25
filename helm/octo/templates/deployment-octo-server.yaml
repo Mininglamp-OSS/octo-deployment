@@ -179,7 +179,81 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MINIO_APP_PASSWORD
+            {{- else }}
+            {{- $fs := (.Values.server.config | default dict).fileService | default "minio" }}
+            {{- if eq $fs "tencentCOS" }}
+            - name: COS_REGION
+              value: {{ .Values.cos.region | quote }}
+            - name: COS_BUCKET
+              value: {{ .Values.cos.bucket | quote }}
+            - name: COS_SECRET_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: COS_SECRET_ID
+            - name: COS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: COS_SECRET_KEY
+            {{- else if eq $fs "aliOSS" }}
+            - name: OSS_ENDPOINT
+              value: {{ .Values.oss.endpoint | quote }}
+            - name: OSS_BUCKET
+              value: {{ .Values.oss.bucket | quote }}
+            - name: OSS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OSS_ACCESS_KEY_ID
+            - name: OSS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OSS_ACCESS_KEY_SECRET
+            {{- else if eq $fs "s3" }}
+            - name: S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_ACCESS_KEY_ID
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_SECRET_ACCESS_KEY
+            {{- if .Values.secrets.s3SessionToken }}
+            - name: S3_SESSION_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: S3_SESSION_TOKEN
             {{- end }}
+            {{- else if eq $fs "qiniu" }}
+            - name: QINIU_BUCKET
+              value: {{ .Values.qiniu.bucket | quote }}
+            - name: QINIU_DOMAIN
+              value: {{ .Values.qiniu.downloadURL | quote }}
+            - name: QINIU_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: QINIU_ACCESS_KEY
+            - name: QINIU_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: QINIU_SECRET_KEY
+            {{- end }}
+            {{- end }}
+            - name: FILE_SERVICE
+              value: {{ (.Values.server.config | default dict).fileService | default "minio" | quote }}
             - name: OCTO_WUKONGIM_MANAGER_TOKEN
               valueFrom:
                 secretKeyRef:
