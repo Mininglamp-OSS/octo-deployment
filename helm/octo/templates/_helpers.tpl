@@ -23,9 +23,16 @@ imagePullSecrets block. Renders nothing when the list is empty.
 Indent the output to match the surrounding pod spec (typically nindent 6).
 */}}
 {{- define "octo.imagePullSecrets" -}}
-{{- with .Values.global.imagePullSecrets -}}
+{{- $hasTCR := .Values.tcrImageCredentials.registry -}}
+{{- $hasGlobal := .Values.global.imagePullSecrets -}}
+{{- if or $hasGlobal $hasTCR -}}
 imagePullSecrets:
+  {{- if $hasTCR }}
+  - name: tcr-registry-key
+  {{- end }}
+  {{- with $hasGlobal }}
   {{- toYaml . | nindent 2 }}
+  {{- end }}
 {{- end -}}
 {{- end -}}
 
