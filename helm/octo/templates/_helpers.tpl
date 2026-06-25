@@ -352,3 +352,14 @@ Use with: {{- if include "octo.isCloudStorage" . }}
 {{- $fs := (.Values.server.config | default dict).fileService | default "minio" -}}
 {{- if ne $fs "minio" -}}true{{- end -}}
 {{- end -}}
+
+{{/*
+TCR (Tencent Cloud Registry) image pull secret generator.
+Generates a base64-encoded dockerconfigjson for authenticating with TCR.
+Used by secret-registry.yaml to create the tcr-registry-key Secret.
+*/}}
+{{- define "octo.tcrImagePullSecret" }}
+{{- with .Values.tcrImageCredentials }}
+{{- printf "{\"auths\":{\"%s\":{\"username\":\"%s\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .registry .username .password (printf "%s:%s" .username .password | b64enc) | b64enc }}
+{{- end }}
+{{- end }}
