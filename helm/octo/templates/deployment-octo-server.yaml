@@ -51,9 +51,11 @@ spec:
         - name: wait-for-redis
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until nc -z {{ include "octo.redis.host" . }} {{ include "octo.redis.port" . }}; do echo waiting for redis; sleep 2; done']
+        {{- if not (include "octo.isCloudStorage" .) }}
         - name: wait-for-minio
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.endpoint" . }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
+        {{- end }}
         {{- if .Values.minio.enabled }}
         - name: minio-bootstrap
           image: {{ include "octo.image" (dict "repo" .Values.minio.mcImage.repository "tag" .Values.minio.mcImage.tag "ctx" .) }}
@@ -171,11 +173,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MASTER_KEY
+            {{- if not (include "octo.isCloudStorage" .) }}
             - name: OCTO_MINIO_APP_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MINIO_APP_PASSWORD
+            {{- end }}
             - name: OCTO_WUKONGIM_MANAGER_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -222,6 +226,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_WUKONGIM_MANAGER_TOKEN
+            {{- if not (include "octo.isCloudStorage" .) }}
             - name: TS_MINIO_ACCESSKEYID
               value: {{ include "octo.minio.appUser" . | quote }}
             - name: TS_MINIO_SECRETACCESSKEY
@@ -229,6 +234,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MINIO_APP_PASSWORD
+            {{- end }}
             - name: TS_MINIO_DOWNLOADURL
               value: {{ include "octo.minio.serverURL" . | quote }}
             - name: TS_EXTERNAL_BASEURL

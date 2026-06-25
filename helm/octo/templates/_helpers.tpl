@@ -187,10 +187,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-wukongim-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{- define "octo.speechBootstrap" -}}
-{{- printf "%s-speech-bootstrap" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
 {{- define "octo.speech.pvc" -}}
 {{- printf "%s-logs" (include "octo.speech.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
@@ -364,8 +360,8 @@ WuKongIM external WebSocket address.
 {{/*
 Returns "true" when the bundled MinIO StatefulSet is active.
 True only when minio.enabled=true AND fileService=minio.
-Setting fileService to a cloud provider implicitly disables bundled MinIO
-without requiring the user to also set minio.enabled=false.
+When fileService is set to a cloud provider, users must also explicitly
+set minio.enabled=false in their values to avoid confusion.
 */}}
 {{- define "octo.minio.active" -}}
 {{- if and (not (include "octo.isCloudStorage" .)) .Values.minio.enabled -}}true{{- end -}}
@@ -387,6 +383,11 @@ Used by secret-registry.yaml to create the tcr-registry-key Secret.
 */}}
 {{- define "octo.tcrImagePullSecret" }}
 {{- with .Values.tcrImageCredentials }}
-{{- printf "{\"auths\":{\"%s\":{\"username\":\"%s\",\"password\":\"%s\",\"auth\":\"%s\"}}}" .registry .username .password (printf "%s:%s" .username .password | b64enc) | b64enc }}
+{{- $_ := required "tcrImageCredentials.username is required when tcrImageCredentials.registry is set" .username }}
+{{- $_ := required "tcrImageCredentials.password is required when tcrImageCredentials.registry is set" .password }}
+{{- $auth := printf "%s:%s" .username .password | b64enc }}
+{{- $cred := dict "username" .username "password" .password "auth" $auth }}
+{{- $auths := dict .registry $cred }}
+{{- dict "auths" $auths | toJson | b64enc }}
 {{- end }}
 {{- end }}

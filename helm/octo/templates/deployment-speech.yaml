@@ -1,4 +1,7 @@
 {{- if .Values.speech.enabled }}
+{{- if and .Values.speech.storage.enabled (gt (int (.Values.speech.replicas | default 1)) 1) }}
+{{- fail "speech.replicas must be 1 when speech.storage.enabled=true (ReadWriteOnce PVC limitation)" }}
+{{- end }}
 {{- $engine := .Values.speech.config.engine }}
 {{- $selectedModels := .Values.speech.config.selectedModels }}
 {{- $selectedURL := .Values.speech.config.selectedURL }}
