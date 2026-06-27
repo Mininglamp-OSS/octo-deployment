@@ -13,19 +13,21 @@
 #
 # Security model:
 #   - Passwords and db names are NOT interpolated into an SQL string
-#     unsafely. They are first validated against a strict allowlist so we
-#     can safely inline them (MySQL CREATE USER / GRANT do not accept
-#     prepared-statement parameters, so literal interpolation is the only
-#     option — validation makes that interpolation safe).
-#   - The allowlist is [A-Za-z0-9._-] for passwords and [A-Za-z0-9_] for
-#     db names. The same allowlist applies to MYSQL_ROOT_PASSWORD because
-#     docker-compose.yaml interpolates it directly into the Go MySQL DSN
-#     (`root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/...`); characters like
-#     `@`, `#`, `!`, `$`, `&`, `:`, `/` would silently break that DSN
-#     parser. Anything outside causes this script to abort before
-#     touching MySQL. Users who need different characters should stop
-#     this container, fix the .env value, and re-init (or hand-run SQL
-#     against the running MySQL after quoting it themselves).
+#     unsafely. They are validated against a reject-list that blocks
+#     characters which would break the SQL literal or the Go MySQL DSN
+#     that docker-compose.yaml builds from these values.
+#   - Forbidden in ALL passwords: single-quote ('), backslash (\) —
+#     would break the SQL IDENTIFIED BY '…' literal; and at-sign (@) —
+#     would break the Go MySQL DSN format (user:pass@tcp(…)).
+#   - Allowed: any other printable ASCII — including +, =, !, #, $, %,
+#     ^, &, *, (, ), ~, `, {, }, [, ], |, ;, ", <, >, ,, ., ?, :, /,
+#     space, and the always-safe [A-Za-z0-9._-]. This covers the output
+#     of standard password generators (Terraform random_password,
+#     1Password, openssl rand, etc.).
+#   - Database names remain restricted to [A-Za-z0-9_].
+#   - MySQL CREATE USER / GRANT do not accept prepared-statement
+#     parameters, so literal interpolation is the only option — the
+#     reject-list makes that interpolation safe.
 #
 # Idempotency:
 #   - This file is loaded by docker-entrypoint-initdb.d, which fires
@@ -49,14 +51,14 @@ validate_password() {
     echo "[init-extra-dbs] FATAL: $name is empty" >&2
     exit 1
   fi
-  case "$value" in
-    *[!A-Za-z0-9._-]*)
-      echo "[init-extra-dbs] FATAL: $name contains characters outside [A-Za-z0-9._-]" >&2
-      echo "[init-extra-dbs]        ${name} must match that regex so this script can safely" >&2
-      echo "[init-extra-dbs]        inline it into the CREATE USER / GRANT statements." >&2
-      exit 1
-      ;;
-  esac
+  # Reject characters that break the SQL literal (', \) or the Go MySQL
+  # DSN (@). Everything else is safe for both contexts.
+  if printf %s "$value" | grep -qE "['\\@]"; then
+    echo "[init-extra-dbs] FATAL: $name contains a forbidden character (single-quote, backslash, or @)." >&2
+    echo "[init-extra-dbs]        ' and \\ would break the SQL IDENTIFIED BY literal;" >&2
+    echo "[init-extra-dbs]        @ would break the Go MySQL DSN (user:pass@tcp(…))." >&2
+    exit 1
+  fi
   # Reject the canonical `.env.example` placeholders. Lower-case first
   # so any casing of the prefix trips the same branch — bash 4 in the
   # mysql:8.0 entrypoint image has nocasematch, but we keep the script
@@ -118,14 +120,10 @@ reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD" 
 reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
 reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
 # MYSQL_ROOT_PASSWORD is interpolated directly into TS_DB_MYSQLADDR /
-# DM_MYSQL_DSN in docker-compose.yaml (Go-MySQL DSN format). Special
-# characters such as `@`, `#`, `!`, `$`, `&`, `:`, `/` make the DSN
-# parser misread the user/host boundary and fail with confusing
-# errors that don't point at the password. The same allowlist used for
-# the other accounts keeps every value safe to inline both here and in
-# the application DSNs. Operators who insist on richer characters need
-# to either percent-encode the DSN by hand or move credentials to a
-# secrets store outside this stack.
+# DM_MYSQL_DSN in docker-compose.yaml (Go-MySQL DSN format). The
+# validate_password reject-list (forbidden: ' \ @) covers DSN-unsafe
+# characters as well as SQL-unsafe ones, so any password that passes
+# validation is safe for both the init SQL and the application DSNs.
 #
 # `validate_password` also refuses any `CHANGE_ME_*` / `CHG_ME*`
 # placeholder casing, so an unrotated `.env` cannot complete the
