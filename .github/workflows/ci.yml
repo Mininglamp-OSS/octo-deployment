@@ -8,6 +8,8 @@ on:
       - '**/*.yml'
       - 'kustomize/**'
       - 'helm/**'
+      - 'docker/scripts/**'
+      - 'tests/**'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main]
@@ -254,6 +256,20 @@ jobs:
           fi
           echo "::endgroup::"
 
+  validate-password:
+    name: validate-password regression suite
+    # Skip while PR is in Draft to avoid wasting minutes on work-in-progress.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run password validation regression tests
+        run: |
+          set -euo pipefail
+          bash tests/test-validate-password.sh
+
   ci-gate:
     name: CI Gate
     # Aggregate gate: always runs so the required status check ALWAYS reports.
@@ -264,7 +280,7 @@ jobs:
     # cancelled; 'skipped'/'success' count as passing. Branch protection should
     # require ONLY the "CI Gate" context for this repo.
     if: ${{ always() }}
-    needs: [yaml-lint, kustomize-validate, helm-validate]
+    needs: [yaml-lint, kustomize-validate, helm-validate, validate-password]
     runs-on: ubuntu-latest
     steps:
       - name: Verify upstream CI results
