@@ -258,8 +258,9 @@ jobs:
 
   validate-password:
     name: validate-password regression suite
-    # Skip while PR is in Draft to avoid wasting minutes on work-in-progress.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    # Always runs — even on draft PRs. This is a fast pure-bash test (no infra
+    # cost) and the CI Gate treats skipped upstream jobs as passing, so leaving
+    # the draft guard here would hide missing regression evidence as green.
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
