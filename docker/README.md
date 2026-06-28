@@ -497,7 +497,9 @@ short of octo-server's length check, `MINIO_ROOT_PASSWORD` is 7 chars
 `OCTO_NOTIFY_INTERNAL_TOKEN` and `OCTO_WUKONGIM_MANAGER_TOKEN`, and
 `init-extra-dbs.sh` aborts when `MYSQL_ROOT_PASSWORD` is still a
 `CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
-password contains characters outside `[A-Za-z0-9._-]`, or when
+password is empty, contains a forbidden character (single-quote,
+backslash, or `@` — the characters that break the SQL `IDENTIFIED
+BY` literal or the Go MySQL DSN), or when
 `OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` /
 `OCTO_SUMMARY_READER_PASSWORD` is left at the literal-string defaults
 (`matter` / `summary` / `summary_reader`). Together these checks mean
@@ -506,7 +508,7 @@ values still in place.
 
 | Variable | What it is | How to generate |
 | --- | --- | --- |
-| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN` and validated against `[A-Za-z0-9._-]` by `init-extra-dbs.sh` so the Go MySQL DSN parser does not silently misread the user/host boundary; the script also refuses any `CHANGE_ME_*` / `CHG_ME*` casing) | `openssl rand -hex 16` |
+| `MYSQL_ROOT_PASSWORD` | MySQL `root` password (also embedded in `TS_DB_MYSQLADDR` / `DM_MYSQL_DSN` and validated by `init-extra-dbs.sh` — forbidden: `'` `\` `@`, empty, and any `CHANGE_ME_*` / `CHG_ME*` casing — so the SQL `IDENTIFIED BY` literal and the Go MySQL DSN parser do not silently misread the user/host boundary) | `openssl rand -hex 16` |
 | `MINIO_ROOT_PASSWORD` | MinIO root credential — used by `mc admin`, the MinIO console, and the `minio-init` bootstrap. NOT used by octo-server. The 7-char placeholder shipped in `.env.example` trips MinIO's own ≥8-char length check; `minio-init` then independently aborts on any `CHANGE_ME_*` / `CHG_ME*` value (case-insensitive) as defense in depth. | `openssl rand -hex 16` |
 | `OCTO_MINIO_APP_PASSWORD` | Application-scoped IAM secret. octo-server signs presigned URLs with this credential pair (NOT the root pair). The `minio-init` service creates the user, attaches the bucket-scoped policy on first boot, AND aborts with a clear error when this value is empty or still a `CHANGE_ME_*` / `CHG_ME*` placeholder (case-insensitive). | `openssl rand -hex 24` |
 | `OCTO_MATTER_DB_PASSWORD` | MySQL service account `matter` (full DML on `octo_matter`). `init-extra-dbs.sh` refuses the literal default `matter` so the OOTB stack cannot bring MySQL up with a guess-once credential. | `openssl rand -hex 16` |
@@ -1739,7 +1741,8 @@ Before exposing the stack beyond a developer laptop:
   `OCTO_WUKONGIM_MANAGER_TOKEN`; and `init-extra-dbs.sh` aborts on
   first MySQL volume init when `MYSQL_ROOT_PASSWORD` is still a
   `CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
-  password contains characters outside `[A-Za-z0-9._-]`, or when the
+  password is empty, contains a forbidden character (single-quote,
+  backslash, or `@`), or when the
   three MySQL service-account passwords (`OCTO_MATTER_DB_PASSWORD`,
   `OCTO_SUMMARY_DB_PASSWORD`, `OCTO_SUMMARY_READER_PASSWORD`) are
   still at their literal-string defaults. There is no longer a path

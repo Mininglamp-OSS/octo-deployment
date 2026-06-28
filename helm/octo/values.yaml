@@ -55,7 +55,8 @@ timezone: "UTC"
 # Secrets — MUST be rotated before deploying
 # =============================================================================
 secrets:
-  # MySQL root password. Characters must be in [A-Za-z0-9._-].
+  # MySQL root password. Printable ASCII (0x20–0x7E) except single-quote ('),
+  # backslash (\), and at-sign (@). Cannot be empty.
   # Generate: openssl rand -hex 16
   mysqlRootPassword: ""
 
@@ -67,8 +68,10 @@ secrets:
   # Generate: openssl rand -hex 24
   minioAppPassword: ""
 
-  # MySQL service-account passwords. Characters must be in [A-Za-z0-9._-].
-  # Cannot be the literal strings "matter", "summary", "summary_reader".
+  # MySQL service-account passwords. Printable ASCII (0x20–0x7E) except
+  # single-quote ('), backslash (\), and at-sign (@). Cannot be empty,
+  # a CHANGE_ME/CHG_ME placeholder, or the literal strings "matter",
+  # "summary", "summary_reader".
   matterDbPassword: ""
   summaryDbPassword: ""
   summaryReaderPassword: ""

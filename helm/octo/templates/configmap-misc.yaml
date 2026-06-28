@@ -72,9 +72,11 @@ data:
       if [ -z "$value" ]; then
         echo "[init-extra-dbs] FATAL: $name is empty" >&2; exit 1
       fi
+      # Reject characters that break the SQL literal (', \) or the Go MySQL DSN (@).
+      # POSIX case pattern — portable across all grep implementations.
       case "$value" in
-        *[!A-Za-z0-9._-]*)
-          echo "[init-extra-dbs] FATAL: $name contains characters outside [A-Za-z0-9._-]" >&2; exit 1 ;;
+        *[\'\\\\@]*)
+          echo "[init-extra-dbs] FATAL: $name contains a forbidden character (', \\, or @)." >&2; exit 1 ;;
       esac
       local lc; lc=$(printf %s "$value" | tr 'A-Z' 'a-z')
       case "$lc" in
