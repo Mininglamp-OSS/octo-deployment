@@ -73,9 +73,11 @@ data:
         echo "[init-extra-dbs] FATAL: $name is empty" >&2; exit 1
       fi
       # Reject characters that break the SQL literal (', \) or the Go MySQL DSN (@).
-      if printf %s "$value" | grep -qE "['\\@]"; then
-        echo "[init-extra-dbs] FATAL: $name contains a forbidden character (', \\, or @)." >&2; exit 1
-      fi
+      # POSIX case pattern — portable across all grep implementations.
+      case "$value" in
+        *[\'\\\\@]*)
+          echo "[init-extra-dbs] FATAL: $name contains a forbidden character (', \\, or @)." >&2; exit 1 ;;
+      esac
       local lc; lc=$(printf %s "$value" | tr 'A-Z' 'a-z')
       case "$lc" in
         change_me_*|chg_me*)
