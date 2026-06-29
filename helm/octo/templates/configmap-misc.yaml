@@ -65,6 +65,9 @@ data:
     : "${OCTO_MATTER_DB_PASSWORD:=matter}"
     : "${OCTO_SUMMARY_DB_PASSWORD:=summary}"
     : "${OCTO_SUMMARY_READER_PASSWORD:=summary_reader}"
+    {{- if .Values.speech.enabled }}
+    : "${OCTO_SPEECH_DB_PASSWORD:=speech}"
+    {{- end }}
     : "${MYSQL_DATABASE:=octo}"
 
     validate_password() {
@@ -104,15 +107,24 @@ data:
     validate_password  OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"
     validate_password  OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"
     validate_password  OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD"
+    {{- if .Values.speech.enabled }}
+    validate_password  OCTO_SPEECH_DB_PASSWORD       "$OCTO_SPEECH_DB_PASSWORD"
+    {{- end }}
     reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"      "matter"
     reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
     reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
+    {{- if .Values.speech.enabled }}
+    reject_literal_default OCTO_SPEECH_DB_PASSWORD       "$OCTO_SPEECH_DB_PASSWORD"      "speech"
+    {{- end }}
     validate_password  MYSQL_ROOT_PASSWORD            "$MYSQL_ROOT_PASSWORD"
     validate_identifier MYSQL_DATABASE               "$MYSQL_DATABASE"
 
     MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
     CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
     CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+    {{- if .Values.speech.enabled }}
+    CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    {{- end }}
 
     CREATE USER IF NOT EXISTS 'matter'@'%'  IDENTIFIED BY '${OCTO_MATTER_DB_PASSWORD}';
     ALTER USER IF EXISTS      'matter'@'%'  IDENTIFIED BY '${OCTO_MATTER_DB_PASSWORD}';
@@ -121,11 +133,23 @@ data:
 
     CREATE USER IF NOT EXISTS 'summary_reader'@'%' IDENTIFIED BY '${OCTO_SUMMARY_READER_PASSWORD}';
     ALTER USER IF EXISTS      'summary_reader'@'%' IDENTIFIED BY '${OCTO_SUMMARY_READER_PASSWORD}';
+    {{- if .Values.speech.enabled }}
+
+    CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${OCTO_SPEECH_DB_PASSWORD}';
+    ALTER USER IF EXISTS      'speech'@'%' IDENTIFIED BY '${OCTO_SPEECH_DB_PASSWORD}';
+    {{- end }}
 
     GRANT ALL PRIVILEGES ON octo_matter.*       TO 'matter'@'%';
     GRANT ALL PRIVILEGES ON octo_summary.*      TO 'summary'@'%';
     GRANT SELECT         ON \`${MYSQL_DATABASE}\`.* TO 'summary_reader'@'%';
+    {{- if .Values.speech.enabled }}
+    GRANT ALL PRIVILEGES ON octo_speech.*       TO 'speech'@'%';
+    {{- end }}
     FLUSH PRIVILEGES;
     SQL
 
+    {{- if .Values.speech.enabled }}
+    echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + service users"
+    {{- else }}
     echo "[init-extra-dbs] created octo_matter + octo_summary + service users"
+    {{- end }}
