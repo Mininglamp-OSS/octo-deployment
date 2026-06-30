@@ -1103,7 +1103,7 @@ services:
   # an explicit, owner-gated operator action (`COMPOSE_PROFILES=search`).
   # ---------------------------------------------------------------------------
   search-kafka:
-    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:3.8.0}
+    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:4.3.1}
     restart: unless-stopped
     profiles: ["search"]
     environment:
@@ -1154,7 +1154,7 @@ services:
   # AllowAutoTopicCreation=false, so the DLQ topic MUST pre-exist). Idempotent
   # via --if-not-exists; exits 0 once both topics are present.
   search-kafka-init:
-    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:3.8.0}
+    image: ${OCTO_SEARCH_KAFKA_IMAGE:-apache/kafka:4.3.1}
     restart: "no"
     profiles: ["search"]
     depends_on:
