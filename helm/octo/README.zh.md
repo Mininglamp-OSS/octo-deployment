@@ -80,6 +80,7 @@ helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
   --set secrets.summaryDbPassword="$(openssl rand -hex 16)" \
   --set secrets.summaryReaderPassword="$(openssl rand -hex 16)" \
   --set secrets.octoMasterKey="$(openssl rand -hex 16)" \
+  --set secrets.userApiKeySecret="$(openssl rand -hex 16)" \
   --set secrets.notifyInternalToken="$(openssl rand -hex 32)" \
   --set secrets.wukongimManagerToken="$(openssl rand -hex 32)" \
   --set secrets.adminPwd="$(openssl rand -hex 16)"
@@ -167,6 +168,7 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | `secrets.summaryDbPassword` | summary 服务的 MySQL 密码 | `""` |
 | `secrets.summaryReaderPassword` | summary 服务的 MySQL 只读密码 | `""` |
 | `secrets.octoMasterKey` | OCTO 主密钥（恰好 32 位十六进制） | `""` |
+| `secrets.userApiKeySecret` | usersecret / botfather 用户 API Key 加密密钥（恰好 32 位十六进制） | `""` |
 | `secrets.notifyInternalToken` | 服务间 HMAC 令牌 | `""` |
 | `secrets.wukongimManagerToken` | WuKongIM 管理员令牌 | `""` |
 | `secrets.adminPwd` | 初始超级管理员密码 | `superAdmin` |

@@ -51,6 +51,25 @@ spec:
         - name: wait-for-redis
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until nc -z {{ include "octo.redis.host" . }} {{ include "octo.redis.port" . }}; do echo waiting for redis; sleep 2; done']
+        - name: wait-for-wukongim
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          env:
+            - name: WUKONGIM_API_URL
+              value: {{ include "octo.wukongim.apiURL" . | quote }}
+            - name: WK_MANAGERTOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_WUKONGIM_MANAGER_TOKEN
+          command:
+            - sh
+            - -c
+            - |
+              until wget -q -O- --header="token: $WK_MANAGERTOKEN" "$WUKONGIM_API_URL/health" >/dev/null 2>&1 || \
+                    wget -q -O- --header="token: $WK_MANAGERTOKEN" "$WUKONGIM_API_URL/varz" >/dev/null 2>&1; do
+                echo waiting for wukongim
+                sleep 2
+              done
         - name: wait-for-minio
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until wget -q -O- http://{{ include "octo.minio.endpoint" . }}/minio/health/live >/dev/null 2>&1; do echo waiting for minio; sleep 2; done']
@@ -171,6 +190,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MASTER_KEY
+            - name: OCTO_USER_API_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: OCTO_USER_API_KEY_SECRET
             - name: OCTO_MINIO_APP_PASSWORD
               valueFrom:
                 secretKeyRef:

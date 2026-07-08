@@ -77,6 +77,10 @@ secrets:
   # Generate: openssl rand -hex 16
   octoMasterKey: ""
 
+  # User API key encryption key shared by usersecret and botfather — exactly 32 bytes.
+  # Generate: openssl rand -hex 16
+  userApiKeySecret: ""
+
   # Inter-service HMAC token (octo-server ↔ matter / summary-api).
   # Generate: openssl rand -hex 32
   notifyInternalToken: ""

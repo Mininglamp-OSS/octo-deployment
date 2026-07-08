@@ -80,6 +80,7 @@ helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
   --set secrets.summaryDbPassword="$(openssl rand -hex 16)" \
   --set secrets.summaryReaderPassword="$(openssl rand -hex 16)" \
   --set secrets.octoMasterKey="$(openssl rand -hex 16)" \
+  --set secrets.userApiKeySecret="$(openssl rand -hex 16)" \
   --set secrets.notifyInternalToken="$(openssl rand -hex 32)" \
   --set secrets.wukongimManagerToken="$(openssl rand -hex 32)" \
   --set secrets.adminPwd="$(openssl rand -hex 16)"
@@ -167,6 +168,7 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `secrets.summaryDbPassword` | MySQL password for summary service | `""` |
 | `secrets.summaryReaderPassword` | MySQL read-only password for summary | `""` |
 | `secrets.octoMasterKey` | OCTO master key (exactly 32 hex chars) | `""` |
+| `secrets.userApiKeySecret` | User API key encryption key for usersecret / botfather (exactly 32 hex chars) | `""` |
 | `secrets.notifyInternalToken` | Inter-service HMAC token | `""` |
 | `secrets.wukongimManagerToken` | WuKongIM admin token | `""` |
 | `secrets.adminPwd` | Initial superAdmin password | `superAdmin` |

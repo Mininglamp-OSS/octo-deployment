@@ -259,7 +259,7 @@ Each service consumes a small Secret. Required keys per service:
 
 | Secret | Required keys |
 |---|---|
-| `octo-server-secret` | `DM_MYSQL_DSN`, `DM_REDIS_ADDR`, `WUKONGIM_MANAGER_TOKEN`, `OCTO_ADMIN_PASSWORD`, `OCTO_MASTER_KEY`, `DMWORK_MASTER_KEY` (legacy alias of master key), `NOTIFY_INTERNAL_TOKEN`, `OCTO_INTERNAL_HMAC_SECRET`, `OCTO_JWT_SECRET`. Plus OIDC / COS / SMTP / APNS keys when those features are enabled. |
+| `octo-server-secret` | `DM_MYSQL_DSN`, `DM_REDIS_ADDR`, `WUKONGIM_MANAGER_TOKEN`, `OCTO_ADMIN_PASSWORD`, `OCTO_MASTER_KEY`, `DMWORK_MASTER_KEY` (legacy alias of master key), `OCTO_USER_API_KEY_SECRET`, `NOTIFY_INTERNAL_TOKEN`, `OCTO_INTERNAL_HMAC_SECRET`, `OCTO_JWT_SECRET`. Plus OIDC / COS / SMTP / APNS keys when those features are enabled. |
 | `octo-matter-secret` | `MYSQL_DSN`, `LLM_API_KEY`, `NOTIFY_INTERNAL_TOKEN` (**must match `octo-server-secret`**). |
 | `octo-smart-summary-secret` | `MYSQL_DSN`, `IM_MYSQL_DSN`, `LLM_API_URL`, `LLM_API_KEY`. |
 

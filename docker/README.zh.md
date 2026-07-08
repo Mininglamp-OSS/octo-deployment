@@ -163,7 +163,7 @@ sudo ./setup.sh --up
 sudo ./setup.sh --smoke-test
 ```
 
-> **为什么要 sudo？** `docker/.env` 由步骤 1（`./setup.sh`）生成。步骤 1 不带 sudo 跑时，文件 owner 是当前用户（mode 600）；带 sudo 跑时，owner 是 root。无论哪种，步骤 2（`sudo ./setup.sh --up`）需要 sudo 是因为要连 Docker daemon socket，而步骤 2 跑完后文件 owner 都会变成 root。`--up`（start-only 子命令，永远不会重新生成密钥）和 `--smoke-test` 都需要 sudo，因为这个文件装着全栈的高价值密钥——`MYSQL_ROOT_PASSWORD`、`MINIO_ROOT_PASSWORD`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD`、`OCTO_NOTIFY_INTERNAL_TOKEN`、`OCTO_WUKONGIM_MANAGER_TOKEN`——再加上 `COMPOSE_PROJECT_NAME` 这种会被下一次特权 `docker compose` 直接 consume 的 Compose 控制项。早先几轮 R1-R4 试过 chmod / chown / groupadd 让普通用户能跑 `--smoke-test`，但都会**扩大写权限**到一个 Compose 视为权威部署配置的文件上——R5 改成最简方案：".env 保持 root:600，`--up` 和 `--smoke-test` 都要 sudo，因为文件里全是 MySQL / MinIO / admin 凭据和 Compose 控制项"。忘 sudo 时 `env_get()` 会给一行清晰的 remediation（`Re-run as: sudo ./setup.sh --smoke-test`），而不是过去那 9 条让人摸不到头脑的 FAIL。
+> **为什么要 sudo？** `docker/.env` 由步骤 1（`./setup.sh`）生成。步骤 1 不带 sudo 跑时，文件 owner 是当前用户（mode 600）；带 sudo 跑时，owner 是 root。无论哪种，步骤 2（`sudo ./setup.sh --up`）需要 sudo 是因为要连 Docker daemon socket，而步骤 2 跑完后文件 owner 都会变成 root。`--up`（start-only 子命令，永远不会重新生成密钥）和 `--smoke-test` 都需要 sudo，因为这个文件装着全栈的高价值密钥——`MYSQL_ROOT_PASSWORD`、`MINIO_ROOT_PASSWORD`、`OCTO_MASTER_KEY`、`OCTO_ADMIN_PWD`、`OCTO_USER_API_KEY_SECRET`、`OCTO_NOTIFY_INTERNAL_TOKEN`、`OCTO_WUKONGIM_MANAGER_TOKEN`——再加上 `COMPOSE_PROJECT_NAME` 这种会被下一次特权 `docker compose` 直接 consume 的 Compose 控制项。早先几轮 R1-R4 试过 chmod / chown / groupadd 让普通用户能跑 `--smoke-test`，但都会**扩大写权限**到一个 Compose 视为权威部署配置的文件上——R5 改成最简方案：".env 保持 root:600，`--up` 和 `--smoke-test` 都要 sudo，因为文件里全是 MySQL / MinIO / admin 凭据和 Compose 控制项"。忘 sudo 时 `env_get()` 会给一行清晰的 remediation（`Re-run as: sudo ./setup.sh --smoke-test`），而不是过去那 9 条让人摸不到头脑的 FAIL。
 
 > **命名说明** —— 原拼写是 `--verify`，作为 deprecated alias 保留（跑起来会先打印一行黄色 deprecation note，行为与 `--smoke-test` 完全一致），至少保留 2 个 release，预计 v2.0+ 删除。新写的自动化优先用 `--smoke-test`。
 >
@@ -279,7 +279,8 @@ cp docker/.env.example docker/.env
 #   MYSQL_ROOT_PASSWORD、MINIO_ROOT_PASSWORD、OCTO_MINIO_APP_PASSWORD、
 #   OCTO_MATTER_DB_PASSWORD、OCTO_SUMMARY_DB_PASSWORD、
 #   OCTO_SUMMARY_READER_PASSWORD、
-#   OCTO_MASTER_KEY、OCTO_NOTIFY_INTERNAL_TOKEN、OCTO_WUKONGIM_MANAGER_TOKEN
+#   OCTO_MASTER_KEY、OCTO_USER_API_KEY_SECRET、
+#   OCTO_NOTIFY_INTERNAL_TOKEN、OCTO_WUKONGIM_MANAGER_TOKEN
 # 设 OCTO_DOMAIN / OCTO_EXTERNAL_IP；如果要 auto-bootstrap superAdmin 也设 OCTO_ADMIN_PWD
 # （详见 "First-admin bootstrap"）。
 
@@ -295,7 +296,7 @@ docker compose ps                # 所有服务应到 (healthy)
 
 ## 必填环境变量
 
-栈起来之前**必须**改下面这些。默认值是设计成 fail-fast 的 placeholder：`OCTO_MASTER_KEY` 比 octo-server 的长度校验少一字节，`MINIO_ROOT_PASSWORD` 7 字符（MinIO 要求 ≥8）让 `minio` 容器拒绝启动，`minio-init` 一次性服务会拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO root / app 凭据，`preflight` 一次性服务对 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 做同样校验，`init-extra-dbs.sh` 在 `MYSQL_ROOT_PASSWORD` 还是 `CHANGE_ME_*` / `CHG_ME*` placeholder、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、`OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` / `OCTO_SUMMARY_READER_PASSWORD` 仍然是字面默认（`matter` / `summary` / `summary_reader`）时全部拒绝。这些 check 加起来意味着——OOTB 栈不可能在 placeholder 凭据没换的情况下到达 `(healthy)`。
+栈起来之前**必须**改下面这些。默认值是设计成 fail-fast 的 placeholder：`OCTO_MASTER_KEY` 比 octo-server 的长度校验少一字节，`MINIO_ROOT_PASSWORD` 7 字符（MinIO 要求 ≥8）让 `minio` 容器拒绝启动，`minio-init` 一次性服务会拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO root / app 凭据，`preflight` 一次性服务对 `OCTO_USER_API_KEY_SECRET`、`OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 做同样校验，`init-extra-dbs.sh` 在 `MYSQL_ROOT_PASSWORD` 还是 `CHANGE_ME_*` / `CHG_ME*` placeholder、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、`OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` / `OCTO_SUMMARY_READER_PASSWORD` 仍然是字面默认（`matter` / `summary` / `summary_reader`）时全部拒绝。这些 check 加起来意味着——OOTB 栈不可能在 placeholder 凭据没换的情况下到达 `(healthy)`。
 
 | 变量 | 含义 | 生成方式 |
 | --- | --- | --- |
@@ -306,6 +307,7 @@ docker compose ps                # 所有服务应到 (healthy)
 | `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary`（在 `octo_summary` 上有完整 DML）。`init-extra-dbs.sh` 拒绝字面 `summary`。 | `openssl rand -hex 16` |
 | `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader`（对 OCTO IM 库有 `SELECT`，见 `init-extra-dbs.sh` 里的 `GRANT` 块）。`init-extra-dbs.sh` 拒绝字面 `summary_reader`。 | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32 字节 server master key | `openssl rand -hex 16` |
+| `OCTO_USER_API_KEY_SECRET` | usersecret / botfather 共享的 32 字节用户 API Key 加密密钥。`preflight` 一次性服务拒绝任何 `CHANGE_ME_*` / `CHG_ME*` 大小写形式。 | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | octo-server ↔ matter / smart-summary 之间共享的 HMAC secret。`preflight` 一次性服务拒绝任何 `CHANGE_ME_*` / `CHG_ME*` 大小写形式。 | `openssl rand -hex 32` |
 | `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token。WuKongIM 侧通过 `WK_MANAGERTOKEN`（Viper 自动绑到 YAML `managerToken`），octo-server 侧通过 `TS_WUKONGIM_MANAGERTOKEN`。空值会让 WuKongIM manager API 在无鉴权前提下可达**且可用**——`preflight` 同样拒绝 `CHANGE_ME_*` / `CHG_ME*`。 | `openssl rand -hex 32` |
 | `LLM_API_KEY` | matter + smart-summary 用的 LLM provider key。这些功能必填。compose 文件为 `summary-worker` fallback 到一个假占位让 OOTB 栈能 `(healthy)`——但真正的 summarization 调用在你没设真 key 之前都会失败。 | 从 LLM 供应商处取得 |
@@ -923,7 +925,7 @@ SQL
 
 把栈对外暴露之前：
 
-- 把 `.env` 里所有 `CHANGE_ME_*` / `CHG_ME*` 都轮换。`OCTO_MASTER_KEY` 故意短一字节让 octo-server 长度校验拒绝；`MINIO_ROOT_PASSWORD` 7 字符触发 MinIO ≥8 校验；`minio-init` 独立拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO 凭据对；`preflight` 拒绝 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 的 `CHANGE_ME_*` / `CHG_ME*` 大小写形式；`init-extra-dbs.sh` 在第一次 MySQL volume init 时拒绝 `MYSQL_ROOT_PASSWORD` 是 `CHANGE_ME_*` / `CHG_ME*`、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、或者三个 MySQL service-account 密码（`OCTO_MATTER_DB_PASSWORD`、`OCTO_SUMMARY_DB_PASSWORD`、`OCTO_SUMMARY_READER_PASSWORD`）仍是字面默认。OOTB 栈不再可能在 placeholder 凭据没换的情况下起来。
+- 把 `.env` 里所有 `CHANGE_ME_*` / `CHG_ME*` 都轮换。`OCTO_MASTER_KEY` 故意短一字节让 octo-server 长度校验拒绝；`MINIO_ROOT_PASSWORD` 7 字符触发 MinIO ≥8 校验；`minio-init` 独立拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO 凭据对；`preflight` 拒绝 `OCTO_USER_API_KEY_SECRET`、`OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 的 `CHANGE_ME_*` / `CHG_ME*` 大小写形式；`init-extra-dbs.sh` 在第一次 MySQL volume init 时拒绝 `MYSQL_ROOT_PASSWORD` 是 `CHANGE_ME_*` / `CHG_ME*`、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、或者三个 MySQL service-account 密码（`OCTO_MATTER_DB_PASSWORD`、`OCTO_SUMMARY_DB_PASSWORD`、`OCTO_SUMMARY_READER_PASSWORD`）仍是字面默认。OOTB 栈不再可能在 placeholder 凭据没换的情况下起来。
 - `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` / `OCTO_MINIO_API_BIND` / `OCTO_MINIO_CONSOLE_BIND` 保持 `127.0.0.1`。轮换凭据并加防火墙之后才覆盖。
 - Redis 在本栈**无密码运行**——`redis` 服务 `command:` 里没有 `--requirepass`。把 `OCTO_REDIS_BIND` 改成 `0.0.0.0` 就会暴露无鉴权 Redis。改 bind 之前要么把 Redis 留在私网接口，要么给 `redis` 服务 `command:` 加 `--requirepass <secret>` 并把同一 secret 写到 `octo-server` 服务的 `TS_DB_REDISPASS` / `DM_REDIS_PASS` 让应用还能到 cache。（加 CLI-flag 驱动的 Redis 密码作为 follow-up；见 PR description。）
 - MinIO console 是 loopback-only 且默认**不**通过 nginx 代理。通过 SSH 转发 `:29001`（见 "Network surface"）访问。如果你取消注释了 `nginx/conf.d/octo.conf.template` 里的 `/minio-console/` 块，先轮换 `MINIO_ROOT_PASSWORD`——否则公网 `OCTO_HTTP_PORT` 就是通往 `mc admin` 的路径。

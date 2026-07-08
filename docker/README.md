@@ -291,7 +291,8 @@ sudo ./setup.sh --smoke-test
 > `--smoke-test` require sudo because the file contains every
 > high-value secret on the stack — `MYSQL_ROOT_PASSWORD`,
 > `MINIO_ROOT_PASSWORD`, `OCTO_MASTER_KEY`, `OCTO_ADMIN_PWD`,
-> `OCTO_NOTIFY_INTERNAL_TOKEN`, `OCTO_WUKONGIM_MANAGER_TOKEN` — plus
+> `OCTO_USER_API_KEY_SECRET`, `OCTO_NOTIFY_INTERNAL_TOKEN`,
+> `OCTO_WUKONGIM_MANAGER_TOKEN` — plus
 > Compose control inputs like `COMPOSE_PROJECT_NAME` that the next
 > privileged `docker compose` run will consume verbatim. Earlier
 > revisions chmod'd / chown'd the file to widen access for a
@@ -471,7 +472,8 @@ cp docker/.env.example docker/.env
 #   MYSQL_ROOT_PASSWORD, MINIO_ROOT_PASSWORD, OCTO_MINIO_APP_PASSWORD,
 #   OCTO_MATTER_DB_PASSWORD, OCTO_SUMMARY_DB_PASSWORD,
 #   OCTO_SUMMARY_READER_PASSWORD,
-#   OCTO_MASTER_KEY, OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
+#   OCTO_MASTER_KEY, OCTO_USER_API_KEY_SECRET,
+#   OCTO_NOTIFY_INTERNAL_TOKEN, OCTO_WUKONGIM_MANAGER_TOKEN
 # Set OCTO_DOMAIN / OCTO_EXTERNAL_IP, and OCTO_ADMIN_PWD if you want
 # auto-bootstrap of the first superAdmin (see "First-admin bootstrap").
 
@@ -494,7 +496,8 @@ short of octo-server's length check, `MINIO_ROOT_PASSWORD` is 7 chars
 `minio-init` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value
 (case-insensitive) for the MinIO root or app credentials, the
 `preflight` one-shot aborts on any `CHANGE_ME_*` / `CHG_ME*` value for
-`OCTO_NOTIFY_INTERNAL_TOKEN` and `OCTO_WUKONGIM_MANAGER_TOKEN`, and
+`OCTO_USER_API_KEY_SECRET`, `OCTO_NOTIFY_INTERNAL_TOKEN`, and
+`OCTO_WUKONGIM_MANAGER_TOKEN`, and
 `init-extra-dbs.sh` aborts when `MYSQL_ROOT_PASSWORD` is still a
 `CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
 password contains characters outside `[A-Za-z0-9._-]`, or when
@@ -513,6 +516,7 @@ values still in place.
 | `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary` (full DML on `octo_summary`). `init-extra-dbs.sh` refuses the literal default `summary`. | `openssl rand -hex 16` |
 | `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader` (`SELECT` on the OCTO IM schema — see the `GRANT` block in `init-extra-dbs.sh`). `init-extra-dbs.sh` refuses the literal default `summary_reader`. | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32-byte server master key | `openssl rand -hex 16` |
+| `OCTO_USER_API_KEY_SECRET` | 32-byte user API key encryption key shared by usersecret and botfather. The `preflight` one-shot service refuses any `CHANGE_ME_*` / `CHG_ME*` casing. | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | HMAC secret octo-server ↔ matter / smart-summary share. The `preflight` one-shot service refuses any `CHANGE_ME_*` / `CHG_ME*` casing. | `openssl rand -hex 32` |
 | `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token. Bound on WuKongIM via `WK_MANAGERTOKEN` (Viper auto-binds to YAML `managerToken`) and on octo-server via `TS_WUKONGIM_MANAGERTOKEN`. Leaving it empty makes WuKongIM's manager API reachable AND USABLE without auth — `preflight` refuses any `CHANGE_ME_*` / `CHG_ME*` casing as well. | `openssl rand -hex 32` |
 | `LLM_API_KEY` | LLM provider key consumed by matter + smart-summary. Required for those features. The compose file falls back to a fake placeholder for `summary-worker` so the OOTB stack still reaches `(healthy)` — actual summarization calls fail until this is set. | from your provider |
@@ -1735,8 +1739,9 @@ Before exposing the stack beyond a developer laptop:
   char minimum at boot; the `minio-init` one-shot independently aborts
   on any `CHANGE_ME_*` / `CHG_ME*` value (case-insensitive) for either
   MinIO credential pair; the `preflight` one-shot aborts on any
-  `CHANGE_ME_*` / `CHG_ME*` casing for `OCTO_NOTIFY_INTERNAL_TOKEN` and
-  `OCTO_WUKONGIM_MANAGER_TOKEN`; and `init-extra-dbs.sh` aborts on
+  `CHANGE_ME_*` / `CHG_ME*` casing for `OCTO_USER_API_KEY_SECRET`,
+  `OCTO_NOTIFY_INTERNAL_TOKEN`, and `OCTO_WUKONGIM_MANAGER_TOKEN`; and
+  `init-extra-dbs.sh` aborts on
   first MySQL volume init when `MYSQL_ROOT_PASSWORD` is still a
   `CHANGE_ME_*` / `CHG_ME*` placeholder, when any service-account
   password contains characters outside `[A-Za-z0-9._-]`, or when the

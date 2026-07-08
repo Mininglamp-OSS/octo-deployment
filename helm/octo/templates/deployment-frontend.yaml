@@ -49,6 +49,8 @@ spec:
           env:
             - name: API_URL
               value: "http://{{ include "octo.server.fullname" . }}:8090"
+            - name: MATTER_API_URL
+              value: "http://{{ include "octo.matter.fullname" . }}:8080"
             {{- if .Values.summary.enabled }}
             - name: SUMMARY_API_URL
               value: "http://{{ include "octo.summaryApi.fullname" . }}:8080"
