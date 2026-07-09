@@ -18,7 +18,7 @@ spec:
   tls:
     - hosts:
         - {{ $host | quote }}
-      secretName: {{ .Values.ingress.tls.secretName | quote }}
+      secretName: {{ include "octo.ingress.tlsSecretName" . | quote }}
   {{- end }}
   rules:
     - host: {{ $host | quote }}

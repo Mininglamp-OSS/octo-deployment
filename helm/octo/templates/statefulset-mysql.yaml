@@ -75,6 +75,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_SUMMARY_READER_PASSWORD
+            {{- if .Values.speech.enabled }}
+            - name: OCTO_SPEECH_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_DB_PASSWORD
+            {{- end }}
           readinessProbe:
             exec:
               command:

@@ -14,10 +14,10 @@ fullnameOverride: ""
 # Global image settings
 # =============================================================================
 global:
-  # Private registry prefix applied to ALL images (app + infrastructure).
+  # Private registry prefix applied to repositories without an explicit registry host.
   # Example: hub.intra.mlamp.cn/octo
-  # When set, every image becomes: <imageRegistry>/<repository>:<tag>
-  # Leave empty to pull from the original registry (Docker Hub, etc.).
+  # Unqualified images become: <imageRegistry>/<repository>:<tag>.
+  # Fully-qualified repositories such as registry.example.com/team/image bypass it.
   imageRegistry: ""
 
   # List of existing Kubernetes Secrets with registry credentials.
@@ -27,6 +27,18 @@ global:
   #   --docker-password=<password> -n <namespace>
   imagePullSecrets: []
   # - name: regcred
+
+# CloudApp TCR credentials (injected by deployment.tf during CloudApp deployment).
+# Used by secret-registry.yaml to create a kubernetes.io/dockerconfigjson Secret
+# that Pods reference via imagePullSecrets.
+tcrImageCredentials:
+  registry: ""
+  username: ""
+  password: ""
+
+# CloudApp runtime CAM role. Reserved for Tencent Cloud API calls implemented
+# by the application; COS currently uses secrets.cosSecretId/cosSecretKey.
+CAM_ROLE: ""
 
 # Busybox image used by all init containers (wait-for-* probes).
 busybox:
@@ -55,7 +67,7 @@ timezone: "UTC"
 # Secrets — MUST be rotated before deploying
 # =============================================================================
 secrets:
-  # MySQL root password. Characters must be in [A-Za-z0-9._-].
+  # MySQL root password. Characters must be in [A-Za-z0-9._+=-].
   # Generate: openssl rand -hex 16
   mysqlRootPassword: ""
 
@@ -67,7 +79,7 @@ secrets:
   # Generate: openssl rand -hex 24
   minioAppPassword: ""
 
-  # MySQL service-account passwords. Characters must be in [A-Za-z0-9._-].
+  # MySQL service-account passwords. Characters must be in [A-Za-z0-9._+=-].
   # Cannot be the literal strings "matter", "summary", "summary_reader".
   matterDbPassword: ""
   summaryDbPassword: ""
@@ -97,8 +109,39 @@ secrets:
   # LLM API key for octo-matter + smart-summary (optional for smoke tests).
   llmApiKey: ""
 
+  # Speech credentials. Required only when speech.enabled=true.
+  speechDbPassword: ""
+  speechApiKey: ""
+  speechModelKey: ""
+  # Legacy engine-specific keys remain supported for direct Helm upgrades.
+  speechQwenKey: ""
+  speechLiteLLMKey: ""
+  speechAdminUsername: ""
+  speechAdminPassword: ""
+  speechAdminJwtSecret: ""
+
   # Inbound webhook HMAC secret (optional).
   webhookSecretKey: ""
+
+  # ── Cloud storage credentials ───────────────────────────────────────────────
+  # Only the block matching server.config.fileService is required.
+
+  # fileService: tencentCOS. Inject through Kubernetes Secret and env vars.
+  cosSecretId: ""
+  cosSecretKey: ""
+
+  # fileService: aliOSS
+  ossAccessKeyId: ""
+  ossAccessKeySecret: ""
+
+  # fileService: s3
+  s3AccessKeyId: ""
+  s3SecretAccessKey: ""
+  s3SessionToken: ""   # Optional — STS temporary credential
+
+  # fileService: qiniu
+  qiniuAccessKey: ""
+  qiniuSecretKey: ""
 
 # =============================================================================
 # LLM configuration (shared by matter + smart-summary)
@@ -106,6 +149,37 @@ secrets:
 llm:
   apiURL: "https://api.example.com/v1"
   model: "claude-sonnet-4-6"
+
+# =============================================================================
+# Cloud object storage — used when server.config.fileService != "minio"
+# Set minio.enabled=false when using any of these providers.
+
+# fileService: tencentCOS
+cos:
+  region: ""          # Required. e.g. ap-guangzhou
+  bucket: ""          # Required. e.g. my-bucket-1234567890
+  downloadURL: ""     # Public download domain. e.g. https://my-bucket-1234567890.cos.ap-guangzhou.myqcloud.com
+  prefix: ""          # Optional path prefix for multi-env isolation
+
+# fileService: aliOSS (Aliyun OSS)
+oss:
+  endpoint: ""        # Required. e.g. oss-cn-hangzhou.aliyuncs.com
+  bucket: ""          # Required.
+  downloadURL: ""     # Public download domain. e.g. https://my-bucket.oss-cn-hangzhou.aliyuncs.com
+
+# fileService: s3 (AWS S3 or S3-compatible stores)
+s3:
+  endpoint: ""        # Host only, no scheme. e.g. s3.us-east-1.amazonaws.com
+  region: ""          # e.g. us-east-1
+  bucket: ""          # Required.
+  downloadURL: ""     # Optional CDN domain.
+  prefix: ""          # Optional path prefix.
+  usePathStyle: false # Set true for path-style addressing (MinIO-compatible stores)
+
+# fileService: qiniu (Qiniu Kodo)
+qiniu:
+  bucket: ""          # Kodo space name.
+  downloadURL: ""     # CDN / bucket domain. e.g. https://cdn.example.com
 
 # =============================================================================
 # MySQL
@@ -225,7 +299,7 @@ externalWukongim:
 server:
   image:
     repository: mininglamposs/octo-server
-    tag: "1.3.0"
+    tag: "1.6.0"
     pullPolicy: IfNotPresent
   replicas: 1
   resources:
@@ -252,7 +326,13 @@ server:
     # Test-only SMS verification code bypass. Ignored in release mode.
     smsCode: ""
 
-    # File storage backend. Only "minio" is currently supported.
+    # File storage backend. Supported values:
+    #   minio       — bundled or external MinIO (see minio:/externalMinio:)
+    #   tencentCOS  — Tencent Cloud COS         (see cos: + secrets.cosSecretId/Key)
+    #   aliOSS      — Aliyun OSS                (see oss: + secrets.ossAccessKeyId/Secret)
+    #   s3          — AWS S3 or S3-compatible   (see s3: + secrets.s3AccessKeyId/SecretKey)
+    #   qiniu       — Qiniu Kodo                (see qiniu: + secrets.qiniuAccessKey/SecretKey)
+    # When set to any value other than "minio", set minio.enabled=false.
     fileService: "minio"
 
     logger:
@@ -291,7 +371,7 @@ server:
 web:
   image:
     repository: mininglamposs/octo-web
-    tag: "1.1.1"
+    tag: "1.4.2"
     pullPolicy: IfNotPresent
   replicas: 1
   resources: {}
@@ -302,7 +382,7 @@ web:
 admin:
   image:
     repository: mininglamposs/octo-admin
-    tag: "1.2.0"
+    tag: "1.5.1"
     pullPolicy: IfNotPresent
   replicas: 1
   resources: {}
@@ -313,7 +393,7 @@ admin:
 matter:
   image:
     repository: mininglamposs/octo-matter
-    tag: "1.0.1"
+    tag: "1.1.1"
     pullPolicy: IfNotPresent
   replicas: 1
   appEnv: "prod"
@@ -333,17 +413,81 @@ summary:
   api:
     image:
       repository: mininglamposs/octo-smart-summary-api
-      tag: "1.1.0"
+      tag: "1.2.1"
       pullPolicy: IfNotPresent
     replicas: 1
     resources: {}
   worker:
     image:
       repository: mininglamposs/octo-smart-summary-worker
-      tag: "1.1.0"
+      tag: "1.2.1"
       pullPolicy: IfNotPresent
     replicas: 1
     resources: {}
+
+# =============================================================================
+# Speech (speech API + speech admin)
+# =============================================================================
+speech:
+  enabled: false
+  image:
+    repository: mininglamposs/octo-speech
+    tag: "1.3.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  config:
+    engine: qwen
+    selectedModels: ""
+    selectedURL: ""
+    # Legacy engine-specific fields remain supported for direct Helm upgrades.
+    qwenModels: qwen3.5-omni-plus
+    gptModels: gpt-4o-mini-transcribe
+    models: gemini-3-flash-preview,gemini-3.1-pro-preview,gemini-2.5-pro
+    liteLLMURL: https://dashscope.aliyuncs.com/compatible-mode/v1
+    qwenURL: ""
+    liteLLMTimeout: "60"
+    totalTimeout: "90"
+    logBufferSize: "256"
+    logRetentionDays: "7"
+    feedbackURL: ""
+  storage:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  podSecurityContext:
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  admin:
+    image:
+      repository: mininglamposs/octo-speech-admin
+      tag: "1.3.0"
+      pullPolicy: IfNotPresent
+    replicas: 1
+    secureCookie: false
+    tokenExpire: "24"
+    readTimeout: 30s
+    writeTimeout: 60s
+    idleTimeout: 120s
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+  bootstrap:
+    appName: octo-server
+    image:
+      repository: curlimages/curl
+      tag: "8.10.1"
+      pullPolicy: IfNotPresent
 
 # =============================================================================
 # Search pipeline (Kafka + OpenSearch[analysis-ik] + es-indexer) — OPT-IN.
@@ -464,6 +608,9 @@ ingress:
 
   tls:
     enabled: false
+    # Tencent Cloud SSL certificate ID. When set, the chart creates the
+    # Opaque Secret consumed by TKE CLB Ingress.
+    certId: ""
     # Name of an existing K8s Secret that holds tls.crt + tls.key.
     # Create with: kubectl create secret tls octo-tls --cert=tls.crt --key=tls.key
     secretName: ""

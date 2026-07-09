@@ -32,11 +32,46 @@ data:
       managerToken: ""
 
     fileService: {{ $cfg.fileService | default "minio" | quote }}
+    {{- if eq ($cfg.fileService | default "minio") "minio" }}
     minio:
       url: "{{ include "octo.minio.url" . }}"
       downloadURL: ""
       accessKeyID: ""
       secretAccessKey: ""
+    {{- else if eq ($cfg.fileService | default "minio") "tencentCOS" }}
+    cos:
+      region: {{ .Values.cos.region | quote }}
+      bucket: {{ .Values.cos.bucket | quote }}
+      downloadURL: {{ .Values.cos.downloadURL | quote }}
+      prefix: {{ .Values.cos.prefix | default "" | quote }}
+      secretId: ""
+      secretKey: ""
+    {{- else if eq ($cfg.fileService | default "minio") "aliOSS" }}
+    oss:
+      endpoint: {{ .Values.oss.endpoint | quote }}
+      bucket: {{ .Values.oss.bucket | quote }}
+      downloadURL: {{ .Values.oss.downloadURL | quote }}
+      prefix: {{ .Values.oss.prefix | default "" | quote }}
+      accessKeyId: ""
+      accessKeySecret: ""
+    {{- else if eq ($cfg.fileService | default "minio") "s3" }}
+    s3:
+      endpoint: {{ .Values.s3.endpoint | quote }}
+      region: {{ .Values.s3.region | quote }}
+      bucket: {{ .Values.s3.bucket | quote }}
+      downloadURL: {{ .Values.s3.downloadURL | default "" | quote }}
+      prefix: {{ .Values.s3.prefix | default "" | quote }}
+      usePathStyle: {{ .Values.s3.usePathStyle | default false }}
+      accessKeyId: ""
+      secretAccessKey: ""
+      sessionToken: ""
+    {{- else if eq ($cfg.fileService | default "minio") "qiniu" }}
+    qiniu:
+      bucket: {{ .Values.qiniu.bucket | quote }}
+      downloadURL: {{ .Values.qiniu.downloadURL | quote }}
+      accessKey: ""
+      secretKey: ""
+    {{- end }}
 
     logger:
       level: {{ $logger.level | default 2 }}
