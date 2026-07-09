@@ -176,6 +176,12 @@ server {
     # /minio-console/ is intentionally NOT exposed here — see the comment
     # at the top of this file. SSH-forward :29001 for console access.
 
+    # Redirect /space → /admin/space (octo-web navigates to /space
+    # but the route lives inside octo-admin under /admin/space).
+    location ~ ^/space(/.*)?$ {
+        return 301 /admin/space$1$is_args$args;
+    }
+
     location = /admin {
         return 301 /admin/;
     }
@@ -427,6 +433,11 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #         proxy_read_timeout 600s;
 #         proxy_request_buffering off;
 #         proxy_buffering off;
+#     }
+#
+#     # Redirect /space → /admin/space
+#     location ~ ^/space(/.*)?$ {
+#         return 301 /admin/space$1$is_args$args;
 #     }
 #
 #     location = /admin {
