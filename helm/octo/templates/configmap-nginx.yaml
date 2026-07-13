@@ -135,6 +135,12 @@ data:
         }
         {{- end }}
 
+        # Redirect /space → /admin/space (octo-web navigates to /space
+        # but the route lives inside octo-admin under /admin/space).
+        location ~ ^/space(/.*)?$ {
+            return 301 /admin/space$1$is_args$args;
+        }
+
         location = /admin {
             return 301 /admin/;
         }
