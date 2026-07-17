@@ -2162,14 +2162,16 @@ if is_placeholder_domain && [[ -n "${EXTERNAL_IP}" ]] && ! is_loopback_ip "${EXT
   cat >> "${ENV_OUT}" <<URLS
 
 # S1 (R7 / YUJ-1020 / GH#41): Materialised because OCTO_DOMAIN=${DOMAIN}
-# (placeholder) and --ip ${EXTERNAL_IP} was supplied. Without these three
+# (placeholder) and --ip ${EXTERNAL_IP} was supplied. Without these four
 # overrides the compose defaults would sign presigned PUT URLs against
-# http://${DOMAIN}:${HTTP_PORT}, which does not resolve from a client
+# http://${DOMAIN}:${HTTP_PORT} and advertise a WuKongIM WS address of
+# ws://${DOMAIN}:${HTTP_PORT}/ws, neither of which resolves from a client
 # without DNS pointed at this host. Set OCTO_DOMAIN=<real DNS name>
 # and re-run setup.sh --force if you want the DNS-based topology instead.
 MINIO_SERVER_URL=http://${EXTERNAL_IP}:${HTTP_PORT}
 TS_MINIO_DOWNLOADURL=http://${EXTERNAL_IP}:${HTTP_PORT}
 TS_EXTERNAL_BASEURL=http://${EXTERNAL_IP}:${HTTP_PORT}
+OCTO_WK_WS_ADDR=ws://${EXTERNAL_IP}:${HTTP_PORT}/ws
 URLS
 fi
 
