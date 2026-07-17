@@ -1,5 +1,7 @@
 # Search pipeline (opt-in, standalone)
 
+> 中文版：[README.zh.md](./README.zh.md)
+
 Kafka + OpenSearch (analysis-ik) + es-indexer for the OCTO message-search
 pipeline. This kustomization is **intentionally not referenced** by
 `kustomize/base` or any overlay — applying the default base/overlays deploys

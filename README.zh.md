@@ -154,7 +154,7 @@ OCTO 不内置 IM 引擎，通过 HTTP API + webhook gRPC 调用 [WuKongIM](http
 三者都只部署搜索**基础设施**；将 octo-server 接到 OpenSearch 是独立的、需 owner
 把关的步骤。详见 [`docker/README.zh.md`](./docker/README.zh.md) "Search profile"、
 [`helm/octo/README.zh.md`](./helm/octo/README.zh.md) "搜索（可选）" 和
-[`kustomize/search/README.md`](./kustomize/search/README.md)。
+[`kustomize/search/README.zh.md`](./kustomize/search/README.zh.md)。
 
 ## 目录结构
 
