@@ -4,16 +4,16 @@
 # already-running stack. Idempotent: every step is safe to re-run.
 # -----------------------------------------------------------------------------
 # Flow:
+#   (0) Validate required secrets; create octo_speech DB if absent
 #   (1) Start speech services (docker compose --profile speech up -d)
-#   (2) Wait for octo-speech to be healthy
+#   (2) Wait for octo-speech-admin to be reachable via nginx
 #   (3) Create an API key via octo-speech-admin
-#   (4) Write SPEECH_API_KEY into docker/.env
+#   (4) Write SPEECH_API_KEY + SPEECH_SERVICE_URL + COMPOSE_PROFILES into .env
 #   (5) Restart octo-server to pick up the key
 #
 # Usage:
-#   docker/scripts/speech-setup.sh                  # full setup
-#   docker/scripts/speech-setup.sh --from 3         # resume at step N (1..5)
-#   SPEECH_ADMIN_PASSWORD=mypass docker/scripts/speech-setup.sh
+#   docker/scripts/speech-setup.sh              # full setup
+#   docker/scripts/speech-setup.sh --from 3     # resume at step N (0..5)
 #
 # Requires: curl, docker (compose v2 plugin or docker-compose binary).
 # -----------------------------------------------------------------------------
@@ -24,9 +24,33 @@ DOCKER_DIR="$(cd "$HERE/.." && pwd)"
 cd "$DOCKER_DIR"
 
 ENV_FILE="${ENV_FILE:-$DOCKER_DIR/.env}"
+
 env_get() {
   [ -f "$ENV_FILE" ] || return 0
   grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+
+# portable: rewrite via tmp file, no sed -i flavor issues (matches search-upgrade.sh)
+persist_env() {
+  local key="$1" val="$2"
+  touch "$ENV_FILE"
+  if grep -qE "^${key}=" "$ENV_FILE"; then
+    awk -v k="$key" -v v="$val" \
+      'BEGIN{FS=OFS="="} $1==k{print k"="v; next} {print}' \
+      "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+  fi
+}
+
+persist_profile() {
+  local add="$1" current merged
+  current="${COMPOSE_PROFILES:-$(env_get COMPOSE_PROFILES)}"
+  merged="$(printf '%s' "$current" | tr ',' '\n' | sed '/^[[:space:]]*$/d' \
+    | awk -v a="$add" '{print} $0==a{seen=1} END{if(!seen)print a}' \
+    | paste -sd, -)"
+  COMPOSE_PROFILES="$merged"
+  persist_env COMPOSE_PROFILES "$merged"
 }
 
 if docker compose version >/dev/null 2>&1; then
@@ -38,35 +62,67 @@ else
   exit 2
 fi
 
+# resolve vars from .env (env wins, like Compose)
 : "${OCTO_HTTP_PORT:=$(env_get OCTO_HTTP_PORT)}"
+: "${MYSQL_ROOT_PASSWORD:=$(env_get MYSQL_ROOT_PASSWORD)}"
+: "${SPEECH_DB_PASSWORD:=$(env_get SPEECH_DB_PASSWORD)}"
 : "${SPEECH_ADMIN_USERNAME:=$(env_get SPEECH_ADMIN_USERNAME)}"
 : "${SPEECH_ADMIN_PASSWORD:=$(env_get SPEECH_ADMIN_PASSWORD)}"
+: "${SPEECH_ADMIN_JWT_SECRET:=$(env_get SPEECH_ADMIN_JWT_SECRET)}"
+: "${SPEECH_API_KEY:=$(env_get SPEECH_API_KEY)}"
 
 HTTP_PORT="${OCTO_HTTP_PORT:-80}"
 ADMIN_USER="${SPEECH_ADMIN_USERNAME:-admin}"
 BASE_URL="http://127.0.0.1:${HTTP_PORT}/speech-admin"
 
-FROM_STEP=1
-for arg in "$@"; do
-  case "$arg" in
-    --from) shift; FROM_STEP="${1:-1}"; shift ;;
-    --from=*) FROM_STEP="${arg#--from=}" ;;
+# parse --from N
+FROM_STEP=0
+while (($#)); do
+  case "$1" in
+    --from) shift; FROM_STEP="${1:?'--from requires a step number'}"; shift ;;
+    --from=*) FROM_STEP="${1#--from=}"; shift ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
 
-log()     { printf '\n\033[1m=== Step %s: %s ===\033[0m\n' "$1" "$2"; }
-ok()      { printf '\033[32m[OK]\033[0m %s\n' "$*"; }
-info()    { printf '    %s\n' "$*"; }
-fail()    { printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
+log()  { printf '\n\033[1m=== Step %s: %s ===\033[0m\n' "$1" "$2"; }
+ok()   { printf '\033[32m[OK]\033[0m %s\n' "$*"; }
+info() { printf '    %s\n' "$*"; }
+fail() { printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 
-persist_env() {
-  local key="$1" val="$2"
-  if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
-  else
-    printf '\n%s=%s\n' "$key" "$val" >> "$ENV_FILE"
-  fi
-}
+# ---------------------------------------------------------------------------
+# Step 0: validate secrets + create octo_speech DB on existing stack
+# ---------------------------------------------------------------------------
+if [ "$FROM_STEP" -le 0 ]; then
+  log 0 "Validate secrets and provision octo_speech database"
+
+  [ -n "${SPEECH_ADMIN_PASSWORD:-}" ] \
+    || fail "SPEECH_ADMIN_PASSWORD is not set. Add it to docker/.env or export it before running this script."
+  [ -n "${SPEECH_ADMIN_JWT_SECRET:-}" ] \
+    || fail "SPEECH_ADMIN_JWT_SECRET is not set. Generate with: openssl rand -hex 32"
+  [ -n "${MYSQL_ROOT_PASSWORD:-}" ] \
+    || fail "MYSQL_ROOT_PASSWORD is not set."
+  [ -n "${SPEECH_DB_PASSWORD:-}" ] \
+    || fail "SPEECH_DB_PASSWORD is not set. Generate with: openssl rand -hex 16"
+
+  ok "Secrets validated"
+
+  # Create DB idempotently against the live MySQL — init-extra-dbs.sh only runs
+  # on first volume init, so existing deployments need this explicit step.
+  "${DC[@]}" exec -T mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+    -e "CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;" \
+    2>/dev/null
+  ok "octo_speech database ready"
+
+  # Create scoped speech DB user (least-privilege, matches matter/summary pattern)
+  "${DC[@]}" exec -T mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+    -e "CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+        ALTER USER IF EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+        GRANT ALL PRIVILEGES ON octo_speech.* TO 'speech'@'%';
+        FLUSH PRIVILEGES;" \
+    2>/dev/null
+  ok "speech DB user provisioned"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1: start speech services
@@ -74,61 +130,73 @@ persist_env() {
 if [ "$FROM_STEP" -le 1 ]; then
   log 1 "Start speech services"
   "${DC[@]}" --profile speech up -d
-  ok "speech services started"
+  persist_profile "speech"
+  ok "speech services started; COMPOSE_PROFILES updated in .env"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: wait for octo-speech healthy
+# Step 2: wait for octo-speech-admin reachable via nginx
 # ---------------------------------------------------------------------------
 if [ "$FROM_STEP" -le 2 ]; then
-  log 2 "Wait for octo-speech to be healthy"
-  RETRIES=20
-  until "${DC[@]}" exec -T octo-speech bash -c 'echo > /dev/tcp/localhost/8780' 2>/dev/null; do
+  log 2 "Wait for octo-speech-admin to be reachable via nginx"
+  RETRIES=30
+  until curl -sf -o /dev/null "${BASE_URL}/api/login" \
+      -X POST -H "Content-Type: application/json" \
+      -d '{"username":"__probe__","password":"__probe__"}' 2>/dev/null; do
     RETRIES=$((RETRIES - 1))
-    [ "$RETRIES" -le 0 ] && fail "octo-speech did not become ready in time"
-    info "waiting... ($RETRIES attempts left)"
+    [ "$RETRIES" -le 0 ] && fail "octo-speech-admin did not become reachable in time (${BASE_URL})"
+    info "waiting for admin console... ($RETRIES attempts left)"
     sleep 5
-  done
-  ok "octo-speech is ready"
+  done || true  # 401/422 still means the endpoint is up
+  ok "octo-speech-admin is reachable"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3: create API key via speech-admin
+# Step 3: create API key via speech-admin (idempotent: reuse existing app)
 # ---------------------------------------------------------------------------
 if [ "$FROM_STEP" -le 3 ]; then
-  log 3 "Create API key via speech-admin"
+  log 3 "Create (or reuse) API key via speech-admin"
 
-  if [ -z "${SPEECH_ADMIN_PASSWORD:-}" ]; then
-    fail "SPEECH_ADMIN_PASSWORD is not set. Add it to docker/.env or export it before running this script."
-  fi
-
-  # Login and grab token
   LOGIN_RESP=$(curl -sf -X POST "${BASE_URL}/api/login" \
     -H "Content-Type: application/json" \
     -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${SPEECH_ADMIN_PASSWORD}\"}" 2>&1) \
-    || fail "Login to speech-admin failed. Is the speech profile running and nginx healthy?"
+    || fail "Login to speech-admin failed. Check SPEECH_ADMIN_USERNAME / SPEECH_ADMIN_PASSWORD."
 
   TOKEN=$(printf '%s' "$LOGIN_RESP" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-  [ -n "$TOKEN" ] || fail "Could not extract auth token from login response: $LOGIN_RESP"
+  [ -n "$TOKEN" ] || fail "Could not extract auth token from: $LOGIN_RESP"
 
-  # Create application
-  APP_RESP=$(curl -sf -X POST "${BASE_URL}/api/apps" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -d '{"app_name":"octo-docker"}' 2>&1) \
-    || fail "Failed to create speech API key: $APP_RESP"
+  # Try to reuse an existing 'octo-docker' app to stay idempotent
+  LIST_RESP=$(curl -sf "${BASE_URL}/api/apps" \
+    -H "Authorization: Bearer ${TOKEN}" 2>/dev/null || true)
+  EXISTING_KEY=$(printf '%s' "$LIST_RESP" | grep -o '"app_name":"octo-docker"[^}]*"api_key":"[^"]*"' \
+    | grep -o '"api_key":"[^"]*"' | cut -d'"' -f4 || true)
 
-  SPEECH_API_KEY=$(printf '%s' "$APP_RESP" | grep -o '"api_key":"[^"]*"' | cut -d'"' -f4)
-  [ -n "$SPEECH_API_KEY" ] || fail "Could not extract API key from response: $APP_RESP"
-
-  ok "API key created: ${SPEECH_API_KEY:0:12}..."
+  if [ -n "$EXISTING_KEY" ]; then
+    SPEECH_API_KEY="$EXISTING_KEY"
+    ok "Reusing existing 'octo-docker' app key: ${SPEECH_API_KEY:0:12}..."
+  else
+    APP_RESP=$(curl -sf -X POST "${BASE_URL}/api/apps" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${TOKEN}" \
+      -d '{"app_name":"octo-docker"}' 2>&1) \
+      || fail "Failed to create speech API key: $APP_RESP"
+    SPEECH_API_KEY=$(printf '%s' "$APP_RESP" | grep -o '"api_key":"[^"]*"' | cut -d'"' -f4)
+    [ -n "$SPEECH_API_KEY" ] || fail "Could not extract API key from: $APP_RESP"
+    ok "API key created: ${SPEECH_API_KEY:0:12}..."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4: write key into .env
+# Step 4: write key + service URL into .env
 # ---------------------------------------------------------------------------
 if [ "$FROM_STEP" -le 4 ]; then
-  log 4 "Write SPEECH_API_KEY into docker/.env"
+  log 4 "Write SPEECH_API_KEY and SPEECH_SERVICE_URL into docker/.env"
+
+  # When resuming at step 4, load key from .env if not already set by step 3
+  : "${SPEECH_API_KEY:=$(env_get SPEECH_API_KEY)}"
+  [ -n "${SPEECH_API_KEY:-}" ] \
+    || fail "SPEECH_API_KEY is not set and could not be read from .env. Re-run from step 3."
+
   persist_env "SPEECH_SERVICE_URL" "http://octo-speech:8780"
   persist_env "SPEECH_API_KEY" "$SPEECH_API_KEY"
   ok "docker/.env updated"
@@ -145,4 +213,3 @@ fi
 
 printf '\n\033[32m[DONE]\033[0m Speech profile is live.\n'
 printf '  Admin console : %s/\n' "$BASE_URL"
-printf '  API key       : %s\n' "${SPEECH_API_KEY:-<set in .env>}"

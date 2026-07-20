@@ -1108,7 +1108,7 @@ services:
       mysql:
         condition: service_healthy
     environment:
-      SPEECH_DB_DSN:         "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      SPEECH_DB_DSN:         "speech:${SPEECH_DB_PASSWORD:-}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
       SPEECH_SERVICE_PORT:   "8780"
       VOICE_ENGINE:          ${VOICE_ENGINE:-qwen}
       VOICE_LITELLM_URL:     ${VOICE_LITELLM_URL:-}
@@ -1136,12 +1136,12 @@ services:
       mysql:
         condition: service_healthy
       octo-speech:
-        condition: service_started
+        condition: service_healthy
     environment:
-      SPEECH_DB_DSN:       "root:${MYSQL_ROOT_PASSWORD}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      SPEECH_DB_DSN:       "speech:${SPEECH_DB_PASSWORD:-}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
       ADMIN_PORT:          "8781"
       ADMIN_USERNAME:      ${SPEECH_ADMIN_USERNAME:-admin}
-      ADMIN_PASSWORD:      ${SPEECH_ADMIN_PASSWORD}
+      ADMIN_PASSWORD:      ${SPEECH_ADMIN_PASSWORD:-}
       ADMIN_JWT_SECRET:    ${SPEECH_ADMIN_JWT_SECRET:-}
       ADMIN_SECURE_COOKIE: "false"
       TZ: Asia/Shanghai
