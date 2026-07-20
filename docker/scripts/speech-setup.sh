@@ -117,7 +117,7 @@ if [ "$FROM_STEP" -le 0 ]; then
   "${DC[@]}" exec -T -e MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
     mysql -uroot \
     -e "CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;" \
-    2>/dev/null
+    || fail "Failed to create octo_speech database — check MYSQL_ROOT_PASSWORD and MySQL connectivity."
   ok "octo_speech database ready"
 
   # Create scoped speech DB user (least-privilege, matches matter/summary pattern)
@@ -127,7 +127,7 @@ if [ "$FROM_STEP" -le 0 ]; then
         ALTER USER IF EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
         GRANT ALL PRIVILEGES ON octo_speech.* TO 'speech'@'%';
         FLUSH PRIVILEGES;" \
-    2>/dev/null
+    || fail "Failed to provision speech DB user — check MYSQL_ROOT_PASSWORD and MySQL connectivity."
   ok "speech DB user provisioned"
 fi
 
