@@ -1180,6 +1180,53 @@ above for why a ufw rule alone is not enough).
 
 ---
 
+## Speech profile (voice transcription)
+
+The speech pipeline — `octo-speech` (transcription API) +
+`octo-speech-admin` (API-key management console) — is **opt-in** behind
+the Docker Compose `speech` profile:
+
+- A default `docker compose up -d` starts **zero** speech services.
+- Every speech variable in `.env` has an empty default, so a non-speech
+  deployment never fails preflight.
+- The admin console binds to `127.0.0.1:28088` by default and is also
+  reachable through nginx at `/speech-admin/`.
+
+### Bring the speech profile up
+
+Run the guided setup script:
+
+```bash
+cd docker
+scripts/speech-setup.sh
+```
+
+The script validates secrets, provisions the `octo_speech` database and
+scoped DB user, starts the speech containers, force-recreates nginx to
+pick up the `/speech-admin/` route, creates an API key via the admin
+console, writes the key into `.env`, and restarts `octo-server`.
+
+To resume from a specific step (e.g. after a partial run):
+
+```bash
+scripts/speech-setup.sh --from 3   # resume at step 3 (0..5)
+```
+
+### Voice engine configuration
+
+The default engine is `qwen` (recommended for Chinese). Set
+`VOICE_ENGINE` in `.env` to switch:
+
+| Engine   | Required variables                                |
+|----------|---------------------------------------------------|
+| `qwen`   | `VOICE_QWEN_URL`, `VOICE_QWEN_KEY`, `VOICE_QWEN_MODELS` |
+| `gpt`    | `VOICE_LITELLM_URL`, `VOICE_LITELLM_KEY`, `VOICE_GPT_MODELS` |
+| `gemini` | `VOICE_LITELLM_URL`, `VOICE_LITELLM_KEY`, `VOICE_MODELS` |
+
+See `.env.example` for details.
+
+---
+
 ## Search profile (message-search pipeline)
 
 The message-search pipeline — Kafka + OpenSearch (with the `analysis-ik`
