@@ -40,3 +40,7 @@ summary:
   worker:
     image:
       repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-smart-summary-worker
+
+fleet:
+  image:
+    repository: tsh8-deepminer-tcr1.tencentcloudcr.com/octo-oss/octo-fleet

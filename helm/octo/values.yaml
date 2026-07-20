@@ -120,6 +120,9 @@ secrets:
   speechAdminPassword: ""
   speechAdminJwtSecret: ""
 
+  # Fleet DB password (required when fleet.enabled=true). Characters must be in [A-Za-z0-9._+=-].
+  fleetDbPassword: ""
+
   # Inbound webhook HMAC secret (optional).
   webhookSecretKey: ""
 
@@ -488,6 +491,32 @@ speech:
       repository: curlimages/curl
       tag: "8.10.1"
       pullPolicy: IfNotPresent
+
+# =============================================================================
+# Fleet (runtime & bot orchestration service)
+# =============================================================================
+fleet:
+  enabled: false
+  image:
+    repository: mininglamposs/octo-fleet
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  service:
+    port: 8092
+  config:
+    externalBaseURL: ""
+    # octoServerURL defaults internally to http://<octo-server>:8090; override only if needed.
+    octoServerURL: ""
+  database:
+    name: octo_fleet
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
 
 # =============================================================================
 # Search pipeline (Kafka + OpenSearch[analysis-ik] + es-indexer) — OPT-IN.

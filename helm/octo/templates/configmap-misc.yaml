@@ -68,6 +68,9 @@ data:
     {{- if .Values.speech.enabled }}
     : "${OCTO_SPEECH_DB_PASSWORD:=speech}"
     {{- end }}
+    {{- if .Values.fleet.enabled }}
+    : "${OCTO_FLEET_DB_PASSWORD:=fleet}"
+    {{- end }}
     : "${MYSQL_DATABASE:=octo}"
 
     validate_password() {
@@ -76,8 +79,8 @@ data:
         echo "[init-extra-dbs] FATAL: $name is empty" >&2; exit 1
       fi
       case "$value" in
-        *[!A-Za-z0-9._-]*)
-          echo "[init-extra-dbs] FATAL: $name contains characters outside [A-Za-z0-9._-]" >&2; exit 1 ;;
+        *[!A-Za-z0-9._+=-]*)
+          echo "[init-extra-dbs] FATAL: $name contains characters outside [A-Za-z0-9._+=-]" >&2; exit 1 ;;
       esac
       local lc; lc=$(printf %s "$value" | tr 'A-Z' 'a-z')
       case "$lc" in
@@ -110,11 +113,17 @@ data:
     {{- if .Values.speech.enabled }}
     validate_password  OCTO_SPEECH_DB_PASSWORD       "$OCTO_SPEECH_DB_PASSWORD"
     {{- end }}
+    {{- if .Values.fleet.enabled }}
+    validate_password  OCTO_FLEET_DB_PASSWORD        "$OCTO_FLEET_DB_PASSWORD"
+    {{- end }}
     reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"      "matter"
     reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
     reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
     {{- if .Values.speech.enabled }}
     reject_literal_default OCTO_SPEECH_DB_PASSWORD       "$OCTO_SPEECH_DB_PASSWORD"      "speech"
+    {{- end }}
+    {{- if .Values.fleet.enabled }}
+    reject_literal_default OCTO_FLEET_DB_PASSWORD        "$OCTO_FLEET_DB_PASSWORD"       "fleet"
     {{- end }}
     validate_password  MYSQL_ROOT_PASSWORD            "$MYSQL_ROOT_PASSWORD"
     validate_identifier MYSQL_DATABASE               "$MYSQL_DATABASE"
@@ -124,6 +133,9 @@ data:
     CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
     {{- if .Values.speech.enabled }}
     CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    {{- end }}
+    {{- if .Values.fleet.enabled }}
+    CREATE DATABASE IF NOT EXISTS octo_fleet  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
     {{- end }}
 
     CREATE USER IF NOT EXISTS 'matter'@'%'  IDENTIFIED BY '${OCTO_MATTER_DB_PASSWORD}';
@@ -138,6 +150,11 @@ data:
     CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${OCTO_SPEECH_DB_PASSWORD}';
     ALTER USER IF EXISTS      'speech'@'%' IDENTIFIED BY '${OCTO_SPEECH_DB_PASSWORD}';
     {{- end }}
+    {{- if .Values.fleet.enabled }}
+
+    CREATE USER IF NOT EXISTS 'fleet'@'%' IDENTIFIED BY '${OCTO_FLEET_DB_PASSWORD}';
+    ALTER USER IF EXISTS      'fleet'@'%' IDENTIFIED BY '${OCTO_FLEET_DB_PASSWORD}';
+    {{- end }}
 
     GRANT ALL PRIVILEGES ON octo_matter.*       TO 'matter'@'%';
     GRANT ALL PRIVILEGES ON octo_summary.*      TO 'summary'@'%';
@@ -145,11 +162,18 @@ data:
     {{- if .Values.speech.enabled }}
     GRANT ALL PRIVILEGES ON octo_speech.*       TO 'speech'@'%';
     {{- end }}
+    {{- if .Values.fleet.enabled }}
+    GRANT ALL PRIVILEGES ON octo_fleet.*        TO 'fleet'@'%';
+    {{- end }}
     FLUSH PRIVILEGES;
     SQL
 
-    {{- if .Values.speech.enabled }}
+    {{- if and .Values.speech.enabled .Values.fleet.enabled }}
+    echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + octo_fleet + service users"
+    {{- else if .Values.speech.enabled }}
     echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + service users"
+    {{- else if .Values.fleet.enabled }}
+    echo "[init-extra-dbs] created octo_matter + octo_summary + octo_fleet + service users"
     {{- else }}
     echo "[init-extra-dbs] created octo_matter + octo_summary + service users"
     {{- end }}

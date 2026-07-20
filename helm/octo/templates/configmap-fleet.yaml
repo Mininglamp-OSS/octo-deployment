@@ -1,0 +1,29 @@
+{{- if .Values.fleet.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "octo.configMap.fleet" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fleet
+data:
+  fleet.yaml: |
+    mode: "release"
+    addr: ":{{ .Values.fleet.service.port }}"
+    appName: "octo-fleet"
+    rootDir: "fleetdata"
+    db:
+      # mysqlAddr is injected at runtime via the FLEET_DB_MYSQLADDR env var
+      # (see deployment-fleet.yaml). Keep the DSN password out of this ConfigMap.
+      redisAddr: "{{ include "octo.redis.host" . }}:{{ include "octo.redis.port" . }}"
+      redisPass: ""
+    external:
+      baseURL: {{ .Values.fleet.config.externalBaseURL | quote }}
+    auth:
+      # fleet calls octo-server /v1/auth/verify-* to authenticate callers.
+      octoServerURL: {{ .Values.fleet.config.octoServerURL | default (printf "http://%s:8090" (include "octo.server.fullname" .)) | quote }}
+    logger:
+      level: 1
+      dir: "/home/logs"
+      lineNum: false
+{{- end }}

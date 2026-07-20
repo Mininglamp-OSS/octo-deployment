@@ -1,0 +1,133 @@
+{{- if .Values.fleet.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "octo.fleet.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fleet
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: {{ .Values.fleet.service.port }}
+      targetPort: http
+  selector:
+    {{- include "octo.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: fleet
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octo.fleet.fullname" . }}
+  labels:
+    {{- include "octo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fleet
+spec:
+  replicas: {{ .Values.fleet.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "octo.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: fleet
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-fleet.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "octo.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: fleet
+    spec:
+      {{- include "octo.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: wait-for-mysql
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+        - name: wait-for-redis
+          image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
+          command: ['sh', '-c', 'until nc -z {{ include "octo.redis.host" . }} {{ include "octo.redis.port" . }}; do echo waiting for redis; sleep 2; done']
+        - name: init-fleet-db
+          image: {{ include "octo.image" (dict "repo" .Values.mysql.image.repository "tag" .Values.mysql.image.tag "ctx" .) }}
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: MYSQL_ROOT_PASSWORD
+            - name: FLEET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: FLEET_DB_PASSWORD
+          command:
+            - sh
+            - -c
+            - >
+              until mysql -h {{ include "octo.mysql.host" . }} -P {{ include "octo.mysql.port" . }} -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SELECT 1" >/dev/null 2>&1; do
+                echo "waiting for mysql..."; sleep 2;
+              done;
+              echo "CREATE DATABASE IF NOT EXISTS {{ .Values.fleet.database.name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+              CREATE USER IF NOT EXISTS 'fleet'@'%' IDENTIFIED BY '${FLEET_DB_PASSWORD}';
+              ALTER USER IF EXISTS 'fleet'@'%' IDENTIFIED BY '${FLEET_DB_PASSWORD}';
+              GRANT ALL PRIVILEGES ON {{ .Values.fleet.database.name }}.* TO 'fleet'@'%';
+              FLUSH PRIVILEGES;" |
+              mysql -h {{ include "octo.mysql.host" . }} -P {{ include "octo.mysql.port" . }} -u root -p"${MYSQL_ROOT_PASSWORD}" &&
+              echo "fleet database ready."
+      containers:
+        - name: octo-fleet
+          image: {{ include "octo.image" (dict "repo" .Values.fleet.image.repository "tag" .Values.fleet.image.tag "ctx" .) }}
+          imagePullPolicy: {{ .Values.fleet.image.pullPolicy }}
+          args: ["--config", "/home/configs/fleet.yaml"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.fleet.service.port }}
+          env:
+            - name: TZ
+              value: {{ .Values.timezone | default "UTC" | quote }}
+            - name: FLEET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: FLEET_DB_PASSWORD
+            - name: FLEET_DB_MYSQLADDR
+              value: "fleet:$(FLEET_DB_PASSWORD)@tcp({{ include "octo.mysql.host" . }}:{{ include "octo.mysql.port" . }})/{{ .Values.fleet.database.name }}?charset=utf8mb4&parseTime=true"
+            {{- if .Values.secrets.redisPassword }}
+            - name: FLEET_DB_REDISPASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: REDIS_PASSWORD
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /v1/ping
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /home/configs/fleet.yaml
+              subPath: fleet.yaml
+            - name: logs
+              mountPath: /home/logs
+          {{- with .Values.fleet.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "octo.configMap.fleet" . }}
+        - name: logs
+          emptyDir: {}
+{{- end }}
