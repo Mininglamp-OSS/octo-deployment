@@ -1121,7 +1121,7 @@ services:
       VOICE_MAX_FILE_SIZE:   "3145728"
       TZ: ${TZ:-UTC}
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8780' || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8780/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1149,7 +1149,7 @@ services:
     ports:
       - "${OCTO_SPEECH_ADMIN_BIND:-127.0.0.1}:${OCTO_SPEECH_ADMIN_PORT:-28088}:8781"
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8781' || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8781/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

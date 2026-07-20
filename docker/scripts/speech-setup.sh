@@ -27,7 +27,7 @@ ENV_FILE="${ENV_FILE:-$DOCKER_DIR/.env}"
 
 env_get() {
   [ -f "$ENV_FILE" ] || return 0
-  grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+  grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" || true
 }
 
 # portable: rewrite via tmp file, no sed -i flavor issues (matches search-upgrade.sh)
@@ -84,6 +84,10 @@ while (($#)); do
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+case "$FROM_STEP" in
+  [0-5]) ;;
+  *) echo "Invalid --from value '$FROM_STEP': must be an integer 0..5" >&2; exit 1 ;;
+esac
 
 log()  { printf '\n\033[1m=== Step %s: %s ===\033[0m\n' "$1" "$2"; }
 ok()   { printf '\033[32m[OK]\033[0m %s\n' "$*"; }
@@ -115,6 +119,10 @@ if [ "$FROM_STEP" -le 0 ]; then
   case "$SPEECH_DB_PASSWORD" in
     *[!A-Za-z0-9._-]*)
       fail "SPEECH_DB_PASSWORD contains characters outside [A-Za-z0-9._-]. Use: openssl rand -hex 16" ;;
+  esac
+  case "$(printf %s "$SPEECH_DB_PASSWORD" | tr 'A-Z' 'a-z')" in
+    change_me_*|chg_me*)
+      fail "SPEECH_DB_PASSWORD is still a CHANGE_ME placeholder. Rotate it: openssl rand -hex 16" ;;
   esac
 
   ok "Secrets validated"
