@@ -288,6 +288,8 @@ server {
 </ul>
 <p>MinIO console is loopback-only (port 29001 on the host). SSH-forward
 to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
+<p>Speech Admin console is loopback-only (port 28088 on the host). SSH-forward
+to reach it (<code>ssh -L 28088:127.0.0.1:28088 user@host</code>).</p>
 <p>See <code>docker/.env.example</code> for configuration.</p></body></html>
 ';
     }
