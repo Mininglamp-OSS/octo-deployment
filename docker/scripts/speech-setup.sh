@@ -71,7 +71,7 @@ fi
 : "${SPEECH_ADMIN_JWT_SECRET:=$(env_get SPEECH_ADMIN_JWT_SECRET)}"
 : "${SPEECH_API_KEY:=$(env_get SPEECH_API_KEY)}"
 
-HTTP_PORT="${OCTO_HTTP_PORT:-80}"
+HTTP_PORT="${OCTO_HTTP_PORT:-28080}"
 ADMIN_USER="${SPEECH_ADMIN_USERNAME:-admin}"
 BASE_URL="http://127.0.0.1:${HTTP_PORT}/speech-admin"
 
@@ -104,18 +104,25 @@ if [ "$FROM_STEP" -le 0 ]; then
     || fail "MYSQL_ROOT_PASSWORD is not set."
   [ -n "${SPEECH_DB_PASSWORD:-}" ] \
     || fail "SPEECH_DB_PASSWORD is not set. Generate with: openssl rand -hex 16"
+  case "$SPEECH_DB_PASSWORD" in
+    *[!A-Za-z0-9._-]*)
+      fail "SPEECH_DB_PASSWORD contains characters outside [A-Za-z0-9._-]. Use: openssl rand -hex 16" ;;
+  esac
 
   ok "Secrets validated"
 
   # Create DB idempotently against the live MySQL — init-extra-dbs.sh only runs
   # on first volume init, so existing deployments need this explicit step.
-  "${DC[@]}" exec -T mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+  # Pass MYSQL_PWD via -e so the root credential stays out of ps/proc cmdline.
+  "${DC[@]}" exec -T -e MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
+    mysql -uroot \
     -e "CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;" \
     2>/dev/null
   ok "octo_speech database ready"
 
   # Create scoped speech DB user (least-privilege, matches matter/summary pattern)
-  "${DC[@]}" exec -T mysql mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" \
+  "${DC[@]}" exec -T -e MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql \
+    mysql -uroot \
     -e "CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
         ALTER USER IF EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
         GRANT ALL PRIVILEGES ON octo_speech.* TO 'speech'@'%';
@@ -140,14 +147,15 @@ fi
 if [ "$FROM_STEP" -le 2 ]; then
   log 2 "Wait for octo-speech-admin to be reachable via nginx"
   RETRIES=30
-  until curl -sf -o /dev/null "${BASE_URL}/api/login" \
-      -X POST -H "Content-Type: application/json" \
-      -d '{"username":"__probe__","password":"__probe__"}' 2>/dev/null; do
+  until [ "$(curl -s -o /dev/null -w '%{http_code}' \
+      -X POST "${BASE_URL}/api/login" \
+      -H "Content-Type: application/json" \
+      -d '{}' 2>/dev/null)" != "000" ]; do
     RETRIES=$((RETRIES - 1))
     [ "$RETRIES" -le 0 ] && fail "octo-speech-admin did not become reachable in time (${BASE_URL})"
     info "waiting for admin console... ($RETRIES attempts left)"
     sleep 5
-  done || true  # 401/422 still means the endpoint is up
+  done
   ok "octo-speech-admin is reachable"
 fi
 

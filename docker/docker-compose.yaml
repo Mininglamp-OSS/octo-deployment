@@ -194,6 +194,7 @@ services:
       OCTO_MATTER_DB_PASSWORD: ${OCTO_MATTER_DB_PASSWORD:-matter}
       OCTO_SUMMARY_DB_PASSWORD: ${OCTO_SUMMARY_DB_PASSWORD:-summary}
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
+      SPEECH_DB_PASSWORD: ${SPEECH_DB_PASSWORD:-}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
