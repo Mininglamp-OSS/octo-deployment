@@ -106,6 +106,10 @@ if [ "$FROM_STEP" -le 0 ]; then
     *[!A-Za-z0-9._-]*)
       fail "SPEECH_ADMIN_PASSWORD contains characters outside [A-Za-z0-9._-]. Use: openssl rand -hex 16" ;;
   esac
+  case "$(printf %s "$SPEECH_ADMIN_PASSWORD" | tr 'A-Z' 'a-z')" in
+    change_me_*|chg_me*)
+      fail "SPEECH_ADMIN_PASSWORD is still a CHANGE_ME placeholder. Rotate it: openssl rand -hex 16" ;;
+  esac
   case "$ADMIN_USER" in
     *[!A-Za-z0-9._-]*)
       fail "SPEECH_ADMIN_USERNAME contains characters outside [A-Za-z0-9._-]." ;;
