@@ -142,6 +142,7 @@ MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
 -- Schemas ---------------------------------------------------------------------
 CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 
 -- Service-scoped read-write accounts -----------------------------------------
 -- CREATE USER IF NOT EXISTS leaves an existing user untouched; the matching
