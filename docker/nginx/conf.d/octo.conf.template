@@ -300,6 +300,7 @@ server {
 <li><a href="/api/v1/health">REST · <code>/api/v1/health</code></a></li>
 <li><a href="/matter/health">Matter · <code>/matter/health</code></a></li>
 <li><a href="/summary/health">Smart-summary · <code>/summary/health</code></a></li>
+<li><a href="/speech-admin/">Speech Admin</a></li>
 </ul>
 <p>MinIO console is loopback-only (port 29001 on the host). SSH-forward
 to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>

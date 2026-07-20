@@ -98,6 +98,14 @@ if [ "$FROM_STEP" -le 0 ]; then
 
   [ -n "${SPEECH_ADMIN_PASSWORD:-}" ] \
     || fail "SPEECH_ADMIN_PASSWORD is not set. Add it to docker/.env or export it before running this script."
+  case "$SPEECH_ADMIN_PASSWORD" in
+    *[!A-Za-z0-9._-]*)
+      fail "SPEECH_ADMIN_PASSWORD contains characters outside [A-Za-z0-9._-]. Use: openssl rand -hex 16" ;;
+  esac
+  case "$ADMIN_USER" in
+    *[!A-Za-z0-9._-]*)
+      fail "SPEECH_ADMIN_USERNAME contains characters outside [A-Za-z0-9._-]." ;;
+  esac
   [ -n "${SPEECH_ADMIN_JWT_SECRET:-}" ] \
     || fail "SPEECH_ADMIN_JWT_SECRET is not set. Generate with: openssl rand -hex 32"
   [ -n "${MYSQL_ROOT_PASSWORD:-}" ] \
@@ -137,8 +145,12 @@ fi
 if [ "$FROM_STEP" -le 1 ]; then
   log 1 "Start speech services"
   "${DC[@]}" --profile speech up -d
+  # Recreate nginx so it picks up the /speech-admin/ route from the updated
+  # template — Compose does not recreate a running container just because a
+  # bind-mounted file changed.
+  "${DC[@]}" up -d --force-recreate --no-deps nginx
   persist_profile "speech"
-  ok "speech services started; COMPOSE_PROFILES updated in .env"
+  ok "speech services started; nginx recreated; COMPOSE_PROFILES updated in .env"
 fi
 
 # ---------------------------------------------------------------------------
@@ -147,16 +159,21 @@ fi
 if [ "$FROM_STEP" -le 2 ]; then
   log 2 "Wait for octo-speech-admin to be reachable via nginx"
   RETRIES=30
-  until [ "$(curl -s -o /dev/null -w '%{http_code}' \
+  # Accept only HTTP codes that prove the login endpoint itself handled the
+  # request (400 bad-request, 401 unauthorized, 422 validation error).
+  # Intermediate failures (000 no-connection, 404 stale nginx, 502/503 proxy
+  # errors) continue retrying so a normal startup race resolves on its own.
+  until HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
       -X POST "${BASE_URL}/api/login" \
       -H "Content-Type: application/json" \
-      -d '{}' 2>/dev/null)" != "000" ]; do
+      -d '{}' 2>/dev/null)" \
+    && case "$HTTP_CODE" in 400|401|422) true ;; *) false ;; esac; do
     RETRIES=$((RETRIES - 1))
-    [ "$RETRIES" -le 0 ] && fail "octo-speech-admin did not become reachable in time (${BASE_URL})"
-    info "waiting for admin console... ($RETRIES attempts left)"
+    [ "$RETRIES" -le 0 ] && fail "octo-speech-admin did not become reachable in time (${BASE_URL}, last HTTP $HTTP_CODE)"
+    info "waiting for admin console... ($RETRIES attempts left, HTTP $HTTP_CODE)"
     sleep 5
   done
-  ok "octo-speech-admin is reachable"
+  ok "octo-speech-admin is reachable (HTTP $HTTP_CODE)"
 fi
 
 # ---------------------------------------------------------------------------

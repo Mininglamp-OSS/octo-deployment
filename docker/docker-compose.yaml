@@ -1119,7 +1119,7 @@ services:
       VOICE_TOTAL_TIMEOUT:   "90"
       VOICE_MAX_DURATION:    "60"
       VOICE_MAX_FILE_SIZE:   "3145728"
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-UTC}
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8780' || exit 1"]
       interval: 30s
@@ -1145,7 +1145,7 @@ services:
       ADMIN_PASSWORD:      ${SPEECH_ADMIN_PASSWORD:-}
       ADMIN_JWT_SECRET:    ${SPEECH_ADMIN_JWT_SECRET:-}
       ADMIN_SECURE_COOKIE: "false"
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-UTC}
     ports:
       - "${OCTO_SPEECH_ADMIN_BIND:-127.0.0.1}:${OCTO_SPEECH_ADMIN_PORT:-28088}:8781"
     healthcheck:
