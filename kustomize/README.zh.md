@@ -57,7 +57,7 @@ kustomize/
 overlay，**默认关闭**：它故意**不**被 `base` 或任何 overlay 引用，所以
 `kubectl apply -k base|overlays/dev|overlays/prod` 渲染**零**个搜索资源。需显式
 opt-in：`kubectl apply -k kustomize/search`，详见
-[`kustomize/search/README.md`](./search/README.md)。这与其他部署入口的可选搜索
+[`kustomize/search/README.zh.md`](./search/README.zh.md)。这与其他部署入口的可选搜索
 开关一致（docker `--search`、helm `search.enabled`）。
 
 ## 待补
