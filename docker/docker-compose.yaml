@@ -194,6 +194,7 @@ services:
       OCTO_MATTER_DB_PASSWORD: ${OCTO_MATTER_DB_PASSWORD:-matter}
       OCTO_SUMMARY_DB_PASSWORD: ${OCTO_SUMMARY_DB_PASSWORD:-summary}
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
+      SPEECH_DB_PASSWORD: ${SPEECH_DB_PASSWORD:-}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
@@ -745,6 +746,10 @@ services:
       # Leaving it UNSET would make octo-server assume the pre-switch default
       # (ES on) and hammer a non-existent OpenSearch on the first search call.
       OCTO_SEARCH_BACKEND: ${OCTO_SEARCH_BACKEND:-disabled}
+      # octo-speech voice transcription wiring. Empty by default so a non-speech
+      # deployment boots cleanly without these vars set.
+      SPEECH_SERVICE_URL: ${SPEECH_SERVICE_URL:-}
+      SPEECH_API_KEY:     ${SPEECH_API_KEY:-}
       # Where the reader finds OpenSearch + which read alias it queries. Only
       # consulted when OCTO_SEARCH_BACKEND=es; harmless (unread) when disabled.
       # The reader queries the ALIAS, never the physical index — the alias is
@@ -1079,6 +1084,78 @@ services:
       # window does not wedge the worker into `(unhealthy)` while the
       # mysql init script is still finishing.
       start_period: 30s
+
+  # ===========================================================================
+  # Speech infrastructure (voice transcription) — STRICTLY ADDITIVE
+  # ===========================================================================
+  # octo-speech (transcription API) + octo-speech-admin (API-key console).
+  # Both are gated behind `profiles: ["speech"]` — a vanilla `docker compose
+  # up -d` starts neither. Opt in with `COMPOSE_PROFILES=speech` (combine
+  # with other profiles: `COMPOSE_PROFILES=summary,speech`).
+  #
+  # ISOLATION GUARANTEES:
+  #   - No core service definition is touched beyond two optional env vars on
+  #     octo-server (SPEECH_SERVICE_URL / SPEECH_API_KEY), both empty-default.
+  #   - No new REQUIRED env var: every var below has a `:-` default or is
+  #     gated by the profile, so a non-speech deployment never fails preflight.
+  #   - Reuses the existing octo-net network and the existing MySQL instance
+  #     (octo_speech database is created by scripts/init-extra-dbs.sh).
+  # ---------------------------------------------------------------------------
+  octo-speech:
+    image: ${OCTO_SPEECH_IMAGE:-mininglamposs/octo-speech:latest}
+    restart: unless-stopped
+    profiles: ["speech"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPEECH_DB_DSN:         "speech:${SPEECH_DB_PASSWORD:-}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      SPEECH_SERVICE_PORT:   "8780"
+      VOICE_ENGINE:          ${VOICE_ENGINE:-qwen}
+      VOICE_LITELLM_URL:     ${VOICE_LITELLM_URL:-}
+      VOICE_QWEN_KEY:        ${VOICE_QWEN_KEY:-}
+      VOICE_QWEN_MODELS:     ${VOICE_QWEN_MODELS:-qwen3.5-omni-plus}
+      VOICE_LITELLM_TIMEOUT: "60"
+      VOICE_TOTAL_TIMEOUT:   "90"
+      VOICE_MAX_DURATION:    "60"
+      VOICE_MAX_FILE_SIZE:   "3145728"
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8780' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - octo-net
+
+  octo-speech-admin:
+    image: ${OCTO_SPEECH_ADMIN_IMAGE:-mininglamposs/octo-speech-admin:latest}
+    restart: unless-stopped
+    profiles: ["speech"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      octo-speech:
+        condition: service_healthy
+    environment:
+      SPEECH_DB_DSN:       "speech:${SPEECH_DB_PASSWORD:-}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
+      ADMIN_PORT:          "8781"
+      ADMIN_USERNAME:      ${SPEECH_ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD:      ${SPEECH_ADMIN_PASSWORD:-}
+      ADMIN_JWT_SECRET:    ${SPEECH_ADMIN_JWT_SECRET:-}
+      ADMIN_SECURE_COOKIE: "false"
+      TZ: Asia/Shanghai
+    ports:
+      - "${OCTO_SPEECH_ADMIN_BIND:-127.0.0.1}:${OCTO_SPEECH_ADMIN_PORT:-28088}:8781"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8781' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - octo-net
 
   # ===========================================================================
   # Search infrastructure (message-search pipeline) — STRICTLY ADDITIVE

@@ -40,6 +40,7 @@ set -euo pipefail
 : "${OCTO_MATTER_DB_PASSWORD:=matter}"
 : "${OCTO_SUMMARY_DB_PASSWORD:=summary}"
 : "${OCTO_SUMMARY_READER_PASSWORD:=summary_reader}"
+: "${SPEECH_DB_PASSWORD:=}"
 : "${MYSQL_DATABASE:=octo}"
 
 validate_password() {
@@ -142,6 +143,7 @@ MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
 -- Schemas ---------------------------------------------------------------------
 CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 
 -- Service-scoped read-write accounts -----------------------------------------
 -- CREATE USER IF NOT EXISTS leaves an existing user untouched; the matching
@@ -166,5 +168,19 @@ GRANT ALL PRIVILEGES ON octo_summary.*     TO 'summary'@'%';
 GRANT SELECT         ON \`${MYSQL_DATABASE}\`.* TO 'summary_reader'@'%';
 FLUSH PRIVILEGES;
 SQL
+
+# If SPEECH_DB_PASSWORD is set, provision the scoped speech DB user.
+# The main SQL block above already created octo_speech; this separate
+# step is conditional so it is safe to skip on a non-speech deployment.
+if [ -n "${SPEECH_DB_PASSWORD:-}" ]; then
+  validate_password SPEECH_DB_PASSWORD "$SPEECH_DB_PASSWORD"
+  MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
+CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+ALTER USER IF EXISTS      'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON octo_speech.* TO 'speech'@'%';
+FLUSH PRIVILEGES;
+SQL
+  echo "[init-extra-dbs] provisioned speech DB user"
+fi
 
 echo "[init-extra-dbs] created octo_matter + octo_summary + service users (scoped to \`${MYSQL_DATABASE}\`)"
