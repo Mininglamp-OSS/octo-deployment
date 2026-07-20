@@ -1112,6 +1112,7 @@ services:
       SPEECH_DB_DSN:         "speech:${SPEECH_DB_PASSWORD:-}@tcp(mysql:3306)/octo_speech?parseTime=true&loc=Asia%2FShanghai"
       SPEECH_SERVICE_PORT:   "8780"
       VOICE_ENGINE:          ${VOICE_ENGINE:-qwen}
+      VOICE_QWEN_URL:        ${VOICE_QWEN_URL:-}
       VOICE_LITELLM_URL:     ${VOICE_LITELLM_URL:-}
       VOICE_QWEN_KEY:        ${VOICE_QWEN_KEY:-}
       VOICE_QWEN_MODELS:     ${VOICE_QWEN_MODELS:-qwen3.5-omni-plus}

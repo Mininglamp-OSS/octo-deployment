@@ -183,4 +183,4 @@ SQL
   echo "[init-extra-dbs] provisioned speech DB user"
 fi
 
-echo "[init-extra-dbs] created octo_matter + octo_summary + service users (scoped to \`${MYSQL_DATABASE}\`)"
+echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + service users (scoped to \`${MYSQL_DATABASE}\`)"
