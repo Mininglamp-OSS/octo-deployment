@@ -272,6 +272,21 @@ server {
         proxy_set_header   X-Forwarded-Proto $scheme;
     }
 
+    location /speech-admin/ {
+        # octo-speech-admin lives in `profiles: [speech]` — variable proxy_pass
+        # defers DNS resolution to request time so nginx starts cleanly even
+        # when the container is absent (returns 502 instead of emerg crash).
+        limit_req zone=octo_api burst=20 nodelay;
+        set $upstream_speech_admin octo-speech-admin;
+        rewrite ^/speech-admin/(.*) /$1 break;
+        proxy_pass         http://$upstream_speech_admin:8781;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
     location = /_octo_up {
         default_type text/html;
         return 200 '<!doctype html>
@@ -285,6 +300,7 @@ server {
 <li><a href="/api/v1/health">REST · <code>/api/v1/health</code></a></li>
 <li><a href="/matter/health">Matter · <code>/matter/health</code></a></li>
 <li><a href="/summary/health">Smart-summary · <code>/summary/health</code></a></li>
+<li><a href="/speech-admin/">Speech Admin</a></li>
 </ul>
 <p>MinIO console is loopback-only (port 29001 on the host). SSH-forward
 to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
@@ -470,6 +486,18 @@ to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
 #         set $upstream_summary summary-api;
 #         rewrite ^/summary/(.*) /$1 break;
 #         proxy_pass         http://$upstream_summary:8080;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /speech-admin/ {
+#         limit_req zone=octo_api burst=20 nodelay;
+#         set $upstream_speech_admin octo-speech-admin;
+#         rewrite ^/speech-admin/(.*) /$1 break;
+#         proxy_pass         http://$upstream_speech_admin:8781;
 #         proxy_http_version 1.1;
 #         proxy_set_header   Host              $host;
 #         proxy_set_header   X-Real-IP         $remote_addr;
