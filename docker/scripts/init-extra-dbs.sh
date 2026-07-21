@@ -41,6 +41,7 @@ set -euo pipefail
 : "${OCTO_SUMMARY_DB_PASSWORD:=summary}"
 : "${OCTO_SUMMARY_READER_PASSWORD:=summary_reader}"
 : "${SPEECH_DB_PASSWORD:=}"
+: "${OCTO_DOCS_DB_PASSWORD:=}"
 : "${MYSQL_DATABASE:=octo}"
 
 validate_password() {
@@ -144,6 +145,7 @@ MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
 CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS octo_docs    CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 
 -- Service-scoped read-write accounts -----------------------------------------
 -- CREATE USER IF NOT EXISTS leaves an existing user untouched; the matching
@@ -183,4 +185,18 @@ SQL
   echo "[init-extra-dbs] provisioned speech DB user"
 fi
 
-echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + service users (scoped to \`${MYSQL_DATABASE}\`)"
+# If OCTO_DOCS_DB_PASSWORD is set, provision the scoped docs DB user.
+# The main SQL block above already created octo_docs; this separate
+# step is conditional so it is safe to skip on a non-docs deployment.
+if [ -n "${OCTO_DOCS_DB_PASSWORD:-}" ]; then
+  validate_password OCTO_DOCS_DB_PASSWORD "$OCTO_DOCS_DB_PASSWORD"
+  MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -u root <<SQL
+CREATE USER IF NOT EXISTS 'docs'@'%' IDENTIFIED BY '${OCTO_DOCS_DB_PASSWORD}';
+ALTER USER IF EXISTS      'docs'@'%' IDENTIFIED BY '${OCTO_DOCS_DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON octo_docs.* TO 'docs'@'%';
+FLUSH PRIVILEGES;
+SQL
+  echo "[init-extra-dbs] provisioned docs DB user"
+fi
+
+echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + octo_docs + service users (scoped to \`${MYSQL_DATABASE}\`)"

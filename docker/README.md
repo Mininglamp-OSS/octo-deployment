@@ -1228,6 +1228,108 @@ See `.env.example` for details.
 
 ---
 
+## Docs profile (collaborative documents)
+
+The collaborative document backend — `octo-docs-backend` (Hocuspocus + Yjs
+real-time sync) — is **opt-in** behind the Docker Compose `docs` profile:
+
+- A default `docker compose up -d` starts **zero** docs services.
+- Every docs variable in `.env` has an empty default, so a non-docs deployment
+  never fails preflight on a missing docs variable.
+- nginx proxies both REST (`/docs-api/` → port 3000) and WebSocket
+  (`/docs-ws/` → port 1234) — no extra host port is required.
+
+### Prerequisites
+
+Before adding `docs` to `COMPOSE_PROFILES`, set the four required secrets in
+`docker/.env`:
+
+| Variable | Purpose | Generate with |
+|---|---|---|
+| `OCTO_DOCS_DB_PASSWORD` | MySQL scoped user for `octo_docs` | `openssl rand -hex 16` |
+| `OCTO_DOCS_COLLAB_SECRET` | JWT signing secret for Hocuspocus collab tokens (≥32 chars) | `openssl rand -hex 32` |
+| `OCTO_DOCS_ATTACHMENT_SECRET` | HMAC signing secret for attachment presigned URLs (≥32 chars) | `openssl rand -hex 32` |
+| `OCTO_DOCS_COLLAB_WS_URL` | Browser-reachable WebSocket URL, e.g. `ws://10.201.0.101:28080/docs-ws/` | set manually |
+
+Also set `OCTO_DOCS_WEB_ORIGIN`, `OCTO_DOCS_S3_ENDPOINT`, and
+`OCTO_DOCS_CORS_ORIGINS` to match your deployment URL. See `.env.example` for
+details on each.
+
+### Bring the docs profile up
+
+```bash
+cd docker
+# Add "docs" to the existing COMPOSE_PROFILES (guard against double-append)
+existing="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2-)"
+if ! echo "$existing" | grep -qw "docs"; then
+  sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+fi
+
+docker compose --profile docs up -d octo-docs-backend
+docker compose up -d --force-recreate nginx
+```
+
+### Database and MinIO setup
+
+`init-extra-dbs.sh` runs only on the **first** MySQL volume init, so on a
+fresh deployment `octo_docs` and the `docs` user are created automatically.
+
+**On an existing cluster** (the common opt-in-later path) you must create them
+manually against the live MySQL container. Set `OCTO_DOCS_DB_PASSWORD` in
+`.env` first, then run:
+
+```bash
+DOCS_PASS="$(grep -E '^OCTO_DOCS_DB_PASSWORD=' docker/.env | cut -d= -f2-)"
+docker exec -i octo-mysql-1 \
+  mysql -uroot -p"$(grep -E '^MYSQL_ROOT_PASSWORD=' docker/.env | cut -d= -f2-)" <<SQL
+CREATE DATABASE IF NOT EXISTS octo_docs CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS 'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+ALTER USER IF EXISTS      'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+GRANT ALL PRIVILEGES ON octo_docs.* TO 'docs'@'%';
+FLUSH PRIVILEGES;
+SQL
+```
+
+`octo-docs-backend` runs its own schema migrations on boot — no manual SQL
+import is needed beyond the above.
+
+The `octo-docs-attachments` MinIO bucket is created automatically by
+`minio-init` when `OCTO_DOCS_DB_PASSWORD` is non-empty. If `minio-init`
+already ran before you added docs, re-run it:
+
+```bash
+docker compose up --force-recreate minio-init
+```
+
+### Enable the docs feature flag in octo-server
+
+The docs module is gated by a `system_setting` row. Insert it once after
+`octo-server` is running:
+
+```bash
+docker exec -i octo-mysql-1 \
+  mysql -uroot -p"$(grep MYSQL_ROOT_PASSWORD docker/.env | cut -d= -f2-)" octo <<'SQL'
+INSERT INTO system_setting (category, key_name, value, value_type, description)
+VALUES ('docs', 'enabled', '1', 'bool', 'Enable docs module in octo-web')
+ON DUPLICATE KEY UPDATE value = '1';
+SQL
+
+docker compose restart octo-server
+```
+
+### Verify
+
+```bash
+# REST health
+curl http://127.0.0.1:28080/docs-api/healthz
+# → {"ok":true}
+
+# Service status
+docker compose ps octo-docs-backend
+```
+
+---
+
 ## Search profile (message-search pipeline)
 
 The message-search pipeline — Kafka + OpenSearch (with the `analysis-ik`

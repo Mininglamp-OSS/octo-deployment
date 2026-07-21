@@ -272,6 +272,41 @@ server {
         proxy_set_header   X-Forwarded-Proto $scheme;
     }
 
+    location /docs-api/ {
+        # octo-docs-backend REST API lives in `profiles: [docs]` — variable
+        # proxy_pass defers DNS resolution so nginx starts cleanly when the
+        # container is absent (returns 502 instead of emerg crash).
+        limit_req zone=octo_api burst=20 nodelay;
+        set $upstream_docs octo-docs-backend;
+        rewrite ^/docs-api/(.*) /$1 break;
+        proxy_pass         http://$upstream_docs:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+
+    location /docs-ws/ {
+        # Hocuspocus WebSocket relay — upgrade semantics must be preserved.
+        # Variable proxy_pass + Docker DNS defers resolution so nginx starts
+        # cleanly when the profile is off. No rate-limiting on WS: the
+        # handshake limit_req on /docs-api/collab-token already bounds new
+        # sessions; persistent WebSocket connections don't produce new requests.
+        set $upstream_docs_ws octo-docs-backend;
+        rewrite ^/docs-ws/(.*) /$1 break;
+        proxy_pass         http://$upstream_docs_ws:1234;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+    }
+
     location = /_octo_up {
         default_type text/html;
         return 200 '<!doctype html>
@@ -285,6 +320,7 @@ server {
 <li><a href="/api/v1/health">REST · <code>/api/v1/health</code></a></li>
 <li><a href="/matter/health">Matter · <code>/matter/health</code></a></li>
 <li><a href="/summary/health">Smart-summary · <code>/summary/health</code></a></li>
+<li><a href="/docs-api/healthz">Docs · <code>/docs-api/healthz</code></a></li>
 </ul>
 <p>MinIO console is loopback-only (port 29001 on the host). SSH-forward
 to reach it (<code>ssh -L 9001:127.0.0.1:29001 user@host</code>).</p>
@@ -477,6 +513,33 @@ to reach it (<code>ssh -L 28088:127.0.0.1:28088 user@host</code>).</p>
 #         proxy_set_header   X-Real-IP         $remote_addr;
 #         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
 #         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /docs-api/ {
+#         limit_req zone=octo_api burst=20 nodelay;
+#         set $upstream_docs octo-docs-backend;
+#         rewrite ^/docs-api/(.*) /$1 break;
+#         proxy_pass         http://$upstream_docs:3000;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /docs-ws/ {
+#         set $upstream_docs_ws octo-docs-backend;
+#         rewrite ^/docs-ws/(.*) /$1 break;
+#         proxy_pass         http://$upstream_docs_ws:1234;
+#         proxy_http_version 1.1;
+#         proxy_set_header   Upgrade    $http_upgrade;
+#         proxy_set_header   Connection "upgrade";
+#         proxy_set_header   Host              $host;
+#         proxy_set_header   X-Real-IP         $remote_addr;
+#         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header   X-Forwarded-Proto $scheme;
+#         proxy_read_timeout 86400s;
+#         proxy_send_timeout 86400s;
 #     }
 #
 #     location = /_octo_up {
