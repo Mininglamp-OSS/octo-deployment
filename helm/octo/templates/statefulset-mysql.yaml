@@ -82,6 +82,13 @@ spec:
                   name: {{ include "octo.secretName" . }}
                   key: SPEECH_DB_PASSWORD
             {{- end }}
+            {{- if .Values.fleet.enabled }}
+            - name: OCTO_FLEET_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: FLEET_DB_PASSWORD
+            {{- end }}
           readinessProbe:
             exec:
               command:

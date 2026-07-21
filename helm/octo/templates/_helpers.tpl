@@ -137,6 +137,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-speech-admin" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{- define "octo.fleet.fullname" -}}
+{{- printf "%s-fleet" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
 {{- define "octo.nginx.fullname" -}}
 {{- printf "%s-nginx" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
@@ -185,6 +189,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "octo.configMap.wukongim" -}}
 {{- printf "%s-wukongim-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "octo.configMap.fleet" -}}
+{{- printf "%s-fleet-config" (include "octo.fullname" .) | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{- define "octo.speech.pvc" -}}

@@ -72,6 +72,33 @@ spec:
         - name: wait-for-mysql
           image: {{ include "octo.image" (dict "repo" .Values.busybox.image.repository "tag" .Values.busybox.image.tag "ctx" .) }}
           command: ['sh', '-c', 'until nc -z {{ include "octo.mysql.host" . }} {{ include "octo.mysql.port" . }}; do echo waiting for mysql; sleep 2; done']
+        - name: init-speech-db
+          image: {{ include "octo.image" (dict "repo" .Values.mysql.image.repository "tag" .Values.mysql.image.tag "ctx" .) }}
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: MYSQL_ROOT_PASSWORD
+            - name: SPEECH_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "octo.secretName" . }}
+                  key: SPEECH_DB_PASSWORD
+          command:
+            - sh
+            - -c
+            - >
+              until mysql -h {{ include "octo.mysql.host" . }} -P {{ include "octo.mysql.port" . }} -u root -p"${MYSQL_ROOT_PASSWORD}" -e "SELECT 1" >/dev/null 2>&1; do
+                echo "waiting for mysql..."; sleep 2;
+              done;
+              echo "CREATE DATABASE IF NOT EXISTS octo_speech CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+              CREATE USER IF NOT EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+              ALTER USER IF EXISTS 'speech'@'%' IDENTIFIED BY '${SPEECH_DB_PASSWORD}';
+              GRANT ALL PRIVILEGES ON octo_speech.* TO 'speech'@'%';
+              FLUSH PRIVILEGES;" |
+              mysql -h {{ include "octo.mysql.host" . }} -P {{ include "octo.mysql.port" . }} -u root -p"${MYSQL_ROOT_PASSWORD}" &&
+              echo "speech database ready."
       containers:
         - name: octo-speech
           image: {{ include "octo.image" (dict "repo" .Values.speech.image.repository "tag" .Values.speech.image.tag "ctx" .) }}
