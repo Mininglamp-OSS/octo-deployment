@@ -892,9 +892,11 @@ Compose 的 `docs` profile **按需启用**：
 
 ```bash
 cd docker
-# 将 "docs" 并入已有的 COMPOSE_PROFILES（绝不要覆盖整行）
+# 将 "docs" 并入已有的 COMPOSE_PROFILES（防止重复追加）
 existing="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2-)"
-sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+if ! echo "$existing" | grep -qw "docs"; then
+  sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+fi
 
 docker compose --profile docs up -d octo-docs-backend
 docker compose up -d --force-recreate nginx
@@ -902,9 +904,23 @@ docker compose up -d --force-recreate nginx
 
 ### 数据库与 MinIO
 
-`octo_docs` schema 由 `init-extra-dbs.sh` 在 `mysql` 容器**首次启动时**自动创建
-（与 `octo_matter`、`octo_summary` 机制相同）。`OCTO_DOCS_DB_PASSWORD` 非空时自动
-创建 `docs` MySQL 用户。
+`init-extra-dbs.sh` 只在 MySQL volume **首次初始化**时运行，因此全新部署时
+`octo_docs` 和 `docs` 用户会自动创建。
+
+**在已运行的集群上**（大多数按需启用的场景）需要手动对在线 MySQL 执行。先在 `.env`
+中设好 `OCTO_DOCS_DB_PASSWORD`，然后运行：
+
+```bash
+DOCS_PASS="$(grep -E '^OCTO_DOCS_DB_PASSWORD=' docker/.env | cut -d= -f2-)"
+docker exec -i octo-mysql-1 \
+  mysql -uroot -p"$(grep -E '^MYSQL_ROOT_PASSWORD=' docker/.env | cut -d= -f2-)" <<SQL
+CREATE DATABASE IF NOT EXISTS octo_docs CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS 'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+ALTER USER IF EXISTS      'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+GRANT ALL PRIVILEGES ON octo_docs.* TO 'docs'@'%';
+FLUSH PRIVILEGES;
+SQL
+```
 
 `octo-docs-backend` 启动时会自行运行 schema migration——无需手动导入 SQL。
 

@@ -1259,9 +1259,11 @@ details on each.
 
 ```bash
 cd docker
-# Add "docs" to the existing COMPOSE_PROFILES (never overwrite the whole line)
+# Add "docs" to the existing COMPOSE_PROFILES (guard against double-append)
 existing="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2-)"
-sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+if ! echo "$existing" | grep -qw "docs"; then
+  sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+fi
 
 docker compose --profile docs up -d octo-docs-backend
 docker compose up -d --force-recreate nginx
@@ -1269,13 +1271,27 @@ docker compose up -d --force-recreate nginx
 
 ### Database and MinIO setup
 
-The `octo_docs` schema is created automatically by `init-extra-dbs.sh` the
-first time the `mysql` container starts (same mechanism as `octo_matter` and
-`octo_summary`). The `docs` MySQL user is provisioned when
-`OCTO_DOCS_DB_PASSWORD` is non-empty.
+`init-extra-dbs.sh` runs only on the **first** MySQL volume init, so on a
+fresh deployment `octo_docs` and the `docs` user are created automatically.
+
+**On an existing cluster** (the common opt-in-later path) you must create them
+manually against the live MySQL container. Set `OCTO_DOCS_DB_PASSWORD` in
+`.env` first, then run:
+
+```bash
+DOCS_PASS="$(grep -E '^OCTO_DOCS_DB_PASSWORD=' docker/.env | cut -d= -f2-)"
+docker exec -i octo-mysql-1 \
+  mysql -uroot -p"$(grep -E '^MYSQL_ROOT_PASSWORD=' docker/.env | cut -d= -f2-)" <<SQL
+CREATE DATABASE IF NOT EXISTS octo_docs CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS 'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+ALTER USER IF EXISTS      'docs'@'%' IDENTIFIED BY '${DOCS_PASS}';
+GRANT ALL PRIVILEGES ON octo_docs.* TO 'docs'@'%';
+FLUSH PRIVILEGES;
+SQL
+```
 
 `octo-docs-backend` runs its own schema migrations on boot — no manual SQL
-import is needed.
+import is needed beyond the above.
 
 The `octo-docs-attachments` MinIO bucket is created automatically by
 `minio-init` when `OCTO_DOCS_DB_PASSWORD` is non-empty. If `minio-init`

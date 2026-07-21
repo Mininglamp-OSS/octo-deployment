@@ -762,7 +762,7 @@ services:
       SPEECH_API_KEY:     ${SPEECH_API_KEY:-}
       # octo-docs-backend collaborative document wiring. Empty by default so a
       # non-docs deployment boots cleanly without these vars set.
-      DOCS_SERVICE_URL: ${DOCS_SERVICE_URL:-}
+      DOCS_SERVICE_URL: ${OCTO_DOCS_SERVICE_URL:-}
       DOCS_COLLAB_SECRET: ${OCTO_DOCS_COLLAB_SECRET:-}
       # Where the reader finds OpenSearch + which read alias it queries. Only
       # consulted when OCTO_SEARCH_BACKEND=es; harmless (unread) when disabled.
@@ -1191,7 +1191,7 @@ services:
   #
   # ISOLATION GUARANTEES:
   #   - No core service definition is touched beyond two optional env vars on
-  #     octo-server (DOCS_SERVICE_URL / DOCS_COLLAB_SECRET), both empty-default.
+  #     octo-server (OCTO_DOCS_SERVICE_URL / OCTO_DOCS_COLLAB_SECRET), both empty-default.
   #   - No new REQUIRED env var: every var below has a `:-` default or is
   #     gated by the profile, so a non-docs deployment never fails preflight.
   #   - Reuses the existing octo-net network, MySQL instance (octo_docs database
