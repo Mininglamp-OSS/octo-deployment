@@ -195,6 +195,7 @@ services:
       OCTO_SUMMARY_DB_PASSWORD: ${OCTO_SUMMARY_DB_PASSWORD:-summary}
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
       SPEECH_DB_PASSWORD: ${SPEECH_DB_PASSWORD:-}
+      OCTO_DOCS_DB_PASSWORD: ${OCTO_DOCS_DB_PASSWORD:-}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
@@ -343,6 +344,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
       OCTO_MINIO_APP_USER: ${OCTO_MINIO_APP_USER:-octo-app}
       OCTO_MINIO_APP_PASSWORD: ${OCTO_MINIO_APP_PASSWORD}
+      OCTO_DOCS_DB_PASSWORD: ${OCTO_DOCS_DB_PASSWORD:-}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -423,6 +425,14 @@ services:
         for b in file chat moment sticker report chatbg common download group avatar; do
           mc mb --ignore-existing "local/$$b" >/dev/null
         done
+
+        # Docs profile: create the attachment bucket when the docs DB password
+        # is set (i.e. the operator has opted in to the docs profile).
+        # The bucket is private — octo-docs-backend presigns all URLs.
+        if [ -n "$${OCTO_DOCS_DB_PASSWORD:-}" ]; then
+          mc mb --ignore-existing "local/octo-docs-attachments" >/dev/null
+          echo "[minio-init] created octo-docs-attachments bucket"
+        fi
 
         # OCTO IM semantics: chat/file/moment/sticker/chatbg/common/avatar
         # are content buckets shared among group members. Anonymous GET
@@ -750,6 +760,10 @@ services:
       # deployment boots cleanly without these vars set.
       SPEECH_SERVICE_URL: ${SPEECH_SERVICE_URL:-}
       SPEECH_API_KEY:     ${SPEECH_API_KEY:-}
+      # octo-docs-backend collaborative document wiring. Empty by default so a
+      # non-docs deployment boots cleanly without these vars set.
+      DOCS_SERVICE_URL: ${DOCS_SERVICE_URL:-}
+      DOCS_COLLAB_SECRET: ${OCTO_DOCS_COLLAB_SECRET:-}
       # Where the reader finds OpenSearch + which read alias it queries. Only
       # consulted when OCTO_SEARCH_BACKEND=es; harmless (unread) when disabled.
       # The reader queries the ALIAS, never the physical index — the alias is
@@ -1155,6 +1169,82 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8781/healthz || exit 1"]
       interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - octo-net
+
+  # ===========================================================================
+  # Docs infrastructure (collaborative document backend) — STRICTLY ADDITIVE
+  # ===========================================================================
+  # octo-docs-backend: Hocuspocus + Yjs real-time collaborative document sync.
+  # Gated behind `profiles: ["docs"]` — a vanilla `docker compose up -d` starts
+  # nothing. Opt in with `COMPOSE_PROFILES=docs` (combine with other profiles:
+  # `COMPOSE_PROFILES=summary,docs`).
+  #
+  # Two listeners in one process:
+  #   REST API   :3000  — docs CRUD, collab-token issuance, attachments
+  #   Hocuspocus :1234  — real-time Yjs WebSocket sync
+  # Both are reverse-proxied through nginx (/docs-api/ and /docs-ws/) so only
+  # the existing OCTO_HTTP_PORT stays open; no new host ports are required.
+  #
+  # ISOLATION GUARANTEES:
+  #   - No core service definition is touched beyond two optional env vars on
+  #     octo-server (DOCS_SERVICE_URL / DOCS_COLLAB_SECRET), both empty-default.
+  #   - No new REQUIRED env var: every var below has a `:-` default or is
+  #     gated by the profile, so a non-docs deployment never fails preflight.
+  #   - Reuses the existing octo-net network, MySQL instance (octo_docs database
+  #     created by init-extra-dbs.sh), and MinIO instance.
+  # ---------------------------------------------------------------------------
+  octo-docs-backend:
+    image: ${OCTO_DOCS_IMAGE:-hub2.intra.mlamp.cn/octo/octo-docs-backend:0.2.0}
+    restart: unless-stopped
+    profiles: ["docs"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      HTTP_PORT: "3000"
+      HOCUSPOCUS_PORT: "1234"
+      TRUST_PROXY: "1"
+      # MySQL
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_USER: docs
+      MYSQL_PASSWORD: ${OCTO_DOCS_DB_PASSWORD:-}
+      MYSQL_DATABASE: octo_docs
+      # Redis (reuse existing instance)
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PREFIX: octo-docs
+      # Collab token (short-lived JWT for Hocuspocus WS handshake)
+      COLLAB_TOKEN_SECRET: ${OCTO_DOCS_COLLAB_SECRET:-}
+      # Browser-reachable WS URL returned to clients. nginx proxies /docs-ws/ →
+      # :1234, so the public URL is ws:// (or wss://) on the same host+port as
+      # the REST API — no extra open port required.
+      COLLAB_TOKEN_PUBLIC_WS_URL: "${OCTO_DOCS_COLLAB_WS_URL:-}"
+      # Identity — delegate auth to octo-server
+      OCTO_IDENTITY_MODE: http
+      OCTO_SERVER_BASE_URL: http://octo-server:8090
+      OCTO_WEB_ORIGIN: "${OCTO_DOCS_WEB_ORIGIN:-}"
+      # Attachments via MinIO (s3 driver)
+      ATTACHMENT_DRIVER: s3
+      ATTACHMENT_BUCKET: octo-docs-attachments
+      ATTACHMENT_S3_ENDPOINT: "${OCTO_DOCS_S3_ENDPOINT:-}"
+      ATTACHMENT_S3_ACCESS_KEY: ${OCTO_MINIO_APP_USER:-octo-app}
+      ATTACHMENT_S3_SECRET_KEY: ${OCTO_MINIO_APP_PASSWORD:-}
+      ATTACHMENT_S3_FORCE_PATH_STYLE: "true"
+      ATTACHMENT_SIGNING_SECRET: ${OCTO_DOCS_ATTACHMENT_SECRET:-}
+      # CORS — allow requests from the web frontend
+      CORS_ALLOWED_ORIGINS: "${OCTO_DOCS_CORS_ORIGINS:-}"
+      TZ: ${TZ:-UTC}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/healthz || exit 1"]
+      interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s

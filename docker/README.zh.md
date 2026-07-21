@@ -864,6 +864,85 @@ scripts/speech-setup.sh --from 3   # 从步骤 3 恢复（0..5）
 
 ---
 
+## Docs profile（协同文档）
+
+协同文档后端 — `octo-docs-backend`（Hocuspocus + Yjs 实时同步）— 通过 Docker
+Compose 的 `docs` profile **按需启用**：
+
+- 默认 `docker compose up -d` **不会**启动任何文档服务。
+- 所有文档相关环境变量均有空默认值，非文档部署不会因缺少变量而 preflight 失败。
+- nginx 同时代理 REST（`/docs-api/` → port 3000）和 WebSocket（`/docs-ws/` →
+  port 1234）——无需额外主机端口。
+
+### 前置条件
+
+在将 `docs` 加入 `COMPOSE_PROFILES` 之前，先在 `docker/.env` 中设置四个必填密钥：
+
+| 变量 | 用途 | 生成方式 |
+|---|---|---|
+| `OCTO_DOCS_DB_PASSWORD` | `octo_docs` 数据库专属 MySQL 用户密码 | `openssl rand -hex 16` |
+| `OCTO_DOCS_COLLAB_SECRET` | Hocuspocus collab token 的 JWT 签名密钥（≥32 字符） | `openssl rand -hex 32` |
+| `OCTO_DOCS_ATTACHMENT_SECRET` | 附件预签名 URL 的 HMAC 签名密钥（≥32 字符） | `openssl rand -hex 32` |
+| `OCTO_DOCS_COLLAB_WS_URL` | 浏览器可访问的 WebSocket URL，例如 `ws://10.201.0.101:28080/docs-ws/` | 手动填写 |
+
+同时将 `OCTO_DOCS_WEB_ORIGIN`、`OCTO_DOCS_S3_ENDPOINT`、`OCTO_DOCS_CORS_ORIGINS`
+设置为与你的部署 URL 一致。详见 `.env.example`。
+
+### 启动 docs profile
+
+```bash
+cd docker
+# 将 "docs" 并入已有的 COMPOSE_PROFILES（绝不要覆盖整行）
+existing="$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2-)"
+sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=${existing:+$existing,}docs|" .env
+
+docker compose --profile docs up -d octo-docs-backend
+docker compose up -d --force-recreate nginx
+```
+
+### 数据库与 MinIO
+
+`octo_docs` schema 由 `init-extra-dbs.sh` 在 `mysql` 容器**首次启动时**自动创建
+（与 `octo_matter`、`octo_summary` 机制相同）。`OCTO_DOCS_DB_PASSWORD` 非空时自动
+创建 `docs` MySQL 用户。
+
+`octo-docs-backend` 启动时会自行运行 schema migration——无需手动导入 SQL。
+
+`octo-docs-attachments` MinIO bucket 由 `minio-init` 在 `OCTO_DOCS_DB_PASSWORD`
+非空时自动创建。若 `minio-init` 已在你添加 docs 之前运行过，重跑一次即可：
+
+```bash
+docker compose up --force-recreate minio-init
+```
+
+### 开启 octo-server 中的文档功能开关
+
+文档模块受 `system_setting` 表控制。`octo-server` 启动后执行一次：
+
+```bash
+docker exec -i octo-mysql-1 \
+  mysql -uroot -p"$(grep MYSQL_ROOT_PASSWORD docker/.env | cut -d= -f2-)" octo <<'SQL'
+INSERT INTO system_setting (category, key_name, value, value_type, description)
+VALUES ('docs', 'enabled', '1', 'bool', 'Enable docs module in octo-web')
+ON DUPLICATE KEY UPDATE value = '1';
+SQL
+
+docker compose restart octo-server
+```
+
+### 验证
+
+```bash
+# REST 健康检查
+curl http://127.0.0.1:28080/docs-api/healthz
+# → {"ok":true}
+
+# 服务状态
+docker compose ps octo-docs-backend
+```
+
+---
+
 ## Search profile（消息搜索流水线）
 
 消息搜索流水线——Kafka + OpenSearch（带 `analysis-ik` 中文分词器）+ `es-indexer` 消费者——通过 Docker Compose 的 `search` profile **按需开启（opt-in）**，和 smart-summary 的 `summary` profile 完全一样。不设 profile 时它完全惰性、零副作用：
