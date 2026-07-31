@@ -1,6 +1,6 @@
 # OCTO · Docker Compose 部署
 
-OCTO 全栈一键部署 —— server、admin console、web UI、matter、smart-summary、WuKongIM、MySQL、Redis、MinIO 以及前置 nginx 反向代理，全部由单个 `docker-compose.yaml` 串起来。
+OCTO 全栈一键部署 —— server、admin console、web UI、matter、smart-summary、marketplace、WuKongIM、MySQL、Redis、MinIO 以及前置 nginx 反向代理，全部由单个 `docker-compose.yaml` 串起来。
 
 本栈面向：
 
@@ -818,6 +818,14 @@ OCTO 在 `/ws` 上跑 WebSocket（WuKongIM 浏览器传输，聊天数据面）�
 > 层关注点；(2) 这样会把证书私钥放进一个生命周期绑定到应用发版的
 > 容器里。反向代理拆出来让应用层保持「无证书」，让证书生命周期待在
 > 它该待的地方。
+
+---
+
+### Marketplace（技能 / MCP / Bot 市场）
+
+marketplace 服务（`octo-marketplace`）默认启动，无需 opt-in profile。通过 nginx `/market/api/v1/*` 路径访问（无独立公网端口）。技能 ZIP 上传大小限制由服务侧 20 MiB（`MAX_UPLOAD_MB=20`）和 nginx 侧 25 MiB 共同控制。技能压缩包存储在 `marketplace` MinIO bucket 中，使用预签名 URL 访问（bucket **不**设公开读，无 `mc anonymous set download`）。彻底清理：`docker compose down -v` 会连同 marketplace 数据库和 MinIO 对象一起删除。
+
+> MCP/Bot 图标存储（`STORAGE_ICON_*`）在本 OOTB 栈中有意未配置；图标上传功能在配置图标 bucket 前不可用。技能上传（#170 的核心诉求）完整可用。
 
 ---
 

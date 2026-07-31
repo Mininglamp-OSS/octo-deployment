@@ -854,8 +854,6 @@ services:
     depends_on:
       octo-server:
         condition: service_healthy
-      marketplace:
-        condition: service_healthy
     environment:
       OCTO_DOMAIN: ${OCTO_DOMAIN:-localhost}
     ports:
@@ -988,6 +986,43 @@ services:
       start_period: 10s
 
   # ---------------------------------------------------------------------------
+  # Marketplace DB provisioning (runs every boot — idempotent)
+  # init-extra-dbs.sh only fires on first MySQL volume init. Existing-cluster
+  # upgrades that add marketplace for the first time need a re-provision path
+  # so marketplace can authenticate after `docker compose up -d` on a
+  # pre-existing mysql-data volume. CREATE/ALTER/GRANT are IF NOT EXISTS /
+  # idempotent; the service exits 0 once done so marketplace can gate on it.
+  # ---------------------------------------------------------------------------
+  market-preflight:
+    image: mysql:8.0
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        # Wait for MySQL to actually accept root logins (condition: service_healthy
+        # gates the mysqladmin ping, but the SQL endpoint can lag a moment).
+        until MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -h mysql -u root -e "SELECT 1" >/dev/null 2>&1; do
+          sleep 1
+        done
+        MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -h mysql -u root <<SQL
+        CREATE DATABASE IF NOT EXISTS octo_marketplace CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+        CREATE USER IF NOT EXISTS 'marketplace'@'%' IDENTIFIED BY '$${OCTO_MARKETPLACE_DB_PASSWORD}';
+        ALTER USER IF EXISTS      'marketplace'@'%' IDENTIFIED BY '$${OCTO_MARKETPLACE_DB_PASSWORD}';
+        GRANT ALL PRIVILEGES ON octo_marketplace.* TO 'marketplace'@'%';
+        FLUSH PRIVILEGES;
+        SQL
+        echo "[market-preflight] octo_marketplace DB + marketplace user provisioned"
+    networks:
+      - octo-net
+
+  # ---------------------------------------------------------------------------
   # Marketplace service (skill / bot / MCP catalog)
   # ---------------------------------------------------------------------------
   marketplace:
@@ -996,6 +1031,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      market-preflight:
+        condition: service_completed_successfully
       redis:
         condition: service_started
       minio-init:
