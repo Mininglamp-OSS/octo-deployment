@@ -295,7 +295,7 @@ docker compose ps                # 所有服务应到 (healthy)
 
 ## 必填环境变量
 
-栈起来之前**必须**改下面这些。默认值是设计成 fail-fast 的 placeholder：`OCTO_MASTER_KEY` 比 octo-server 的长度校验少一字节，`MINIO_ROOT_PASSWORD` 7 字符（MinIO 要求 ≥8）让 `minio` 容器拒绝启动，`minio-init` 一次性服务会拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO root / app 凭据，`preflight` 一次性服务对 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 做同样校验，`init-extra-dbs.sh` 在 `MYSQL_ROOT_PASSWORD` 还是 `CHANGE_ME_*` / `CHG_ME*` placeholder、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、`OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` / `OCTO_SUMMARY_READER_PASSWORD` 仍然是字面默认（`matter` / `summary` / `summary_reader`）时全部拒绝。这些 check 加起来意味着——OOTB 栈不可能在 placeholder 凭据没换的情况下到达 `(healthy)`。
+栈起来之前**必须**改下面这些。默认值是设计成 fail-fast 的 placeholder：`OCTO_MASTER_KEY` 比 octo-server 的长度校验少一字节，`MINIO_ROOT_PASSWORD` 7 字符（MinIO 要求 ≥8）让 `minio` 容器拒绝启动，`minio-init` 一次性服务会拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO root / app 凭据，`preflight` 一次性服务对 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 做同样校验，`init-extra-dbs.sh` 在 `MYSQL_ROOT_PASSWORD` 还是 `CHANGE_ME_*` / `CHG_ME*` placeholder、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、`OCTO_MATTER_DB_PASSWORD` / `OCTO_SUMMARY_DB_PASSWORD` / `OCTO_SUMMARY_READER_PASSWORD` / `OCTO_MARKETPLACE_DB_PASSWORD` 仍然是字面默认（`matter` / `summary` / `summary_reader` / `marketplace`）时全部拒绝。这些 check 加起来意味着——OOTB 栈不可能在 placeholder 凭据没换的情况下到达 `(healthy)`。
 
 | 变量 | 含义 | 生成方式 |
 | --- | --- | --- |
@@ -305,6 +305,7 @@ docker compose ps                # 所有服务应到 (healthy)
 | `OCTO_MATTER_DB_PASSWORD` | MySQL service account `matter`（在 `octo_matter` 上有完整 DML）。`init-extra-dbs.sh` 拒绝字面 `matter`。 | `openssl rand -hex 16` |
 | `OCTO_SUMMARY_DB_PASSWORD` | MySQL service account `summary`（在 `octo_summary` 上有完整 DML）。`init-extra-dbs.sh` 拒绝字面 `summary`。 | `openssl rand -hex 16` |
 | `OCTO_SUMMARY_READER_PASSWORD` | MySQL service account `summary_reader`（对 OCTO IM 库有 `SELECT`，见 `init-extra-dbs.sh` 里的 `GRANT` 块）。`init-extra-dbs.sh` 拒绝字面 `summary_reader`。 | `openssl rand -hex 16` |
+| `OCTO_MARKETPLACE_DB_PASSWORD` | MySQL service account `marketplace`（在 `octo_marketplace` 上有完整 DML）。`init-extra-dbs.sh` 拒绝字面 `marketplace`。`setup.sh` 在全新安装时自动生成。 | `openssl rand -hex 16` |
 | `OCTO_MASTER_KEY` | 32 字节 server master key | `openssl rand -hex 16` |
 | `OCTO_NOTIFY_INTERNAL_TOKEN` | octo-server ↔ matter / smart-summary 之间共享的 HMAC secret。`preflight` 一次性服务拒绝任何 `CHANGE_ME_*` / `CHG_ME*` 大小写形式。 | `openssl rand -hex 32` |
 | `OCTO_WUKONGIM_MANAGER_TOKEN` | WuKongIM admin token。WuKongIM 侧通过 `WK_MANAGERTOKEN`（Viper 自动绑到 YAML `managerToken`），octo-server 侧通过 `TS_WUKONGIM_MANAGERTOKEN`。空值会让 WuKongIM manager API 在无鉴权前提下可达**且可用**——`preflight` 同样拒绝 `CHANGE_ME_*` / `CHG_ME*`。 | `openssl rand -hex 32` |
@@ -314,7 +315,7 @@ docker compose ps                # 所有服务应到 (healthy)
 
 ### Backing-service host bindings
 
-`OCTO_MYSQL_BIND`、`OCTO_REDIS_BIND`、`OCTO_MINIO_API_BIND`、`OCTO_MINIO_CONSOLE_BIND` 默认 `127.0.0.1`。也就是说 MySQL（`23306`）、Redis（`26379`）、MinIO API（`29000`）、MinIO console（`29001`）**只能从主机 loopback 访问**。nginx 代理的路径（`/`、`/api/`、`/v1/`、`/admin/`、`/matter/`、`/summary/`、`/ws`，以及 bucket 路径 `/file|chat|moment|sticker|report|chatbg|common|download|group|avatar`）保持公开——注意 `/minio-console/` **不**在公开列表（见 "Network surface"）。
+`OCTO_MYSQL_BIND`、`OCTO_REDIS_BIND`、`OCTO_MINIO_API_BIND`、`OCTO_MINIO_CONSOLE_BIND` 默认 `127.0.0.1`。也就是说 MySQL（`23306`）、Redis（`26379`）、MinIO API（`29000`）、MinIO console（`29001`）**只能从主机 loopback 访问**。nginx 代理的路径（`/`、`/api/`、`/v1/`、`/admin/`、`/matter/`、`/summary/`、`/market/`、`/ws`，以及 bucket 路径 `/file|chat|moment|sticker|report|chatbg|common|download|group|avatar|marketplace`）保持公开——注意 `/minio-console/` **不**在公开列表（见 "Network surface"）。
 
 同样的 loopback 默认也适用于 `octo-server`（`OCTO_SERVER_BIND`）、`octo-matter`（`OCTO_MATTER_BIND`）、`smart-summary API`（`OCTO_SUMMARY_API_BIND`）和 WuKongIM monitor 端口（`OCTO_WK_MONITOR_BIND`）。前三个跳过 nginx vhost 对 `/api/`、`/v1/`、`/matter/`、`/summary/` 应用的 `octo_api` / `octo_auth` 限流，保留 loopback-only 避免操作员调试端口变成无限流生产路径。WuKongIM monitor 是 admin 表面，不是 chat 传输。
 
@@ -823,7 +824,15 @@ OCTO 在 `/ws` 上跑 WebSocket（WuKongIM 浏览器传输，聊天数据面）�
 
 ### Marketplace（技能 / MCP / Bot 市场）
 
-marketplace 服务（`octo-marketplace`）默认启动，无需 opt-in profile。通过 nginx `/market/api/v1/*` 路径访问（无独立公网端口）。技能 ZIP 上传大小限制由服务侧 20 MiB（`MAX_UPLOAD_MB=20`）和 nginx 侧 25 MiB 共同控制。技能压缩包存储在 `marketplace` MinIO bucket 中，使用预签名 URL 访问（bucket **不**设公开读，无 `mc anonymous set download`）。彻底清理：`docker compose down -v` 会连同 marketplace 数据库和 MinIO 对象一起删除。
+marketplace 服务（`octo-marketplace`）默认启动，无需 opt-in profile。通过 nginx `/market/api/v1/*` 路径访问（无独立公网端口；`/market/healthz` 也通过 nginx 代理用于健康检查）。技能 ZIP 上传大小限制由服务侧 20 MiB（`MAX_UPLOAD_MB=20`）和 nginx 侧 25 MiB 共同控制。技能压缩包存储在 `marketplace` MinIO bucket 中，使用预签名 URL 访问（bucket **不**设公开读，无 `mc anonymous set download`）。彻底清理：`docker compose down -v` 会连同 marketplace 数据库和 MinIO 对象一起删除。
+
+**已有集群升级：** `setup.sh` 仅在全新安装时自动生成 `OCTO_MARKETPLACE_DB_PASSWORD`。如果 `docker/.env` 是在此服务合入之前创建的，需先手动追加变量，再执行 `docker compose up -d`：
+
+```bash
+echo "OCTO_MARKETPLACE_DB_PASSWORD=$(openssl rand -hex 16)" >> docker/.env
+```
+
+若跳过此步骤，`market-preflight` 会以明确的 FATAL 中止，`marketplace` 不会启动。**不要**通过 `setup.sh --force` 来补变量——该命令会重新生成所有 secret，可能导致已有 volume 无法连接。
 
 > MCP/Bot 图标存储（`STORAGE_ICON_*`）在本 OOTB 栈中有意未配置；图标上传功能在配置图标 bucket 前不可用。技能上传（#170 的核心诉求）完整可用。
 
@@ -1337,7 +1346,7 @@ SQL
 
 把栈对外暴露之前：
 
-- 把 `.env` 里所有 `CHANGE_ME_*` / `CHG_ME*` 都轮换。`OCTO_MASTER_KEY` 故意短一字节让 octo-server 长度校验拒绝；`MINIO_ROOT_PASSWORD` 7 字符触发 MinIO ≥8 校验；`minio-init` 独立拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO 凭据对；`preflight` 拒绝 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 的 `CHANGE_ME_*` / `CHG_ME*` 大小写形式；`init-extra-dbs.sh` 在第一次 MySQL volume init 时拒绝 `MYSQL_ROOT_PASSWORD` 是 `CHANGE_ME_*` / `CHG_ME*`、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、或者三个 MySQL service-account 密码（`OCTO_MATTER_DB_PASSWORD`、`OCTO_SUMMARY_DB_PASSWORD`、`OCTO_SUMMARY_READER_PASSWORD`）仍是字面默认。OOTB 栈不再可能在 placeholder 凭据没换的情况下起来。
+- 把 `.env` 里所有 `CHANGE_ME_*` / `CHG_ME*` 都轮换。`OCTO_MASTER_KEY` 故意短一字节让 octo-server 长度校验拒绝；`MINIO_ROOT_PASSWORD` 7 字符触发 MinIO ≥8 校验；`minio-init` 独立拒绝任何 `CHANGE_ME_*` / `CHG_ME*`（大小写不敏感）的 MinIO 凭据对；`preflight` 拒绝 `OCTO_NOTIFY_INTERNAL_TOKEN` 和 `OCTO_WUKONGIM_MANAGER_TOKEN` 的 `CHANGE_ME_*` / `CHG_ME*` 大小写形式；`init-extra-dbs.sh` 在第一次 MySQL volume init 时拒绝 `MYSQL_ROOT_PASSWORD` 是 `CHANGE_ME_*` / `CHG_ME*`、service-account 密码含 `[A-Za-z0-9._-]` 之外字符、或者四个 MySQL service-account 密码（`OCTO_MATTER_DB_PASSWORD`、`OCTO_SUMMARY_DB_PASSWORD`、`OCTO_SUMMARY_READER_PASSWORD`、`OCTO_MARKETPLACE_DB_PASSWORD`）仍是字面默认。OOTB 栈不再可能在 placeholder 凭据没换的情况下起来。
 - `OCTO_MYSQL_BIND` / `OCTO_REDIS_BIND` / `OCTO_MINIO_API_BIND` / `OCTO_MINIO_CONSOLE_BIND` 保持 `127.0.0.1`。轮换凭据并加防火墙之后才覆盖。
 - Redis 在本栈**无密码运行**——`redis` 服务 `command:` 里没有 `--requirepass`。把 `OCTO_REDIS_BIND` 改成 `0.0.0.0` 就会暴露无鉴权 Redis。改 bind 之前要么把 Redis 留在私网接口，要么给 `redis` 服务 `command:` 加 `--requirepass <secret>` 并把同一 secret 写到 `octo-server` 服务的 `TS_DB_REDISPASS` / `DM_REDIS_PASS` 让应用还能到 cache。（加 CLI-flag 驱动的 Redis 密码作为 follow-up；见 PR description。）
 - MinIO console 是 loopback-only 且默认**不**通过 nginx 代理。通过 SSH 转发 `:29001`（见 "Network surface"）访问。如果你取消注释了 `nginx/conf.d/octo.conf.template` 里的 `/minio-console/` 块，先轮换 `MINIO_ROOT_PASSWORD`——否则公网 `OCTO_HTTP_PORT` 就是通往 `mc admin` 的路径。

@@ -203,7 +203,8 @@ Or, on a fresh host where you want the same three steps without
 prompts, do step 1 non-interactively and chain into the start-only
 `--up` (R6 / GH#33, R8 / GH#43). `--up` brings the stack up itself,
 blocking until every long-running service reports `(healthy)` and
-every one-shot init job (`preflight`, `minio-init`) exits 0. On
+every one-shot init job (`preflight`, `minio-init`, `market-preflight`,
+`search-kafka-init`) exits 0. On
 timeout or startup failure it prints `compose ps`, lists the
 specific failing service names, and emits a `logs <svc>` hint for
 each before exiting 1. `--up` never rewrites/regenerates the secrets
@@ -1186,12 +1187,26 @@ above for why a ufw rule alone is not enough).
 The marketplace service (`octo-marketplace`) starts by default — no opt-in
 profile required. It is reached through nginx at `/market/api/v1/*` (no
 dedicated host port; the `/market/healthz` endpoint is also proxied for
-_status checks). Skill ZIP uploads are limited to 20 MiB by the service
+status checks). Skill ZIP uploads are limited to 20 MiB by the service
 (`MAX_UPLOAD_MB=20`) and 25 MiB at the nginx layer. Skill archives are stored
 in the `marketplace` MinIO bucket using presigned URLs (the bucket is NOT
 publicly readable — no `mc anonymous set download`). Clean slate:
 `docker compose down -v` removes the marketplace database and MinIO objects
 along with all other stack data.
+
+**Upgrading an existing deployment:** `setup.sh` only fills in
+`OCTO_MARKETPLACE_DB_PASSWORD` on a fresh install. Before running
+`docker compose up -d` on a deployment whose `docker/.env` was created
+before this service existed, append the variable manually:
+
+```bash
+echo "OCTO_MARKETPLACE_DB_PASSWORD=$(openssl rand -hex 16)" >> docker/.env
+```
+
+Without this step `market-preflight` aborts with a clear FATAL and
+`marketplace` is not started. Do **not** re-run `setup.sh --force` to
+add the variable — that regenerates every secret against the live
+volume.
 
 > MCP/Bot icon storage (`STORAGE_ICON_*`) is intentionally left unconfigured in
 > this OOTB stack; icon uploads are disabled until an operator wires up an

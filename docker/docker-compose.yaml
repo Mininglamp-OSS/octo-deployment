@@ -1009,7 +1009,10 @@ services:
         # 拦截空密码/占位符/字面默认值，与 init-extra-dbs.sh 校验保持一致
         pw="$${OCTO_MARKETPLACE_DB_PASSWORD}"
         if [ -z "$$pw" ]; then
-          echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD is empty" >&2; exit 1
+          echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD is not set." >&2
+          echo "                      Add 'OCTO_MARKETPLACE_DB_PASSWORD=\$(openssl rand -hex 16)'" >&2
+          echo "                      to docker/.env (fresh installs: setup.sh generates it automatically)." >&2
+          exit 1
         fi
         case "$$pw" in
           *[!A-Za-z0-9._-]*)

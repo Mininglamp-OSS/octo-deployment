@@ -112,14 +112,14 @@ ok()    { printf '%sPASS%s\n' "${GREEN}" "${RESET}"; }
 fail()  { printf '%sFAIL%s — %s\n' "${RED}" "${RESET}" "${1:-}"; }
 
 # Group banner printed inside --smoke-test / --verify to visually segment
-# the 11 probes into two failure-domain buckets:
+# the 12 probes into two failure-domain buckets:
 #
-#   [infra]     — steps 1-7: container health + nginx routing + SPA reachability.
+#   [infra]     — steps 1-8: container health + nginx routing + SPA reachability.
 #                 Failures here mean the platform itself is unhealthy (a
 #                 container is down, nginx isn't reverse-proxying, or a
 #                 host port is firewalled). The operator should look at
 #                 `docker compose ps` / `docker compose logs` first.
-#   [user-path] — steps 8-11: WuKongIM /ws upgrade + admin login + presign
+#   [user-path] — steps 9-12: WuKongIM /ws upgrade + admin login + presign
 #                 issuance + signed PUT. Failures here mean the platform
 #                 is up but the end-to-end business contract is broken
 #                 (auth wired wrong, MinIO IAM creds desynced, SigV4
@@ -895,10 +895,10 @@ Generation:
                       error with concrete remediation.
 
 Smoke test / tear-down (work against an already-existing docker/.env):
-  --smoke-test        Probe nginx / octo-server / matter / object-store
-                      paths end-to-end. Exits non-zero on any failure.
-                      Output is grouped into [infra] (steps 1-7) and
-                      [user-path] (steps 8-11) so a failure tells you
+  --smoke-test        Probe nginx / octo-server / matter / marketplace /
+                      object-store paths end-to-end. Exits non-zero on any
+                      failure. Output is grouped into [infra] (steps 1-8)
+                      and [user-path] (steps 9-12) so a failure tells you
                       immediately which failure-domain to investigate.
                       Real side-effects: 1 POST (admin login), 1 GET
                       (presign issuance), 1 PUT (1-byte sentinel object
@@ -1003,11 +1003,11 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   BASE_URL="http://${PROBE_HOST}:${HTTP_PORT}"
   fails=0
 
-  # Scope 3.2 (YUJ-1020): segment the 11 probes into [infra] (1-7) and
-  # [user-path] (8-11). See the `banner()` docstring above the helper
+  # Scope 3.2 (YUJ-1020): segment the 12 probes into [infra] (1-8) and
+  # [user-path] (9-12). See the `banner()` docstring above the helper
   # for the failure-domain rationale. Inserted purely as printf banners
   # so the existing step counters / fail accounting are untouched.
-  banner "[infra] container + nginx routing (step 1-7)"
+  banner "[infra] container + nginx routing (step 1-8)"
 
   step "container health (${CC} ps)"
   if ! ( cd "${DOCKER_DIR}" && ${CC} ps --all >/dev/null 2>&1 ); then
@@ -1065,6 +1065,15 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
     # surfaces it as a non-zero exit and CI / automation cannot mistake a
     # broken matter for a healthy one.
     fail "no 200 from matter — check 'docker compose logs matter'"
+    ((fails++)) || true
+  fi
+
+  step "octo-marketplace (GET ${BASE_URL}/market/healthz)"
+  if curl -fsS --max-time 5 "${BASE_URL}/market/healthz" >/dev/null 2>&1; then
+    ok
+  else
+    # marketplace is default-on, so a failed probe is a deployment failure.
+    fail "no 200 from marketplace — check 'docker compose logs marketplace'"
     ((fails++)) || true
   fi
 
@@ -1145,7 +1154,7 @@ if [[ "${RUN_VERIFY}" == "true" ]]; then
   # container. openssl is already a hard prereq (checked above), so the
   # base64-random WS key generation is always available.
   echo ""
-  banner "[user-path] auth + WS + presigned PUT (step 8-11)"
+  banner "[user-path] auth + WS + presigned PUT (step 9-12)"
   step "WuKongIM /ws upgrade probe (GET ${BASE_URL}/ws)"
   # R8 (YUJ-1002 / ReviewBot P0): replace curl with a python3 socket
   # probe. The R7 form looked like
