@@ -196,7 +196,7 @@ services:
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
       SPEECH_DB_PASSWORD: ${SPEECH_DB_PASSWORD:-}
       OCTO_DOCS_DB_PASSWORD: ${OCTO_DOCS_DB_PASSWORD:-}
-      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}
+      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
@@ -1001,11 +1001,29 @@ services:
         condition: service_healthy
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}
+      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -eu
+        # 拦截空密码/占位符/字面默认值，与 init-extra-dbs.sh 校验保持一致
+        pw="$${OCTO_MARKETPLACE_DB_PASSWORD}"
+        if [ -z "$$pw" ]; then
+          echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD is empty" >&2; exit 1
+        fi
+        case "$$pw" in
+          *[!A-Za-z0-9._-]*)
+            echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD contains chars outside [A-Za-z0-9._-]" >&2; exit 1 ;;
+        esac
+        lc=$(printf %s "$$pw" | tr 'A-Z' 'a-z')
+        case "$$lc" in
+          change_me_*|chg_me*)
+            echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD is still a CHANGE_ME / CHG_ME placeholder." >&2; exit 1 ;;
+        esac
+        if [ "$$pw" = "marketplace" ]; then
+          echo "[market-preflight] FATAL: OCTO_MARKETPLACE_DB_PASSWORD is still the literal default ('marketplace')." >&2
+          echo "                      Rotate it in .env (openssl rand -hex 16) before starting." >&2; exit 1
+        fi
         # Wait for MySQL to actually accept root logins (condition: service_healthy
         # gates the mysqladmin ping, but the SQL endpoint can lag a moment).
         until MYSQL_PWD="$$MYSQL_ROOT_PASSWORD" mysql -h mysql -u root -e "SELECT 1" >/dev/null 2>&1; do
@@ -1043,7 +1061,7 @@ services:
       TZ: ${TZ:-UTC}
       APP_ENV: prod
       API_PORT: "8092"
-      MYSQL_DSN: "marketplace:${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}@tcp(mysql:3306)/octo_marketplace?charset=utf8mb4&parseTime=true"
+      MYSQL_DSN: "marketplace:${OCTO_MARKETPLACE_DB_PASSWORD}@tcp(mysql:3306)/octo_marketplace?charset=utf8mb4&parseTime=true"
       AUTH_ENABLED: "true"
       OCTO_API_URL: http://octo-server:8090
       STORAGE_DRIVER: oss

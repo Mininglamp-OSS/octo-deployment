@@ -71,7 +71,11 @@ DOCKER_DIR="${SCRIPT_DIR}/docker"
 #   - search-kafka-init  : Kafka topic creation, activated by --search
 #                          (COMPOSE_PROFILES=search). `restart: "no"`, so it
 #                          legitimately ends at `Exited (0)` once topics exist.
-ONESHOT_SERVICES_RE='preflight|minio-init|search-kafka-init'
+#   - market-preflight   : Marketplace DB/user bootstrap on every boot (always
+#                          on). Covers existing-mysql-volume upgrades where
+#                          init-extra-dbs.sh does not re-run; exits 0 once
+#                          CREATE USER/GRANT are applied.
+ONESHOT_SERVICES_RE='preflight|minio-init|search-kafka-init|market-preflight'
 
 # YUJ-1084 / GH#46: root's primary group differs by OS — Linux uses `root`,
 # macOS (BSD) uses `wheel`. Hard-coding `chown root:root` aborts on macOS
@@ -228,8 +232,8 @@ compose_supports_wait() {
 #               long-running svcs must never exit), `Restarting (…)`,
 #               `Dead`, `Paused`, `Removing`, or missing container row.
 #
-#   one-shot service (preflight, minio-init, search-kafka-init — the
-#   ${ONESHOT_SERVICES_RE} set):
+#   one-shot service (preflight, minio-init, search-kafka-init,
+#   market-preflight — the ${ONESHOT_SERVICES_RE} set):
 #     PASS   →  `Exited (0)` (job ran and finished cleanly).
 #     WAIT   →  still `Up …` / `Created` (job has not finished yet).
 #     FATAL  →  `Exited (n>0)`, `Restarting (…)`, `Dead`, or missing
@@ -529,7 +533,7 @@ _compose_up_and_wait_once() {
     # Extract concrete failing service names from
     # `ps --format '{{.Service}}\t{{.Status}}'`. We flag anything that
     # is (unhealthy), Restarting, Dead, or Exited(non-zero). One-shot
-    # services (preflight / minio-init / search-kafka-init — the
+    # services (preflight / minio-init / search-kafka-init / market-preflight — the
     # ${ONESHOT_SERVICES_RE} set) are normally expected to be
     # `Exited (0)` and so are NOT a fail in that state — but if they
     # crash with `Exited (1)` / `Restarting` / `Dead` they MUST surface,
@@ -860,8 +864,8 @@ Generation:
                       runs `docker compose up -d --wait --wait-timeout
                       240`, blocking until every long-running service is
                       healthy AND every one-shot init job (preflight /
-                      minio-init, plus search-kafka-init under --search)
-                      exited 0. On a cold-boot soft timeout
+                      minio-init / market-preflight, plus search-kafka-init
+                      under --search) exited 0. On a cold-boot soft timeout
                       the wait retries ONCE on the warm mysql / image
                       cache (typically <10s). NEVER regenerates secrets
                       — run `./setup.sh` first to create docker/.env, or
