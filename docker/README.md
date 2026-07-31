@@ -1,7 +1,7 @@
 # OCTO · Docker Compose deployment
 
 A self-contained one-shot deployment of the full OCTO stack — server,
-admin console, web UI, matter, smart-summary, WuKongIM, MySQL, Redis,
+admin console, web UI, matter, smart-summary, marketplace, WuKongIM, MySQL, Redis,
 MinIO, and an nginx reverse proxy — wired together by a single
 `docker-compose.yaml`.
 
@@ -1179,6 +1179,22 @@ above for why a ufw rule alone is not enough).
 > belongs.
 
 ---
+
+### Marketplace (skill / MCP / bot catalog)
+
+The marketplace service (`octo-marketplace`) starts by default — no opt-in
+profile required. It is reached through nginx at `/market/api/v1/*` (no
+dedicated host port). Skill ZIP uploads are limited to 20 MiB by the service
+(`MAX_UPLOAD_MB=20`) and 25 MiB at the nginx layer. Skill archives and MCP
+icons are stored in the `marketplace` MinIO bucket using presigned URLs (the
+bucket is NOT publicly readable — no `mc anonymous set download`). Clean
+slate: `docker compose down -v` removes the marketplace database and MinIO
+objects along with all other stack data.
+
+> MCP/Bot icon storage (STORAGE_ICON_*) is intentionally left unconfigured in
+> this OOTB stack; icon uploads are disabled until an operator wires up an
+> icon bucket. Skill uploads (the primary use case for #170) are fully
+> functional.
 
 ## Speech profile (voice transcription)
 

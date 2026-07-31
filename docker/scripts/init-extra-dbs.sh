@@ -42,6 +42,7 @@ set -euo pipefail
 : "${OCTO_SUMMARY_READER_PASSWORD:=summary_reader}"
 : "${SPEECH_DB_PASSWORD:=}"
 : "${OCTO_DOCS_DB_PASSWORD:=}"
+: "${OCTO_MARKETPLACE_DB_PASSWORD:=marketplace}"
 : "${MYSQL_DATABASE:=octo}"
 
 validate_password() {
@@ -113,12 +114,14 @@ validate_identifier() {
 validate_password  OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"
 validate_password  OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"
 validate_password  OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD"
+validate_password  OCTO_MARKETPLACE_DB_PASSWORD  "$OCTO_MARKETPLACE_DB_PASSWORD"
 # Block the literal-string defaults from .env.example. These three
 # names are the well-known username for each account, so leaving the
 # password equal to the username is a "guess once" credential.
 reject_literal_default OCTO_MATTER_DB_PASSWORD       "$OCTO_MATTER_DB_PASSWORD"      "matter"
 reject_literal_default OCTO_SUMMARY_DB_PASSWORD      "$OCTO_SUMMARY_DB_PASSWORD"     "summary"
 reject_literal_default OCTO_SUMMARY_READER_PASSWORD  "$OCTO_SUMMARY_READER_PASSWORD" "summary_reader"
+reject_literal_default OCTO_MARKETPLACE_DB_PASSWORD  "$OCTO_MARKETPLACE_DB_PASSWORD" "marketplace"
 # MYSQL_ROOT_PASSWORD is interpolated directly into TS_DB_MYSQLADDR /
 # DM_MYSQL_DSN in docker-compose.yaml (Go-MySQL DSN format). Special
 # characters such as `@`, `#`, `!`, `$`, `&`, `:`, `/` make the DSN
@@ -146,6 +149,7 @@ CREATE DATABASE IF NOT EXISTS octo_matter  CHARACTER SET utf8mb4 COLLATE utf8mb4
 CREATE DATABASE IF NOT EXISTS octo_summary CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_speech  CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE DATABASE IF NOT EXISTS octo_docs    CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE DATABASE IF NOT EXISTS octo_marketplace CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 
 -- Service-scoped read-write accounts -----------------------------------------
 -- CREATE USER IF NOT EXISTS leaves an existing user untouched; the matching
@@ -164,9 +168,12 @@ ALTER USER IF EXISTS      'summary'@'%' IDENTIFIED BY '${OCTO_SUMMARY_DB_PASSWOR
 -- credentials.
 CREATE USER IF NOT EXISTS 'summary_reader'@'%' IDENTIFIED BY '${OCTO_SUMMARY_READER_PASSWORD}';
 ALTER USER IF EXISTS      'summary_reader'@'%' IDENTIFIED BY '${OCTO_SUMMARY_READER_PASSWORD}';
+CREATE USER IF NOT EXISTS 'marketplace'@'%'   IDENTIFIED BY '${OCTO_MARKETPLACE_DB_PASSWORD}';
+ALTER USER IF EXISTS      'marketplace'@'%'   IDENTIFIED BY '${OCTO_MARKETPLACE_DB_PASSWORD}';
 
 GRANT ALL PRIVILEGES ON octo_matter.*      TO 'matter'@'%';
 GRANT ALL PRIVILEGES ON octo_summary.*     TO 'summary'@'%';
+GRANT ALL PRIVILEGES ON octo_marketplace.* TO 'marketplace'@'%';
 GRANT SELECT         ON \`${MYSQL_DATABASE}\`.* TO 'summary_reader'@'%';
 FLUSH PRIVILEGES;
 SQL
@@ -199,4 +206,4 @@ SQL
   echo "[init-extra-dbs] provisioned docs DB user"
 fi
 
-echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + octo_docs + service users (scoped to \`${MYSQL_DATABASE}\`)"
+echo "[init-extra-dbs] created octo_matter + octo_summary + octo_speech + octo_docs + octo_marketplace + service users (scoped to \`${MYSQL_DATABASE}\`)"

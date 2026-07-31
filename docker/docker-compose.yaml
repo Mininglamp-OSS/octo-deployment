@@ -196,6 +196,7 @@ services:
       OCTO_SUMMARY_READER_PASSWORD: ${OCTO_SUMMARY_READER_PASSWORD:-summary_reader}
       SPEECH_DB_PASSWORD: ${SPEECH_DB_PASSWORD:-}
       OCTO_DOCS_DB_PASSWORD: ${OCTO_DOCS_DB_PASSWORD:-}
+      OCTO_MARKETPLACE_DB_PASSWORD: ${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}
     # Backing service: bound to loopback by default so a missed-config moment
     # does not expose MySQL with the placeholder root password to the public
     # internet. Override OCTO_MYSQL_BIND to 0.0.0.0 only when you understand
@@ -422,7 +423,7 @@ services:
         # CreateBucket privileges (the policy below intentionally omits
         # bucket admin actions). Each `mb` is `--ignore-existing` so the
         # service stays idempotent.
-        for b in file chat moment sticker report chatbg common download group avatar octo-docs-attachments; do
+        for b in file chat moment sticker report chatbg common download group avatar octo-docs-attachments marketplace; do
           mc mb --ignore-existing "local/$$b" >/dev/null
         done
 
@@ -853,6 +854,8 @@ services:
     depends_on:
       octo-server:
         condition: service_healthy
+      marketplace:
+        condition: service_healthy
     environment:
       OCTO_DOMAIN: ${OCTO_DOMAIN:-localhost}
     ports:
@@ -897,6 +900,7 @@ services:
     environment:
       API_URL: http://octo-server:8090
       SUMMARY_API_URL: ${OCTO_SUMMARY_API_URL:-http://summary-api:8080}
+      MARKET_API_URL: http://marketplace:8092
     ports:
       # Web SPA is reached through nginx (`/`, see octo.conf.template) by
       # default — keep the direct host port loopback-only so an operator
@@ -982,6 +986,48 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Marketplace service (skill / bot / MCP catalog)
+  # ---------------------------------------------------------------------------
+  marketplace:
+    image: ${OCTO_MARKETPLACE_IMAGE:-mininglamposs/octo-marketplace:latest}
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      octo-server:
+        condition: service_started
+    environment:
+      TZ: ${TZ:-UTC}
+      APP_ENV: prod
+      API_PORT: "8092"
+      MYSQL_DSN: "marketplace:${OCTO_MARKETPLACE_DB_PASSWORD:-marketplace}@tcp(mysql:3306)/octo_marketplace?charset=utf8mb4&parseTime=true"
+      AUTH_ENABLED: "true"
+      OCTO_API_URL: http://octo-server:8090
+      STORAGE_DRIVER: oss
+      OSS_ENDPOINT: http://minio:9000
+      OSS_BUCKET: marketplace
+      OSS_ACCESS_KEY: "${OCTO_MINIO_APP_USER:-octo-app}"
+      OSS_SECRET_KEY: "${OCTO_MINIO_APP_PASSWORD}"
+      OSS_REGION: us-east-1
+      OSS_PATH_STYLE: "true"
+      OSS_PUBLIC_ENDPOINT: ${MINIO_SERVER_URL:-http://${OCTO_DOMAIN:-localhost}:${OCTO_HTTP_PORT:-28080}}
+      OSS_DOWNLOAD_SIGNED: "true"
+      MAX_UPLOAD_MB: "20"
+      REDIS_URL: redis://redis:6379/0
+    networks:
+      - octo-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8092/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # Smart summary API + worker

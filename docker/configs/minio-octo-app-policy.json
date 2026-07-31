@@ -20,7 +20,8 @@
         "arn:aws:s3:::download",
         "arn:aws:s3:::group",
         "arn:aws:s3:::avatar",
-        "arn:aws:s3:::octo-docs-attachments"
+        "arn:aws:s3:::octo-docs-attachments",
+        "arn:aws:s3:::marketplace"
       ]
     },
     {
@@ -44,7 +45,8 @@
         "arn:aws:s3:::download/*",
         "arn:aws:s3:::group/*",
         "arn:aws:s3:::avatar/*",
-        "arn:aws:s3:::octo-docs-attachments/*"
+        "arn:aws:s3:::octo-docs-attachments/*",
+        "arn:aws:s3:::marketplace/*"
       ]
     }
   ]
