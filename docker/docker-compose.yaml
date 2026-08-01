@@ -181,7 +181,7 @@ services:
       - octo-net
 
   mysql:
-    image: mysql:8.0
+    image: mysql:26.7
     restart: unless-stopped
     command:
       - --default-authentication-plugin=mysql_native_password
@@ -994,7 +994,7 @@ services:
   # idempotent; the service exits 0 once done so marketplace can gate on it.
   # ---------------------------------------------------------------------------
   market-preflight:
-    image: mysql:8.0
+    image: mysql:26.7
     restart: "no"
     depends_on:
       mysql:
@@ -1728,7 +1728,7 @@ services:
   # `--profile search-tools`.
   # ---------------------------------------------------------------------------
   search-cursor-seed:
-    image: mysql:8.0
+    image: mysql:26.7
     restart: "no"
     profiles: ["search-tools"]
     environment:
