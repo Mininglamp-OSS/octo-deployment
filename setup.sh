@@ -201,7 +201,7 @@ check_vm_max_map_count() {
   if (( current < required )); then
     err "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
     err "  临时修复： sudo sysctl -w vm.max_map_count=${required}"
-    err "  永久生效： echo 'vm.max_map_count=${required}' | sudo tee -a /etc/sysctl.conf && sudo sysctl -p"
+    err "  永久生效： echo 'vm.max_map_count=${required}' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system"
     exit 1
   fi
   # 值达标：静默通过。
@@ -617,6 +617,12 @@ compose_up_and_wait() {
   local timeout="${2:-${COMPOSE_UP_WAIT_TIMEOUT_DEFAULT}}"
   local rc=0
 
+  # PR#181 R4 (yujiawei P1): 所有启动路径都经这里 `up`，把 search 预检收敛到
+  # 唯一 choke point——只要 compose 会激活 search（起 OpenSearch），启动前必跑
+  # vm.max_map_count 预检。结构性覆盖当前及未来所有 `up` 站点，替代各 call
+  # site 手写解析 COMPOSE_PROFILES（那种写法与 compose 真实语义分叉，会漏检/误拦）。
+  search_profile_active && check_vm_max_map_count
+
   set +e
   _compose_up_and_wait_once "${cc}" "${timeout}" true
   rc=$?
@@ -679,6 +685,36 @@ Or adjust ownership: sudo chown root:${ROOT_GROUP} docker/.env && sudo chmod 600
     v="${v#\'}"; v="${v%\'}"
   fi
   echo "${v:-${default}}"
+}
+
+# 判定 docker compose 是否会激活 search profile（即是否会拉起 OpenSearch）。
+# `--up` 的各启动路径共用这一处判定，取值口径必须和 compose 自己解析
+# COMPOSE_PROFILES 完全一致，否则要么漏检（OpenSearch 起来了却没预检）、
+# 要么误拦（compose 根本不起 OpenSearch 却 exit 1）。对齐点：
+#   - 导出的 shell 变量优先于 .env（set-aware：变量一旦被设置——哪怕空串——
+#     就以它为准，compose 仅在变量“未设置”时才回落 .env 默认值）；
+#   - .env 同名 key 以最后一条未注释赋值为准（compose/dotenv last-wins，
+#     与 search-upgrade.sh:52 env_get 的 tail -1 一致，不用 head -1）；
+#   - 兼容 dotenv 的 `export ` 前缀、成对引号、以及未加引号时的 ` #` 行内注释；
+#   - compose 会 trim 逗号分隔项周围的空白；
+#   - `*` 通配符会激活所有 profile。
+# 只读 .env、不写，用 `-r` 守卫——.env 不存在或不可读时按“未激活”处理，
+# 不像 env_get 那样 fatal，故生成路径 .env 尚未写出时也能安全调用。
+search_profile_active() {
+  local p=""
+  if [[ -n "${COMPOSE_PROFILES+x}" ]]; then
+    p="${COMPOSE_PROFILES}"
+  elif [[ -r "${ENV_OUT}" ]]; then
+    p="$(grep -E '^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null | tail -1)"
+    p="${p#*COMPOSE_PROFILES=}"
+    case "${p}" in
+      \"*) p="${p#\"}"; p="${p%%\"*}" ;;    # 双引号：取到下一个引号为止，丢弃引号后的行内注释
+      \'*) p="${p#\'}"; p="${p%%\'*}" ;;    # 单引号同理
+      *)   p="${p%%[[:space:]]#*}" ;;        # 未加引号：` #` 起为行内注释，去掉
+    esac
+  fi
+  p="${p//[[:space:]]/}"                      # compose 会 trim 各项空白
+  [[ ",${p}," == *",search,"* || ",${p}," == *",*,"* ]]
 }
 
 # R7 (YUJ-1020 / GH#40+41): placeholder-aware host selection helper.
@@ -1815,23 +1851,9 @@ if [[ "${RUN_UP}" == "true" ]]; then
   else
 
   CC="$(compose_cmd)"
-  # PR#181 R2 (Jerry-Xin CR): start-only 路径（`./setup.sh --search` 写 profile
-  # 后 `sudo ./setup.sh --up` 启动）此前完全绕过预检——compose 会自动加载
-  # docker/.env 里持久化的 COMPOSE_PROFILES 拉起 OpenSearch，不经生成路径那道
-  # check。这里补跑预检，让文档里的两段式流程也受保护。
-  #
-  # PR#181 R3 (Jerry-Xin CR B3): 判定 search 是否生效必须与 compose 自身的
-  # 优先级一致——导出的 shell COMPOSE_PROFILES 覆盖 .env（.env 仅在变量未
-  # 设置时提供默认值）。故 `COMPOSE_PROFILES=search sudo -E ./setup.sh --up`
-  # 即使 .env 没持久化 search，compose 仍会拉起 OpenSearch，必须触发预检；
-  # 反之导出的 COMPOSE_PROFILES 不含 search 时应覆盖 .env 里的 search、不误拦。
-  # 用不带冒号的 `-` 做 set-aware 取值：变量被导出（哪怕空串）就以它为准，
-  # 精确对齐 compose 的 env-over-.env 语义。.env 取值只认未注释行，与
-  # add_compose_profile 一致。
-  PERSISTED_PROFILES="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null || true)"
-  PERSISTED_PROFILES="${PERSISTED_PROFILES#COMPOSE_PROFILES=}"
-  EFFECTIVE_PROFILES="${COMPOSE_PROFILES-${PERSISTED_PROFILES}}"
-  if [[ ",${EFFECTIVE_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
+  # PR#181 R4 (yujiawei P1): search 预检已收敛到 compose_up_and_wait 唯一 choke
+  # point（读 search_profile_active，口径与 compose 一致），此处不再手写解析
+  # COMPOSE_PROFILES，避免与 compose 真实语义分叉导致漏检/误拦。
   # Persist the project name from the existing .env (or the operator's
   # shell env) so the child compose process sees the same value the
   # stack was provisioned with. Mirrors the same precedence used by the
@@ -2064,7 +2086,11 @@ SAVED_PROJECT="$(read_existing_project_name)"
 # install/sed_inplace 写 docker/.env 之前——否则低 vm.max_map_count 时
 # 会先写好并注入全部密钥、再 exit 1，留下半成品 .env，重跑 --search 又撞
 # "docker/.env already exists" 守卫。前移后，预检失败不落任何密钥文件。
-if [[ "${ENABLE_SEARCH}" == "true" ]]; then check_vm_max_map_count; fi
+# PR#181 R4 (yujiawei P2-1): `--up --force` 单命令 bootstrap 下，若 search 仅靠
+# 导出 COMPOSE_PROFILES=search 激活（未传 --search），ENABLE_SEARCH gate 不触发，
+# 首个预检会落到 compose_up_and_wait（已在写 .env 之后），留下半成品 .env。
+# 这里并上 search_profile_active，让导出 profile 的情形也在写 .env 之前拦住。
+if [[ "${ENABLE_SEARCH}" == "true" ]] || search_profile_active; then check_vm_max_map_count; fi
 
 if command -v install &>/dev/null; then
   install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
@@ -2384,16 +2410,9 @@ echo ""
 # Jerry-Xin CR on PR#36 R7.
 if [[ "${RUN_UP}" == "true" ]]; then
   CC="$(compose_cmd)"
-  # PR#181 R3 (Jerry-Xin CR B3): 单命令 bootstrap（`--up --force`）在这里
-  # compose up，此前不带任何预检。生成路径的 ENABLE_SEARCH 预检只覆盖显式
-  # 传了 `--search` 的情形；若操作者未传 `--search` 却导出了
-  # COMPOSE_PROFILES=search，compose 仍会拉起 OpenSearch，两道 guard 都够不着。
-  # 按与 --up start-only 路径相同的 env-over-.env 优先级补一道兜底：导出的
-  # COMPOSE_PROFILES 覆盖刚生成的 .env（set-aware 的 `-` 取值），命中 search 拦截。
-  PERSISTED_PROFILES="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null || true)"
-  PERSISTED_PROFILES="${PERSISTED_PROFILES#COMPOSE_PROFILES=}"
-  EFFECTIVE_PROFILES="${COMPOSE_PROFILES-${PERSISTED_PROFILES}}"
-  if [[ ",${EFFECTIVE_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
+  # PR#181 R4 (yujiawei P1): 同上，search 预检交给 compose_up_and_wait 的 choke
+  # point 统一处理，这里不再手写 COMPOSE_PROFILES 判定。（生成路径 check-before-write
+  # 的早期预检见下方 ENABLE_SEARCH/search_profile_active 分支，那道必须在写 .env 之前。）
   PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
   export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
 

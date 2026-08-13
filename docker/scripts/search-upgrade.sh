@@ -96,7 +96,7 @@ check_vm_max_map_count() {
 
   if (( current < required )); then
     printf '  临时修复： sudo sysctl -w vm.max_map_count=%s\n' "${required}" >&2
-    printf "  永久生效： echo 'vm.max_map_count=%s' | sudo tee -a /etc/sysctl.conf && sudo sysctl -p\n" "${required}" >&2
+    printf "  永久生效： echo 'vm.max_map_count=%s' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system\n" "${required}" >&2
     fail "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
   fi
   # 值达标：静默通过。
