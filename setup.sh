@@ -89,6 +89,29 @@ else
   ROOT_GROUP="root"
 fi
 
+# ── OpenSearch host-sysctl preflight ─────────────────────────────────────────
+# GH#179: vm.max_map_count is a host-level sysctl that cannot be set from
+# inside a Docker container. OpenSearch requires ≥ 262144; the default on a
+# fresh Linux host is typically 65530, which causes the container to exit
+# immediately with a cryptic bootstrap error. We fail fast here with a clear,
+# actionable message so the operator knows exactly what to fix before any
+# compose services are started. macOS (Docker Desktop) manages this sysctl
+# automatically inside its Linux VM — skip the check there.
+check_vm_max_map_count() {
+  [[ "$(uname -s)" == "Darwin" ]] && return 0
+  local required=262144
+  local current
+  current=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
+  if [[ "$current" -lt "$required" ]]; then
+    echo "[preflight] FATAL: vm.max_map_count = $current — OpenSearch requires ≥ $required." >&2
+    echo "[preflight]   Run:  sudo sysctl -w vm.max_map_count=$required" >&2
+    echo "[preflight]   To persist across reboots, add to /etc/sysctl.conf:" >&2
+    echo "[preflight]     vm.max_map_count=$required" >&2
+    echo "[preflight]   Then re-run this script." >&2
+    exit 1
+  fi
+}
+
 # ── Colours / helpers ────────────────────────────────────────────────────────
 # GH#56 bug 1: use $'…' ANSI-C quoting so the variables hold actual ESC
 # bytes. Single-quoted '\033…' is just a literal backslash-0-3-3 string;
@@ -2057,7 +2080,11 @@ sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_O
 
 # Optional compose profiles (merge, not clobber — summary + search coexist).
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then add_compose_profile summary; fi
-if [[ "${ENABLE_SEARCH}"  == "true" ]]; then add_compose_profile search;  fi
+if [[ "${ENABLE_SEARCH}"  == "true" ]]; then
+  # GH#179: fail fast if the host vm.max_map_count is too low for OpenSearch.
+  check_vm_max_map_count
+  add_compose_profile search
+fi
 
 # ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
 # INCIDENT-2026-05-16-001 follow-up: the interactive preflight may

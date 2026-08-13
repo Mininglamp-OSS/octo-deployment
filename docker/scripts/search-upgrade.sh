@@ -122,11 +122,35 @@ os_curl() {
 }
 
 # --------------------------------------------------------------------------
+# Host-sysctl preflight
+# --------------------------------------------------------------------------
+# GH#179: vm.max_map_count is a host-level sysctl that cannot be set from
+# inside a Docker container. OpenSearch requires ≥ 262144. Fail fast here
+# before attempting to bring any containers up, with a clear actionable
+# message. macOS (Docker Desktop) manages this automatically — skip there.
+check_vm_max_map_count() {
+  [[ "$(uname -s)" == "Darwin" ]] && return 0
+  local required=262144
+  local current
+  current=$(sysctl -n vm.max_map_count 2>/dev/null || echo 0)
+  if [[ "$current" -lt "$required" ]]; then
+    echo "[preflight] FATAL: vm.max_map_count = $current — OpenSearch requires ≥ $required." >&2
+    echo "[preflight]   Run:  sudo sysctl -w vm.max_map_count=$required" >&2
+    echo "[preflight]   To persist across reboots, add to /etc/sysctl.conf:" >&2
+    echo "[preflight]     vm.max_map_count=$required" >&2
+    echo "[preflight]   Then re-run this script." >&2
+    exit 1
+  fi
+}
+
+# --------------------------------------------------------------------------
 # Steps
 # --------------------------------------------------------------------------
 
 step1_infra_up() {
   log "Step 1/6: bring the search infrastructure up (Kafka + OpenSearch + indexer)"
+  # GH#179: check host sysctl before any container starts.
+  check_vm_max_map_count
   # Persist the profile so a future `docker compose up -d` keeps the search
   # infrastructure running (and so the search-tools jobs below resolve). Merges
   # into any existing COMPOSE_PROFILES (e.g. summary) rather than replacing it.
