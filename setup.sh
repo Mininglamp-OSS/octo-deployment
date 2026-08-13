@@ -180,6 +180,33 @@ add_compose_profile() {
   fi
 }
 
+# OpenSearch 用 mmap 映射 Lucene 段文件，host 的 vm.max_map_count 低于 262144 时
+# 容器会启动即退出，报错埋在容器日志里运维看不到。开 search profile 前先预检，
+# 把修复命令直接打到前台，省得事后去翻 docker logs 才发现根因。
+check_vm_max_map_count() {
+  local required=262144 current=""
+  # macOS 下这个值由 Docker Desktop 的 LinuxKit 虚机自己管，host sysctl 无意义，跳过。
+  [[ "$(uname -s)" == "Darwin" ]] && return 0
+
+  current="$(sysctl -n vm.max_map_count 2>/dev/null || true)"
+  # sysctl 拿不到再退回读 /proc（精简镜像可能没有 sysctl 命令）。
+  [[ "${current}" =~ ^[0-9]+$ ]] || current="$(cat /proc/sys/vm/max_map_count 2>/dev/null || true)"
+
+  # 两条路都取不到值：非标准内核，warn 但不阻断，避免误杀合法环境。
+  if ! [[ "${current}" =~ ^[0-9]+$ ]]; then
+    warn "无法读取 vm.max_map_count，跳过预检（OpenSearch 仍要求 >= ${required}）"
+    return 0
+  fi
+
+  if (( current < required )); then
+    err "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
+    err "  临时修复： sudo sysctl -w vm.max_map_count=${required}"
+    err "  永久生效： echo 'vm.max_map_count=${required}' | sudo tee -a /etc/sysctl.conf && sudo sysctl -p"
+    exit 1
+  fi
+  # 值达标：静默通过。
+}
+
 # Pick `docker compose` v2 or fall back to standalone `docker-compose`.
 # Echoes the command tokens; callers wrap in `$(...)` and pass as a list.
 compose_cmd() {
@@ -2057,7 +2084,7 @@ sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_O
 
 # Optional compose profiles (merge, not clobber — summary + search coexist).
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then add_compose_profile summary; fi
-if [[ "${ENABLE_SEARCH}"  == "true" ]]; then add_compose_profile search;  fi
+if [[ "${ENABLE_SEARCH}"  == "true" ]]; then check_vm_max_map_count; add_compose_profile search;  fi
 
 # ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
 # INCIDENT-2026-05-16-001 follow-up: the interactive preflight may

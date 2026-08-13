@@ -76,6 +76,32 @@ log()  { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 ok()   { printf '\033[32m[PASS]\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# OpenSearch 用 mmap 映射 Lucene 段文件，host 的 vm.max_map_count 低于 262144 时
+# 容器会启动即退出，报错埋在容器日志里运维看不到。拉起容器前先预检，
+# 把修复命令直接打到前台，省得事后去翻 docker logs 才发现根因。
+check_vm_max_map_count() {
+  local required=262144 current=""
+  # macOS 下这个值由 Docker Desktop 的 LinuxKit 虚机自己管，host sysctl 无意义，跳过。
+  [[ "$(uname -s)" == "Darwin" ]] && return 0
+
+  current="$(sysctl -n vm.max_map_count 2>/dev/null || true)"
+  # sysctl 拿不到再退回读 /proc（精简镜像可能没有 sysctl 命令）。
+  [[ "${current}" =~ ^[0-9]+$ ]] || current="$(cat /proc/sys/vm/max_map_count 2>/dev/null || true)"
+
+  # 两条路都取不到值：非标准内核，warn 但不阻断，避免误杀合法环境。
+  if ! [[ "${current}" =~ ^[0-9]+$ ]]; then
+    printf '\033[33m[WARN]\033[0m 无法读取 vm.max_map_count，跳过预检（OpenSearch 仍要求 >= %s）\n' "${required}" >&2
+    return 0
+  fi
+
+  if (( current < required )); then
+    printf '  临时修复： sudo sysctl -w vm.max_map_count=%s\n' "${required}" >&2
+    printf "  永久生效： echo 'vm.max_map_count=%s' | sudo tee -a /etc/sysctl.conf && sudo sysctl -p\n" "${required}" >&2
+    fail "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
+  fi
+  # 值达标：静默通过。
+}
+
 # persist_env durably writes KEY=VALUE into docker/.env so the live state set by
 # a step survives the NEXT ordinary `docker compose up -d` (otherwise a recreate
 # before the operator hand-edits .env would silently revert search to off). It
@@ -127,6 +153,8 @@ os_curl() {
 
 step1_infra_up() {
   log "Step 1/6: bring the search infrastructure up (Kafka + OpenSearch + indexer)"
+  # 拉起 OpenSearch 前先校验 host 的 mmap 上限，否则容器会启动即退出。
+  check_vm_max_map_count
   # Persist the profile so a future `docker compose up -d` keeps the search
   # infrastructure running (and so the search-tools jobs below resolve). Merges
   # into any existing COMPOSE_PROFILES (e.g. summary) rather than replacing it.
