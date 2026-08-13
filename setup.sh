@@ -1815,6 +1815,14 @@ if [[ "${RUN_UP}" == "true" ]]; then
   else
 
   CC="$(compose_cmd)"
+  # PR#181 R2 (Jerry-Xin CR): start-only 路径（`./setup.sh --search` 写 profile
+  # 后 `sudo ./setup.sh --up` 启动）此前完全绕过预检——compose 会自动加载
+  # docker/.env 里持久化的 COMPOSE_PROFILES 拉起 OpenSearch，不经生成路径那道
+  # check。这里读持久化的 profile，命中 search 时补跑预检，让文档里的两段式
+  # 流程也受保护。取值只认未注释的 COMPOSE_PROFILES= 行，与 add_compose_profile 一致。
+  PERSISTED_PROFILES="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null || true)"
+  PERSISTED_PROFILES="${PERSISTED_PROFILES#COMPOSE_PROFILES=}"
+  if [[ ",${PERSISTED_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
   # Persist the project name from the existing .env (or the operator's
   # shell env) so the child compose process sees the same value the
   # stack was provisioned with. Mirrors the same precedence used by the
@@ -2043,6 +2051,12 @@ info "Generating docker/.env from template…"
 # (shell COMPOSE_PROJECT_NAME → docker/.env → literal "octo").
 SAVED_PROJECT="$(read_existing_project_name)"
 
+# PR#181 R2 (Jerry-Xin CR): check-before-write。OpenSearch 预检必须跑在
+# install/sed_inplace 写 docker/.env 之前——否则低 vm.max_map_count 时
+# 会先写好并注入全部密钥、再 exit 1，留下半成品 .env，重跑 --search 又撞
+# "docker/.env already exists" 守卫。前移后，预检失败不落任何密钥文件。
+if [[ "${ENABLE_SEARCH}" == "true" ]]; then check_vm_max_map_count; fi
+
 if command -v install &>/dev/null; then
   install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
 else
@@ -2084,7 +2098,7 @@ sed_inplace "s|^# *OCTO_ADMIN_PWD=.*|OCTO_ADMIN_PWD=${OCTO_ADMIN_PWD}|" "${ENV_O
 
 # Optional compose profiles (merge, not clobber — summary + search coexist).
 if [[ "${ENABLE_SUMMARY}" == "true" ]]; then add_compose_profile summary; fi
-if [[ "${ENABLE_SEARCH}"  == "true" ]]; then check_vm_max_map_count; add_compose_profile search;  fi
+if [[ "${ENABLE_SEARCH}"  == "true" ]]; then add_compose_profile search;  fi
 
 # ── Persist COMPOSE_PROJECT_NAME into .env ─────────────────────────────────
 # INCIDENT-2026-05-16-001 follow-up: the interactive preflight may
