@@ -2089,8 +2089,13 @@ SAVED_PROJECT="$(read_existing_project_name)"
 # PR#181 R4 (yujiawei P2-1): `--up --force` 单命令 bootstrap 下，若 search 仅靠
 # 导出 COMPOSE_PROFILES=search 激活（未传 --search），ENABLE_SEARCH gate 不触发，
 # 首个预检会落到 compose_up_and_wait（已在写 .env 之后），留下半成品 .env。
-# 这里并上 search_profile_active，让导出 profile 的情形也在写 .env 之前拦住。
-if [[ "${ENABLE_SEARCH}" == "true" ]] || search_profile_active; then check_vm_max_map_count; fi
+# 这里并上导出 profile 的判定，让这种情形也在写 .env 之前拦住。
+# PR#181 R5 (yujiawei P1): 生成路径马上要用模板覆盖 docker/.env，旧 .env 里持久化
+# 的 profile 与“下一个栈是否起 OpenSearch”无关（重生成只按 flag 经 add_compose_profile
+# 重新写 profile）。若在这里让 search_profile_active 回退去读旧 .env，会对
+# `--force` 重生成（未传 --search、Search: false）误报 exit 1。故这里只认被导出的
+# COMPOSE_PROFILES——用 `+x` 守卫短路掉 .env 回退，仅它能影响下一次启动。
+if [[ "${ENABLE_SEARCH}" == "true" ]] || { [[ -n "${COMPOSE_PROFILES+x}" ]] && search_profile_active; }; then check_vm_max_map_count; fi
 
 if command -v install &>/dev/null; then
   install -m 600 "${ENV_EXAMPLE}" "${ENV_OUT}"
