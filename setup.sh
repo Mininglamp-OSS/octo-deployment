@@ -1818,11 +1818,20 @@ if [[ "${RUN_UP}" == "true" ]]; then
   # PR#181 R2 (Jerry-Xin CR): start-only 路径（`./setup.sh --search` 写 profile
   # 后 `sudo ./setup.sh --up` 启动）此前完全绕过预检——compose 会自动加载
   # docker/.env 里持久化的 COMPOSE_PROFILES 拉起 OpenSearch，不经生成路径那道
-  # check。这里读持久化的 profile，命中 search 时补跑预检，让文档里的两段式
-  # 流程也受保护。取值只认未注释的 COMPOSE_PROFILES= 行，与 add_compose_profile 一致。
+  # check。这里补跑预检，让文档里的两段式流程也受保护。
+  #
+  # PR#181 R3 (Jerry-Xin CR B3): 判定 search 是否生效必须与 compose 自身的
+  # 优先级一致——导出的 shell COMPOSE_PROFILES 覆盖 .env（.env 仅在变量未
+  # 设置时提供默认值）。故 `COMPOSE_PROFILES=search sudo -E ./setup.sh --up`
+  # 即使 .env 没持久化 search，compose 仍会拉起 OpenSearch，必须触发预检；
+  # 反之导出的 COMPOSE_PROFILES 不含 search 时应覆盖 .env 里的 search、不误拦。
+  # 用不带冒号的 `-` 做 set-aware 取值：变量被导出（哪怕空串）就以它为准，
+  # 精确对齐 compose 的 env-over-.env 语义。.env 取值只认未注释行，与
+  # add_compose_profile 一致。
   PERSISTED_PROFILES="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null || true)"
   PERSISTED_PROFILES="${PERSISTED_PROFILES#COMPOSE_PROFILES=}"
-  if [[ ",${PERSISTED_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
+  EFFECTIVE_PROFILES="${COMPOSE_PROFILES-${PERSISTED_PROFILES}}"
+  if [[ ",${EFFECTIVE_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
   # Persist the project name from the existing .env (or the operator's
   # shell env) so the child compose process sees the same value the
   # stack was provisioned with. Mirrors the same precedence used by the
@@ -2375,6 +2384,16 @@ echo ""
 # Jerry-Xin CR on PR#36 R7.
 if [[ "${RUN_UP}" == "true" ]]; then
   CC="$(compose_cmd)"
+  # PR#181 R3 (Jerry-Xin CR B3): 单命令 bootstrap（`--up --force`）在这里
+  # compose up，此前不带任何预检。生成路径的 ENABLE_SEARCH 预检只覆盖显式
+  # 传了 `--search` 的情形；若操作者未传 `--search` 却导出了
+  # COMPOSE_PROFILES=search，compose 仍会拉起 OpenSearch，两道 guard 都够不着。
+  # 按与 --up start-only 路径相同的 env-over-.env 优先级补一道兜底：导出的
+  # COMPOSE_PROFILES 覆盖刚生成的 .env（set-aware 的 `-` 取值），命中 search 拦截。
+  PERSISTED_PROFILES="$(grep -m1 '^COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null || true)"
+  PERSISTED_PROFILES="${PERSISTED_PROFILES#COMPOSE_PROFILES=}"
+  EFFECTIVE_PROFILES="${COMPOSE_PROFILES-${PERSISTED_PROFILES}}"
+  if [[ ",${EFFECTIVE_PROFILES}," == *",search,"* ]]; then check_vm_max_map_count; fi
   PROJECT_NAME_VALUE="${COMPOSE_PROJECT_NAME:-$(read_existing_project_name)}"
   export COMPOSE_PROJECT_NAME="${PROJECT_NAME_VALUE}"
 
