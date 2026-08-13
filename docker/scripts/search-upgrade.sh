@@ -90,14 +90,15 @@ check_vm_max_map_count() {
 
   # 两条路都取不到值：非标准内核，warn 但不阻断，避免误杀合法环境。
   if ! [[ "${current}" =~ ^[0-9]+$ ]]; then
-    printf '\033[33m[WARN]\033[0m 无法读取 vm.max_map_count，跳过预检（OpenSearch 仍要求 >= %s）\n' "${required}" >&2
+    printf '\033[33m[WARN]\033[0m Could not read vm.max_map_count — skipping the preflight (OpenSearch still requires >= %s).\n' "${required}" >&2
     return 0
   fi
 
   if (( current < required )); then
-    printf '  临时修复： sudo sysctl -w vm.max_map_count=%s\n' "${required}" >&2
-    printf "  永久生效： echo 'vm.max_map_count=%s' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system\n" "${required}" >&2
-    fail "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
+    printf '\033[31m[FAIL]\033[0m vm.max_map_count=%s is below the %s OpenSearch requires — the container will exit on startup.\n' "${current}" "${required}" >&2
+    printf '  Temporary fix: sudo sysctl -w vm.max_map_count=%s\n' "${required}" >&2
+    printf "  Persist it:    echo 'vm.max_map_count=%s' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system\n" "${required}" >&2
+    exit 1
   fi
   # 值达标：静默通过。
 }

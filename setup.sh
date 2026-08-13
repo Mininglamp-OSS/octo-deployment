@@ -194,14 +194,14 @@ check_vm_max_map_count() {
 
   # 两条路都取不到值：非标准内核，warn 但不阻断，避免误杀合法环境。
   if ! [[ "${current}" =~ ^[0-9]+$ ]]; then
-    warn "无法读取 vm.max_map_count，跳过预检（OpenSearch 仍要求 >= ${required}）"
+    warn "Could not read vm.max_map_count — skipping the preflight (OpenSearch still requires >= ${required})."
     return 0
   fi
 
   if (( current < required )); then
-    err "vm.max_map_count=${current} 低于 OpenSearch 要求的 ${required}，容器会启动即退出。"
-    err "  临时修复： sudo sysctl -w vm.max_map_count=${required}"
-    err "  永久生效： echo 'vm.max_map_count=${required}' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system"
+    err "vm.max_map_count=${current} is below the ${required} OpenSearch requires — the container will exit on startup."
+    err "  Temporary fix: sudo sysctl -w vm.max_map_count=${required}"
+    err "  Persist it:    echo 'vm.max_map_count=${required}' | sudo tee /etc/sysctl.d/99-opensearch.conf && sudo sysctl --system"
     exit 1
   fi
   # 值达标：静默通过。
@@ -705,8 +705,9 @@ search_profile_active() {
   if [[ -n "${COMPOSE_PROFILES+x}" ]]; then
     p="${COMPOSE_PROFILES}"
   elif [[ -r "${ENV_OUT}" ]]; then
-    p="$(grep -E '^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROFILES=' "${ENV_OUT}" 2>/dev/null | tail -1)"
-    p="${p#*COMPOSE_PROFILES=}"
+    p="$(grep -E '^[[:space:]]*(export[[:space:]]+)?COMPOSE_PROFILES[[:space:]]*=' "${ENV_OUT}" 2>/dev/null | tail -1 || true)"
+    p="${p#*=}"
+    p="${p#"${p%%[![:space:]]*}"}"          # 去掉 = 后前导空白，引号才能被下面 case 命中
     case "${p}" in
       \"*) p="${p#\"}"; p="${p%%\"*}" ;;    # 双引号：取到下一个引号为止，丢弃引号后的行内注释
       \'*) p="${p#\'}"; p="${p%%\'*}" ;;    # 单引号同理
