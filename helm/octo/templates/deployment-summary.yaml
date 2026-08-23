@@ -3,16 +3,6 @@
 {{- fail "secrets.llmApiKey must be set when summary.enabled=true" }}
 {{- end }}
 {{- $summaryV2Mode := include "octo.summary.agentSummaryV2Mode" . -}}
-{{- if eq $summaryV2Mode "on" }}
-{{- $summaryApiTag := .Values.summary.api.image.tag | toString -}}
-{{- $summaryWorkerTag := .Values.summary.worker.image.tag | toString -}}
-{{- if or (eq $summaryApiTag "1.2.1") (eq $summaryWorkerTag "1.2.1") -}}
-{{- fail "summary.config.agentSummaryV2Mode=on requires overriding both legacy 1.2.1 summary image tags with the same V2-capable release" -}}
-{{- end }}
-{{- if ne $summaryApiTag $summaryWorkerTag -}}
-{{- fail "summary.config.agentSummaryV2Mode=on requires identical summary.api.image.tag and summary.worker.image.tag values" -}}
-{{- end }}
-{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

@@ -32,8 +32,10 @@ off
 on
 {{- else if eq $mode "false" -}}
 off
-{{- else -}}
+{{- else if or (eq $mode "on") (eq $mode "off") (eq $mode "shadow") -}}
 {{- $mode -}}
+{{- else -}}
+{{- fail "summary.config.agentSummaryV2Mode must be one of: on, off, shadow" -}}
 {{- end -}}
 {{- end -}}
 

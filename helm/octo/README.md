@@ -53,7 +53,7 @@ server:
 To see all available options:
 
 ```bash
-helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.1
+helm show values oci://ghcr.io/mininglamp-oss/octo --version 0.3.3
 ```
 
 ### 2. Install
@@ -70,7 +70,7 @@ helm install octo ./helm/octo \
 For overseas users, omit `-f values-china.yaml` — defaults pull from Docker Hub.
 
 ```bash
-helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
+helm install octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.3 \
   --namespace octo --create-namespace \
   -f my-values.yaml \
   --set secrets.mysqlRootPassword="$(openssl rand -hex 16)" \
@@ -122,7 +122,7 @@ kubectl port-forward -n octo svc/octo-nginx 8080:80
 ## Upgrade
 
 ```bash
-helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.1 \
+helm upgrade octo oci://ghcr.io/mininglamp-oss/octo --version 0.3.3 \
   --namespace octo \
   --reuse-values \
   -f my-values.yaml
@@ -190,16 +190,15 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `server.config.support.emailPwd` | SMTP password (rendered into the Secret, never the ConfigMap) | `""` |
 | `server.config.logger.level` | Log level (0=off … 4=debug) | `2` |
 | `summary.enabled` | Enable Smart Summary (requires `secrets.llmApiKey`) | `false` |
-| `summary.config.agentSummaryV2Mode` | Agent-summary rollout mode shared by API/worker. Use quoted YAML strings `"on"`, `"off"`, or `"shadow"`. | `"on"` |
+| `summary.config.agentSummaryV2Mode` | Agent-summary rollout mode shared by API/worker. Use quoted YAML strings `"on"`, `"off"`, or `"shadow"`. | `"off"` |
 | `summary.config.summaryRepairMaxRounds` | Maximum bounded coverage-repair rounds shared by API/worker; `0` disables the gate. | `2` |
 
 > **Agent Summary V2 release gate:** the chart's current summary image tag `1.2.1`
-> predates this feature. Before using `"on"`, override both the API and worker
-> image tags with the same immutable release containing Agent Summary V2 and
-> migrations through `20260820-01` (`20260822-01` when output-truncation PR
-> #213 is included). The chart rejects `"on"` with the legacy `1.2.1` tags or
-> mismatched API/worker tags. Releases upgraded with `--reuse-values` and no
-> `summary.config` remain safely `"off"` until configured explicitly.
+> predates this feature. Keep the mode `"off"` until both the API and worker
+> image tags point to builds from the same immutable backend SHA containing
+> Agent Summary V2 and migrations through `20260820-01` (`20260822-01` when
+> output-truncation PR #213 is included), then flip the mode to `"on"` in the
+> same release change.
 
 ### Storage
 

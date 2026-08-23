@@ -420,9 +420,9 @@ summary:
   enabled: false
   config:
     # Quote "on"/"off" in YAML to avoid YAML 1.1 boolean coercion.
-    # Requires API and worker images from the same Agent Summary V2 release;
-    # rendering fails while either tag remains at the incompatible 1.2.1 default.
-    agentSummaryV2Mode: "on"
+    # Flip to "on" only in the release that also updates both image tags to
+    # builds from the same V2-capable backend SHA. The current 1.2.1 tags predate V2.
+    agentSummaryV2Mode: "off"
     # Bounded self-repair passes before the answer is frozen; 0 disables it.
     summaryRepairMaxRounds: 2
   api:

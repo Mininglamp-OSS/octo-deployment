@@ -173,6 +173,7 @@ jobs:
             --set secrets.matterDbPassword=ci-dummy
             --set secrets.summaryDbPassword=ci-dummy
             --set secrets.summaryReaderPassword=ci-dummy
+            --set secrets.llmApiKey=ci-dummy
             --set secrets.octoMasterKey=ci-dummy-master-key
             --set secrets.notifyInternalToken=ci-dummy
             --set secrets.wukongimManagerToken=ci-dummy
@@ -210,6 +211,19 @@ jobs:
               -summary \
               -output text < "$1"
           }
+
+          echo "::group::summary.enabled=true (safe rollout defaults render)"
+          helm template octo "${chart}" "${dummy_secrets[@]}" \
+            --set summary.enabled=true > "$tmp/summary.yaml"
+          validate "$tmp/summary.yaml"
+          summary_mode_count="$(awk '/name: AGENT_SUMMARY_V2_MODE/{getline; if ($0 ~ /value: "off"/) n++} END{print n+0}' "$tmp/summary.yaml")"
+          summary_repair_count="$(awk '/name: SUMMARY_REPAIR_MAX_ROUNDS/{getline; if ($0 ~ /value: "2"/) n++} END{print n+0}' "$tmp/summary.yaml")"
+          if [ "${summary_mode_count}" -ne 2 ] || [ "${summary_repair_count}" -ne 2 ]; then
+            echo "::error::expected API+worker summary rollout defaults off/2, got mode=${summary_mode_count} repair=${summary_repair_count}"
+            exit 1
+          fi
+          echo "OK: summary API and worker render safe rollout defaults off/2"
+          echo "::endgroup::"
 
           echo "::group::chart default (default-off: zero search resources)"
           # Render with NO search override so this exercises the chart's own
