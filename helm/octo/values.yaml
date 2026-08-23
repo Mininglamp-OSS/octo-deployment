@@ -419,9 +419,11 @@ matter:
 summary:
   enabled: false
   config:
-    # Production Agent summary path; set "off" only for emergency rollback.
+    # Quote "on"/"off" in YAML to avoid YAML 1.1 boolean coercion.
+    # Requires API and worker images from the same Agent Summary V2 release;
+    # the current 1.2.1 image tags predate this feature and must be overridden.
     agentSummaryV2Mode: "on"
-    # Bounded self-repair passes before the answer is frozen.
+    # Bounded self-repair passes before the answer is frozen; 0 disables it.
     summaryRepairMaxRounds: 2
   api:
     image:

@@ -9,6 +9,8 @@ data:
   LLM_MODEL: "claude-sonnet-4-6"
   LLM_MAX_TOKENS: "4096"
   LLM_TIMEOUT: "120"
+  # Requires API/worker images from the same V2-capable backend release.
+  # Restart both Deployments after changing ConfigMap-backed environment values.
   AGENT_SUMMARY_V2_MODE: "on"
   SUMMARY_REPAIR_MAX_ROUNDS: "2"
   API_PORT: "8080"

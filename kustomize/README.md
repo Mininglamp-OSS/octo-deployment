@@ -31,6 +31,11 @@ kubectl apply -n octo \
   -f octo-smart-summary-secret.yaml
 
 kubectl apply -n octo -k .
+
+# ConfigMap-backed environment changes require new pods.
+kubectl rollout restart -n octo \
+  deployment/octo-smart-summary-api \
+  deployment/octo-smart-summary-worker
 ```
 
 For environment-specific overrides:

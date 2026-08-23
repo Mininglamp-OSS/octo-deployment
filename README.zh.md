@@ -196,6 +196,11 @@ kubectl apply -n octo \
 
 # 3. apply ConfigMap + Workload
 kubectl apply -n octo -k .
+
+# ConfigMap 环境变量只在 Pod 启动时读取，变更后需滚动重启。
+kubectl rollout restart -n octo \
+  deployment/octo-smart-summary-api \
+  deployment/octo-smart-summary-worker
 ```
 
 环境差异化部署：

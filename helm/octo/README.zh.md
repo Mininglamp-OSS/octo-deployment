@@ -190,8 +190,13 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | `server.config.support.emailPwd` | SMTP 密码（自动渲染到 Secret，不会出现在 ConfigMap） | `""` |
 | `server.config.logger.level` | 日志级别（0=关闭 … 4=调试） | `2` |
 | `summary.enabled` | 启用 Smart Summary（要求设置 `secrets.llmApiKey`） | `false` |
-| `summary.config.agentSummaryV2Mode` | API/worker 共用的 Agent 总结灰度模式（生产默认 `on`，紧急回滚时设为 `off`） | `on` |
-| `summary.config.summaryRepairMaxRounds` | API/worker 共用的冻结答案前最大覆盖修复轮数 | `2` |
+| `summary.config.agentSummaryV2Mode` | API/worker 共用的 Agent 总结灰度模式；YAML 中请使用带引号的 `"on"`、`"off"` 或 `"shadow"`。 | `"on"` |
+| `summary.config.summaryRepairMaxRounds` | API/worker 共用的冻结答案前最大覆盖修复轮数；`0` 关闭门禁。 | `2` |
+
+> **Agent Summary V2 发布门禁：**Chart 当前固定的 summary 镜像 tag `1.2.1`
+> 早于本功能。启用 `"on"` 前，必须把 API 和 worker 同时覆盖为包含 Agent
+> Summary V2 的同一个不可变 release，并完成 `20260820-01` 迁移；若同版本包含
+> 输出截断 PR #213，则需完成到 `20260822-01`。
 
 常用 SMTP 配置示例：
 

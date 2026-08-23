@@ -190,8 +190,14 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `server.config.support.emailPwd` | SMTP password (rendered into the Secret, never the ConfigMap) | `""` |
 | `server.config.logger.level` | Log level (0=off … 4=debug) | `2` |
 | `summary.enabled` | Enable Smart Summary (requires `secrets.llmApiKey`) | `false` |
-| `summary.config.agentSummaryV2Mode` | Agent-summary rollout mode shared by API/worker (`on`; use `off` for emergency rollback) | `on` |
-| `summary.config.summaryRepairMaxRounds` | Maximum bounded coverage-repair rounds shared by API/worker | `2` |
+| `summary.config.agentSummaryV2Mode` | Agent-summary rollout mode shared by API/worker. Use quoted YAML strings `"on"`, `"off"`, or `"shadow"`. | `"on"` |
+| `summary.config.summaryRepairMaxRounds` | Maximum bounded coverage-repair rounds shared by API/worker; `0` disables the gate. | `2` |
+
+> **Agent Summary V2 release gate:** the chart's current summary image tag `1.2.1`
+> predates this feature. Before using `"on"`, override both the API and worker
+> image tags with the same immutable release containing Agent Summary V2 and
+> migrations through `20260820-01` (`20260822-01` when output-truncation PR
+> #213 is included).
 
 ### Storage
 

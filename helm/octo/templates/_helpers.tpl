@@ -19,6 +19,33 @@ Usage: include "octo.image" (dict "repo" .Values.foo.image.repository "tag" .Val
 {{- end -}}
 
 {{/*
+Agent Summary V2 rollout mode. Older releases upgraded with --reuse-values do
+not have summary.config, and YAML 1.1 may coerce bare on/off to booleans.
+Normalize both cases while preserving the explicit shadow mode.
+*/}}
+{{- define "octo.summary.agentSummaryV2Mode" -}}
+{{- $config := .Values.summary.config | default dict -}}
+{{- $mode := get $config "agentSummaryV2Mode" | toString | lower | trim -}}
+{{- if or (eq $mode "") (eq $mode "true") -}}
+on
+{{- else if eq $mode "false" -}}
+off
+{{- else -}}
+{{- $mode -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Preserve an explicit zero because it is the repair-gate kill switch. */}}
+{{- define "octo.summary.repairMaxRounds" -}}
+{{- $config := .Values.summary.config | default dict -}}
+{{- if hasKey $config "summaryRepairMaxRounds" -}}
+{{- get $config "summaryRepairMaxRounds" -}}
+{{- else -}}
+2
+{{- end -}}
+{{- end -}}
+
+{{/*
 imagePullSecrets block. Renders nothing when the list is empty.
 Indent the output to match the surrounding pod spec (typically nindent 6).
 */}}
