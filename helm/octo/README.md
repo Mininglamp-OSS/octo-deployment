@@ -190,6 +190,8 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 | `server.config.support.emailPwd` | SMTP password (rendered into the Secret, never the ConfigMap) | `""` |
 | `server.config.logger.level` | Log level (0=off … 4=debug) | `2` |
 | `summary.enabled` | Enable Smart Summary (requires `secrets.llmApiKey`) | `false` |
+| `summary.config.agentSummaryV2Mode` | Agent-summary rollout mode shared by API/worker (`on`; use `off` for emergency rollback) | `on` |
+| `summary.config.summaryRepairMaxRounds` | Maximum bounded coverage-repair rounds shared by API/worker | `2` |
 
 ### Storage
 

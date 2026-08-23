@@ -85,6 +85,10 @@ spec:
                   key: LLM_API_KEY
             - name: LLM_MODEL
               value: {{ .Values.llm.model | default "claude-sonnet-4-6" | quote }}
+            - name: AGENT_SUMMARY_V2_MODE
+              value: {{ .Values.summary.config.agentSummaryV2Mode | quote }}
+            - name: SUMMARY_REPAIR_MAX_ROUNDS
+              value: {{ .Values.summary.config.summaryRepairMaxRounds | quote }}
             - name: API_PORT
               value: "8080"
             - name: API_INTERNAL_PORT
@@ -197,6 +201,10 @@ spec:
                   key: LLM_API_KEY
             - name: LLM_MODEL
               value: {{ .Values.llm.model | default "claude-sonnet-4-6" | quote }}
+            - name: AGENT_SUMMARY_V2_MODE
+              value: {{ .Values.summary.config.agentSummaryV2Mode | quote }}
+            - name: SUMMARY_REPAIR_MAX_ROUNDS
+              value: {{ .Values.summary.config.summaryRepairMaxRounds | quote }}
             - name: WORKER_INTERNAL_PORT
               value: "8082"
             - name: WORKER_TRIGGER_URL

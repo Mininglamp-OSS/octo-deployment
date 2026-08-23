@@ -190,6 +190,8 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 | `server.config.support.emailPwd` | SMTP 密码（自动渲染到 Secret，不会出现在 ConfigMap） | `""` |
 | `server.config.logger.level` | 日志级别（0=关闭 … 4=调试） | `2` |
 | `summary.enabled` | 启用 Smart Summary（要求设置 `secrets.llmApiKey`） | `false` |
+| `summary.config.agentSummaryV2Mode` | API/worker 共用的 Agent 总结灰度模式（生产默认 `on`，紧急回滚时设为 `off`） | `on` |
+| `summary.config.summaryRepairMaxRounds` | API/worker 共用的冻结答案前最大覆盖修复轮数 | `2` |
 
 常用 SMTP 配置示例：
 

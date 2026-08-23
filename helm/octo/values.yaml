@@ -418,6 +418,11 @@ matter:
 # =============================================================================
 summary:
   enabled: false
+  config:
+    # Production Agent summary path; set "off" only for emergency rollback.
+    agentSummaryV2Mode: "on"
+    # Bounded self-repair passes before the answer is frozen.
+    summaryRepairMaxRounds: 2
   api:
     image:
       repository: mininglamposs/octo-smart-summary-api

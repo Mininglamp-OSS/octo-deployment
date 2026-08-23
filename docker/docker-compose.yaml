@@ -1112,6 +1112,10 @@ services:
       LLM_API_URL:  ${LLM_API_URL:-https://api.example.com/v1}
       LLM_API_KEY:  ${LLM_API_KEY:-}
       LLM_MODEL:    ${LLM_MODEL:-claude-sonnet-4-6}
+      # Agentic summary production path. `on` activates the frozen run/spec
+      # contract; repair rounds close coverage gaps before the final response.
+      AGENT_SUMMARY_V2_MODE: ${AGENT_SUMMARY_V2_MODE:-on}
+      SUMMARY_REPAIR_MAX_ROUNDS: ${SUMMARY_REPAIR_MAX_ROUNDS:-2}
       API_PORT:          "8080"
       API_INTERNAL_PORT: "8081"
       # Canonical worker trigger / callback paths (kustomize alignment).
@@ -1174,6 +1178,10 @@ services:
       # smart-summary features. See README "Validation" for the probe.
       LLM_API_KEY:  ${LLM_API_KEY:-changeme-set-real-llm-api-key-to-enable-summary}
       LLM_MODEL:    ${LLM_MODEL:-claude-sonnet-4-6}
+      # Keep API/worker rollout settings identical so either process can execute
+      # agentic summary stages without silently falling back to the legacy path.
+      AGENT_SUMMARY_V2_MODE: ${AGENT_SUMMARY_V2_MODE:-on}
+      SUMMARY_REPAIR_MAX_ROUNDS: ${SUMMARY_REPAIR_MAX_ROUNDS:-2}
       WORKER_INTERNAL_PORT:    "8082"
       WORKER_TRIGGER_URL:      http://summary-worker:8082/internal/worker-trigger
       WORKER_API_CALLBACK_URL: http://summary-api:8081/internal/task-event
