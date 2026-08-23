@@ -196,7 +196,9 @@ WebSocket 地址（`wss://`）和 MinIO 预签名 URL 的协议会自动从 `ext
 > **Agent Summary V2 发布门禁：**Chart 当前固定的 summary 镜像 tag `1.2.1`
 > 早于本功能。启用 `"on"` 前，必须把 API 和 worker 同时覆盖为包含 Agent
 > Summary V2 的同一个不可变 release，并完成 `20260820-01` 迁移；若同版本包含
-> 输出截断 PR #213，则需完成到 `20260822-01`。
+> 输出截断 PR #213，则需完成到 `20260822-01`。Chart 会拒绝 `"on"` 搭配旧
+> `1.2.1` tag 或 API/worker tag 不一致；使用 `--reuse-values` 且没有
+> `summary.config` 的旧 release 会安全保持 `"off"`，直到显式配置。
 
 常用 SMTP 配置示例：
 

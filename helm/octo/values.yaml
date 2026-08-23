@@ -421,7 +421,7 @@ summary:
   config:
     # Quote "on"/"off" in YAML to avoid YAML 1.1 boolean coercion.
     # Requires API and worker images from the same Agent Summary V2 release;
-    # the current 1.2.1 image tags predate this feature and must be overridden.
+    # rendering fails while either tag remains at the incompatible 1.2.1 default.
     agentSummaryV2Mode: "on"
     # Bounded self-repair passes before the answer is frozen; 0 disables it.
     summaryRepairMaxRounds: 2

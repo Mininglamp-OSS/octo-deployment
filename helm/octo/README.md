@@ -197,7 +197,9 @@ The WebSocket address (`wss://`) and MinIO presigned URL scheme are derived auto
 > predates this feature. Before using `"on"`, override both the API and worker
 > image tags with the same immutable release containing Agent Summary V2 and
 > migrations through `20260820-01` (`20260822-01` when output-truncation PR
-> #213 is included).
+> #213 is included). The chart rejects `"on"` with the legacy `1.2.1` tags or
+> mismatched API/worker tags. Releases upgraded with `--reuse-values` and no
+> `summary.config` remain safely `"off"` until configured explicitly.
 
 ### Storage
 

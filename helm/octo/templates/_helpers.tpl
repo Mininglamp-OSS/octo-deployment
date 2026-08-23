@@ -26,7 +26,9 @@ Normalize both cases while preserving the explicit shadow mode.
 {{- define "octo.summary.agentSummaryV2Mode" -}}
 {{- $config := .Values.summary.config | default dict -}}
 {{- $mode := get $config "agentSummaryV2Mode" | toString | lower | trim -}}
-{{- if or (eq $mode "") (eq $mode "true") -}}
+{{- if eq $mode "" -}}
+off
+{{- else if eq $mode "true" -}}
 on
 {{- else if eq $mode "false" -}}
 off
