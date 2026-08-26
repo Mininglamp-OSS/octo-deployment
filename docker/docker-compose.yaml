@@ -757,6 +757,10 @@ services:
       # deployment boots cleanly without these vars set.
       SPEECH_SERVICE_URL: ${SPEECH_SERVICE_URL:-}
       SPEECH_API_KEY:     ${SPEECH_API_KEY:-}
+      # Sub-zone (thread) feature. Defaults to true so new deployments have
+      # threads enabled out of the box. Set DM_THREAD_ON=false in .env to
+      # disable threads for environments that do not need them.
+      DM_THREAD_ON: ${DM_THREAD_ON:-true}
       # octo-docs-backend notification token wiring. Empty by default so a
       # non-docs deployment boots cleanly without this var set.
       OCTO_DOCS_NOTIFY_TOKEN: ${OCTO_DOCS_NOTIFY_TOKEN:-}
