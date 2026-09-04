@@ -372,7 +372,7 @@ Before enabling `docs.enabled=true`:
 
 ### Limitations
 
-- **MinIO required:** Cloud storage providers (tencentCOS, aliOSS, s3, qiniu) are not supported for docs attachments. The chart fails at render time if `docs.enabled=true` with non-MinIO storage.
+- **MinIO required:** The cloud storage provider (s3) is not supported for docs attachments. The chart fails at render time if `docs.enabled=true` with non-MinIO storage.
 - **Redis password not supported:** The octo-docs-backend image does not read `REDIS_PASSWORD`. The chart fails at render time if both `docs.enabled=true` and `secrets.redisPassword` are set. Use a Redis instance without password authentication for docs.
 
 ### Verify readiness
@@ -421,7 +421,7 @@ Before enabling `marketplace.enabled=true`:
 
 ### Limitations
 
-- **MinIO required:** Cloud storage providers (tencentCOS, aliOSS, s3, qiniu) are not supported for marketplace. The chart fails at render time if `marketplace.enabled=true` with non-MinIO storage.
+- **MinIO required:** The cloud storage provider (s3) is not supported for marketplace. The chart fails at render time if `marketplace.enabled=true` with non-MinIO storage.
 - **Redis password not supported:** The octo-marketplace image uses `REDIS_URL` without password authentication. The chart fails at render time if both `marketplace.enabled=true` and `secrets.redisPassword` are set. Use a Redis instance without password authentication for marketplace.
 
 ### Verify readiness

@@ -411,6 +411,20 @@ Use with: {{- if include "octo.isCloudStorage" . }}
 {{- end -}}
 
 {{/*
+Returns the effective fileService after remapping deprecated S3-compatible
+type names (tencentCOS/aliOSS) to "s3". Shared by secret / configmap /
+deployment so all three agree on which credential block to render.
+qiniu is intentionally NOT remapped: Qiniu Kodo is not S3-compatible, so it
+keeps its original value and fails validation in secret.yaml with a clear
+migration message rather than silently producing a broken s3 config.
+*/}}
+{{- define "octo.resolvedFileService" -}}
+{{- $fs := (.Values.server.config | default dict).fileService | default "minio" -}}
+{{- $legacyFS := dict "tencentCOS" "s3" "aliOSS" "s3" -}}
+{{- if hasKey $legacyFS $fs -}}{{- index $legacyFS $fs -}}{{- else -}}{{- $fs -}}{{- end -}}
+{{- end -}}
+
+{{/*
 TCR (Tencent Cloud Registry) image pull secret generator.
 Generates a base64-encoded dockerconfigjson for authenticating with TCR.
 Used by secret-registry.yaml to create the tcr-registry-key Secret.
