@@ -163,7 +163,10 @@ llm:
 #   AWS S3            s3.<region>.amazonaws.com             false
 #   Tencent COS       cos.<region>.myqcloud.com             false
 #   Aliyun OSS        s3.oss-<region>.aliyuncs.com          false
-#   MinIO (external)  <your-minio-host>:9000                true
+#
+# External MinIO does NOT belong here: the awsS3 driver is HTTPS-only, so a
+# plaintext :9000 endpoint renders fine but fails TLS on first upload. Use
+# fileService: minio + minio.enabled=false + externalMinio.endpoint instead.
 #
 # Migration (chart 0.4.0 — breaking): the top-level cos: / oss: blocks and the
 # qiniu fileService are removed. Existing tencentCOS / aliOSS releases must move
@@ -177,12 +180,11 @@ s3:
                       # AWS S3 example: s3.us-east-1.amazonaws.com
                       # COS example:   cos.ap-beijing.myqcloud.com
                       # OSS example:   s3.oss-cn-hangzhou.aliyuncs.com
-                      # MinIO example: minio.example.com:9000
   region: ""          # Required. e.g. us-east-1 / ap-beijing / cn-hangzhou
   bucket: ""          # Required.
   downloadURL: ""     # Optional CDN / public domain for download links.
   prefix: ""          # Optional path prefix for multi-env isolation.
-  usePathStyle: false # Set true for MinIO and other path-style stores.
+  usePathStyle: false # Set true for path-style S3 stores.
 
 # =============================================================================
 # MySQL
@@ -331,7 +333,7 @@ server:
 
     # File storage backend. Supported input values:
     #   minio  — bundled or external MinIO (see minio:/externalMinio:), default
-    #   s3     — AWS S3 / Tencent COS / Aliyun OSS / external MinIO
+    #   s3     — AWS S3 / Tencent COS / Aliyun OSS
     #            (see s3: block + secrets.s3AccessKeyId/SecretAccessKey)
     # When not "minio", set minio.enabled=false.
     # s3 is an input alias: it — along with the deprecated tencentCOS / aliOSS —
