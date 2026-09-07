@@ -411,16 +411,14 @@ Use with: {{- if include "octo.isCloudStorage" . }}
 {{- end -}}
 
 {{/*
-Returns the effective fileService after remapping deprecated S3-compatible
-type names (tencentCOS/aliOSS) to "s3". Shared by secret / configmap /
-deployment so all three agree on which credential block to render.
-qiniu is intentionally NOT remapped: Qiniu Kodo is not S3-compatible, so it
-keeps its original value and fails validation in secret.yaml with a clear
-migration message rather than silently producing a broken s3 config.
+把 fileService 归一到后端真正识别的 driver 名。后端只认 "awsS3"（octo-server
+modules/file/const.go），所以 S3 兼容的输入别名 s3/tencentCOS/aliOSS 统一解析成
+"awsS3"，secret/configmap/deployment 三处共用同一结果，保证选到同一凭证块。
+qiniu 不进重映射：Qiniu Kodo 已不再支持，保留原值以在 secret.yaml 命中明确 fail。
 */}}
 {{- define "octo.resolvedFileService" -}}
 {{- $fs := (.Values.server.config | default dict).fileService | default "minio" -}}
-{{- $legacyFS := dict "tencentCOS" "s3" "aliOSS" "s3" -}}
+{{- $legacyFS := dict "tencentCOS" "awsS3" "aliOSS" "awsS3" "s3" "awsS3" -}}
 {{- if hasKey $legacyFS $fs -}}{{- index $legacyFS $fs -}}{{- else -}}{{- $fs -}}{{- end -}}
 {{- end -}}
 

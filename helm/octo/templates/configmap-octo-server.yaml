@@ -39,11 +39,11 @@ data:
       downloadURL: ""
       accessKeyID: ""
       secretAccessKey: ""
-    {{- else if eq $resolvedFS "s3" }}
+    {{- else if eq $resolvedFS "awsS3" }}
     s3:
-      endpoint: {{ .Values.s3.endpoint | quote }}
-      region: {{ .Values.s3.region | quote }}
-      bucket: {{ .Values.s3.bucket | quote }}
+      endpoint: {{ required "s3.endpoint is required when fileService resolves to awsS3 (host only, e.g. s3.us-east-1.amazonaws.com)" .Values.s3.endpoint | quote }}
+      region: {{ required "s3.region is required when fileService resolves to awsS3" .Values.s3.region | quote }}
+      bucket: {{ required "s3.bucket is required when fileService resolves to awsS3" .Values.s3.bucket | quote }}
       downloadURL: {{ .Values.s3.downloadURL | default "" | quote }}
       prefix: {{ .Values.s3.prefix | default "" | quote }}
       usePathStyle: {{ .Values.s3.usePathStyle | default false }}

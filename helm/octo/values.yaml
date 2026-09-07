@@ -132,8 +132,8 @@ secrets:
   webhookSecretKey: ""
 
   # ── Cloud storage credentials ───────────────────────────────────────────────
-  # Required only when server.config.fileService=s3.
-  # s3 covers AWS S3 / Tencent COS / Aliyun OSS / external MinIO.
+  # Required when server.config.fileService resolves to awsS3
+  # (input values: s3 / tencentCOS / aliOSS — all S3-compatible).
   s3AccessKeyId: ""
   s3SecretAccessKey: ""
   s3SessionToken: ""   # Optional — STS temporary credential
@@ -152,14 +152,15 @@ llm:
   model: "claude-sonnet-4-6"
 
 # =============================================================================
-# Cloud object storage — used when server.config.fileService = "s3".
+# Cloud object storage — used when server.config.fileService resolves to awsS3.
 # Set minio.enabled=false when using an external storage provider.
 #
-# "s3" covers all S3-compatible stores. Pick endpoint + usePathStyle per provider:
+# Input aliases s3 / tencentCOS / aliOSS are all resolved to the backend driver
+# name "awsS3". Pick endpoint + usePathStyle per provider:
 #
 #   Provider          endpoint                              usePathStyle
 #   ────────────────  ────────────────────────────────────  ────────────
-#   AWS S3            (leave empty)                         false
+#   AWS S3            s3.<region>.amazonaws.com             false
 #   Tencent COS       cos.<region>.myqcloud.com             false
 #   Aliyun OSS        oss-<region>.aliyuncs.com             false
 #   MinIO (external)  <your-minio-host>:9000                true
@@ -169,7 +170,8 @@ llm:
 # move to secrets.s3AccessKeyId / s3SecretAccessKey. Qiniu is no longer supported.
 # =============================================================================
 s3:
-  endpoint: ""        # Host only, no scheme. Leave empty for AWS S3.
+  endpoint: ""        # Required. Host only, no scheme.
+                      # AWS S3 example: s3.us-east-1.amazonaws.com
                       # COS example:   cos.ap-beijing.myqcloud.com
                       # OSS example:   oss-cn-hangzhou.aliyuncs.com
                       # MinIO example: minio.example.com:9000
@@ -324,13 +326,14 @@ server:
     # Test-only SMS verification code bypass. Ignored in release mode.
     smsCode: ""
 
-    # File storage backend. Supported values:
+    # File storage backend. Supported input values:
     #   minio  — bundled or external MinIO (see minio:/externalMinio:), default
     #   s3     — AWS S3 / Tencent COS / Aliyun OSS / external MinIO
     #            (see s3: block + secrets.s3AccessKeyId/SecretAccessKey)
-    # When set to "s3", set minio.enabled=false.
-    # Legacy values tencentCOS / aliOSS are accepted but deprecated; they are
-    # internally remapped to "s3" (move cos:/oss: values into s3: accordingly).
+    # When not "minio", set minio.enabled=false.
+    # s3 is an input alias: it — along with the deprecated tencentCOS / aliOSS —
+    # is internally resolved to the backend driver name "awsS3" (move cos:/oss:
+    # values into the s3: block accordingly).
     # qiniu is no longer supported and fails at render time.
     fileService: "minio"
 

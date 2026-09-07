@@ -180,26 +180,22 @@ spec:
                   name: {{ include "octo.secretName" . }}
                   key: OCTO_MINIO_APP_PASSWORD
             {{- else }}
-            {{- /* Reached only for s3: legacy tencentCOS/aliOSS are remapped to s3 by
-                   octo.resolvedFileService, and qiniu / invalid values already fail in secret.yaml. */}}
-            - name: S3_ENDPOINT
-              value: {{ .Values.s3.endpoint | quote }}
-            - name: S3_BUCKET
-              value: {{ .Values.s3.bucket | quote }}
-            - name: S3_REGION
-              value: {{ .Values.s3.region | quote }}
-            - name: S3_ACCESS_KEY_ID
+            {{- /* 只有 awsS3 会走到这里：s3/tencentCOS/aliOSS 都被 octo.resolvedFileService
+                   归一成 awsS3，qiniu 与非法值已在 secret.yaml fail。env 必须带 TS_ 前缀，
+                   否则后端 viper（SetEnvPrefix("TS")）读不到；endpoint/region/bucket 由
+                   configmap 的 config 文件提供，无需再走 env。 */}}
+            - name: TS_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: S3_ACCESS_KEY_ID
-            - name: S3_SECRET_ACCESS_KEY
+            - name: TS_S3_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}
                   key: S3_SECRET_ACCESS_KEY
             {{- if .Values.secrets.s3SessionToken }}
-            - name: S3_SESSION_TOKEN
+            - name: TS_S3_SESSION_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "octo.secretName" . }}

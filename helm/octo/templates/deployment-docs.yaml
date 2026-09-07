@@ -1,6 +1,6 @@
 {{- if .Values.docs.enabled }}
 {{- if include "octo.isCloudStorage" . }}
-{{- fail "docs.enabled=true requires MinIO storage (server.config.fileService=minio). Cloud storage providers (tencentCOS, aliOSS, s3, qiniu) are not supported for docs attachments." }}
+{{- fail "docs.enabled=true requires MinIO storage (server.config.fileService=minio). Any non-MinIO storage backend is not supported for docs attachments." }}
 {{- end }}
 {{- if .Values.secrets.redisPassword }}
 {{- fail "docs.enabled=true is incompatible with secrets.redisPassword. The octo-docs-backend image does not support Redis authentication. Either disable docs or use a Redis instance without password authentication." }}

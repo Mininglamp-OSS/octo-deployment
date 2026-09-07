@@ -1,6 +1,6 @@
 {{- if .Values.marketplace.enabled }}
 {{- if include "octo.isCloudStorage" . }}
-{{- fail "marketplace.enabled=true requires MinIO storage (server.config.fileService=minio). Cloud storage providers (tencentCOS, aliOSS, s3, qiniu) are not supported for marketplace." }}
+{{- fail "marketplace.enabled=true requires MinIO storage (server.config.fileService=minio). Any non-MinIO storage backend is not supported for marketplace." }}
 {{- end }}
 {{- if .Values.secrets.redisPassword }}
 {{- fail "marketplace.enabled=true is incompatible with secrets.redisPassword. The octo-marketplace image uses REDIS_URL without password authentication. Either disable marketplace or use a Redis instance without password authentication." }}

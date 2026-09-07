@@ -372,7 +372,7 @@ docs:
 
 ### 限制
 
-- **必须使用 MinIO：** 云存储提供商（s3）不支持 docs 附件存储。当 `docs.enabled=true` 且使用非 MinIO 存储时，chart 在渲染时报错。
+- **必须使用 MinIO：** 非 MinIO 存储后端（输入 `s3`，解析为 `awsS3`）不支持 docs 附件存储。当 `docs.enabled=true` 且使用非 MinIO 存储时，chart 在渲染时报错。
 - **Redis 密码不支持：** octo-docs-backend 镜像不读取 `REDIS_PASSWORD`。当 `docs.enabled=true` 和 `secrets.redisPassword` 同时设置时，chart 在渲染时报错。请使用无密码认证的 Redis 实例。
 
 ### 验证就绪
@@ -421,7 +421,7 @@ marketplace:
 
 ### 限制
 
-- **必须使用 MinIO：** 云存储提供商（s3）不支持 marketplace。当 `marketplace.enabled=true` 且使用非 MinIO 存储时，chart 在渲染时报错。
+- **必须使用 MinIO：** 非 MinIO 存储后端（输入 `s3`，解析为 `awsS3`）不支持 marketplace。当 `marketplace.enabled=true` 且使用非 MinIO 存储时，chart 在渲染时报错。
 - **Redis 密码不支持：** octo-marketplace 镜像使用 `REDIS_URL` 但不支持密码认证。当 `marketplace.enabled=true` 和 `secrets.redisPassword` 同时设置时，chart 在渲染时报错。请使用无密码认证的 Redis 实例。
 
 ### 验证就绪
