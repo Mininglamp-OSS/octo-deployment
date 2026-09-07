@@ -202,8 +202,6 @@ spec:
                   key: S3_SESSION_TOKEN
             {{- end }}
             {{- end }}
-            - name: FILE_SERVICE
-              value: {{ include "octo.resolvedFileService" . | quote }}
             - name: OCTO_WUKONGIM_MANAGER_TOKEN
               valueFrom:
                 secretKeyRef:

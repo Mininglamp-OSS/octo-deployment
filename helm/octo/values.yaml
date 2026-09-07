@@ -37,7 +37,7 @@ tcrImageCredentials:
   password: ""
 
 # CloudApp runtime CAM role. Reserved for Tencent Cloud API calls implemented
-# by the application; COS currently uses secrets.cosSecretId/cosSecretKey.
+# by the application.
 CAM_ROLE: ""
 
 # Busybox image used by all init containers (wait-for-* probes).
@@ -162,20 +162,23 @@ llm:
 #   ────────────────  ────────────────────────────────────  ────────────
 #   AWS S3            s3.<region>.amazonaws.com             false
 #   Tencent COS       cos.<region>.myqcloud.com             false
-#   Aliyun OSS        oss-<region>.aliyuncs.com             false
+#   Aliyun OSS        s3.oss-<region>.aliyuncs.com          false
 #   MinIO (external)  <your-minio-host>:9000                true
 #
-# Migration: users on the deprecated tencentCOS / aliOSS types should move their
-# old cos.* / oss.* values here and set server.config.fileService=s3. Credentials
-# move to secrets.s3AccessKeyId / s3SecretAccessKey. Qiniu is no longer supported.
+# Migration (chart 0.4.0 — breaking): the top-level cos: / oss: blocks and the
+# qiniu fileService are removed. Existing tencentCOS / aliOSS releases must move
+# old cos.* / oss.* values into this s3: block and set fileService=s3 before
+# `helm upgrade`; credentials move to secrets.s3AccessKeyId / s3SecretAccessKey.
+# Until migrated, render fails fast (no silent fallback). Qiniu has no successor
+# here — switch to an S3-compatible endpoint or minio.
 # =============================================================================
 s3:
   endpoint: ""        # Required. Host only, no scheme.
                       # AWS S3 example: s3.us-east-1.amazonaws.com
                       # COS example:   cos.ap-beijing.myqcloud.com
-                      # OSS example:   oss-cn-hangzhou.aliyuncs.com
+                      # OSS example:   s3.oss-cn-hangzhou.aliyuncs.com
                       # MinIO example: minio.example.com:9000
-  region: ""          # e.g. us-east-1 / ap-beijing / cn-hangzhou
+  region: ""          # Required. e.g. us-east-1 / ap-beijing / cn-hangzhou
   bucket: ""          # Required.
   downloadURL: ""     # Optional CDN / public domain for download links.
   prefix: ""          # Optional path prefix for multi-env isolation.
