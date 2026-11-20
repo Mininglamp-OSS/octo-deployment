@@ -90,7 +90,7 @@ docker ps --filter 'name=octo' --format '{{.Names}}'
 - Docker daemon 在跑，调用用户能直接 `docker info`（不需要 `sudo`）。
 - **客户端流量只需要一个 TCP 端口对外开**：`28080`（nginx HTTP，`OCTO_HTTP_PORT`）。启用 HTTPS 后客户端端口变成 `28443`（`OCTO_HTTPS_PORT`）。其他所有端口（MinIO、MySQL、Redis、WuKongIM monitor、各服务直连 REST，以及 web/admin/WuKongIM API·TCP·WS）默认 loopback。WuKongIM 原生 chat 传输端口 `25100`（TCP）/ `25200`（WS）只在**原生 chat 客户端直连 WuKongIM** 时才需外露（覆盖 `OCTO_WK_TCP_BIND` / `OCTO_WK_WS_BIND`）；浏览器/SPA 的 chat 流量走 nginx `/ws`。WuKongIM 管理 API `25001` 是 admin / debug 接口（不是 chat 传输），任何客户端形态下都建议保持 loopback——见下面的网络端面表。
 - ≥ 4 GiB RAM，≥ 10 GiB 空闲磁盘给 named volume。
-- 出口网络能到 `docker.io`（或配置好的 mirror）拉镜像：`mininglamposs/*`、`mysql:8`、`redis:7-alpine`、`minio/minio`、`wukongim/wukongim`、`nginx:1.27-alpine`。
+- 出口网络能到 `docker.io`（或配置好的 mirror）拉镜像：`mininglamposs/*`、`mysql:8`、`redis:7-alpine`、`minio/minio`、`wukongim/wukongim`、`nginx:1.30.7-alpine`。
 - **本机已经跑着另一份 OCTO 栈：** 先看上面那段前置警告，决定一个非默认的 `COMPOSE_PROJECT_NAME` 再继续。
 
 推荐（交互式）：
