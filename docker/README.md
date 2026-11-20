@@ -169,7 +169,7 @@ mean to do this on this host?" gate.
 - ≥ 4 GiB RAM, ≥ 10 GiB free disk for the named volumes.
 - Outbound network access to `docker.io` (or a configured mirror) for
   pulling the `mininglamposs/*`, `mysql:8`, `redis:7-alpine`,
-  `minio/minio`, `wukongim/wukongim`, and `nginx:1.27-alpine` images.
+  `minio/minio`, `wukongim/wukongim`, and `nginx:1.30.7-alpine` images.
 - **If another OCTO stack already runs on this host:** read the
   pre-flight section above and decide on a non-default
   `COMPOSE_PROJECT_NAME` before continuing.
